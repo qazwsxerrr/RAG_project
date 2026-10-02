@@ -7,10 +7,14 @@
 
 import logging
 from typing import Optional
-from psycopg_pool import AsyncConnectionPool
+try:
+    from psycopg_pool import AsyncConnectionPool
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+except ImportError:
+    AsyncConnectionPool = None
+    AsyncPostgresSaver = None
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.checkpoint.memory import MemorySaver
 
 from rag_kb.core.config import settings
