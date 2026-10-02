@@ -20,7 +20,7 @@ COPY backend/ /app/backend/
 # 创建解析产物本地工作区
 RUN mkdir -p /app/data/parsed
 
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app/backend/src:/app
 
 EXPOSE 8000
 

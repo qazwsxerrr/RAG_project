@@ -37,6 +37,9 @@ export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  reasoning_content?: string;
+  isReasoning?: boolean;
+  reasoning_ms?: number;
   thinking?: ThinkingProcess;
   citations?: CitationSource[];
   timestamp: number;

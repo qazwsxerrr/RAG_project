@@ -28,6 +28,7 @@ export const retrievalApi = {
     callbacks: {
       onThinking?: (thinking: ThinkingProcess) => void;
       onCitations?: (citations: CitationSource[]) => void;
+      onReasoning?: (token: string) => void;
       onMessage?: (token: string) => void;
       onDone?: (meta: { total_overall_ms: number; total_retrieve_ms: number }) => void;
       onError?: (error: Error) => void;
@@ -86,6 +87,10 @@ export const retrievalApi = {
                 callbacks.onThinking?.(data);
               } else if (currentEvent === 'citations') {
                 callbacks.onCitations?.(data);
+              } else if (currentEvent === 'reasoning') {
+                if (data.content) {
+                  callbacks.onReasoning?.(data.content);
+                }
               } else if (currentEvent === 'message') {
                 if (data.content) {
                   callbacks.onMessage?.(data.content);

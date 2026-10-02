@@ -192,18 +192,23 @@ export const useChatStore = defineStore('chat', () => {
               assistantMessage.citations = citations;
             }
           },
+          onReasoning: (token: string) => {
+            const target = session.messages.find((m) => m.id === assistantMsgId);
+            const t = target || assistantMessage;
+            t.reasoning_content = (t.reasoning_content || '') + token;
+            t.isReasoning = true;
+          },
           onMessage: (token: string) => {
             const target = session.messages.find((m) => m.id === assistantMsgId);
-            if (target) {
-              target.content += token;
-            } else {
-              assistantMessage.content += token;
-            }
+            const t = target || assistantMessage;
+            t.isReasoning = false;
+            t.content += token;
           },
           onDone: (meta) => {
             const target = session.messages.find((m) => m.id === assistantMsgId);
             const t = target || assistantMessage;
             t.isStreaming = false;
+            t.isReasoning = false;
             if (t.thinking) {
               t.thinking.total_overall_ms = meta.total_overall_ms;
             }
@@ -215,6 +220,7 @@ export const useChatStore = defineStore('chat', () => {
             const target = session.messages.find((m) => m.id === assistantMsgId);
             const t = target || assistantMessage;
             t.isStreaming = false;
+            t.isReasoning = false;
             t.error = err.message;
             isGenerating.value = false;
             persistSessions();

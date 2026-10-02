@@ -12,63 +12,41 @@
 .
 ├── .env.example                   # 生产环境变量配置模板 (通用 API_KEY / BASE_URL 规范)
 ├── README.md                      # 项目快速启动与运行指南
+├── pyproject.toml                 # 现代化 Python 构建配置
+├── requirements.txt               # 生产环境依赖清单 (严格排除臃肿 PyTorch 本地大包)
+├── start.sh / start.bat           # 一键启动脚本
 │
-├── backend/                       # Python 异步高性能后端工程 (FastAPI + Pydantic v2)
+├── backend/                       # Python 异步高性能后端工程 (FastAPI + LangGraph)
 │   ├── Dockerfile                 # 后端生产环境镜像构建文件
-│   ├── requirements.txt           # 生产环境依赖清单 (严格排除臃肿 PyTorch 本地大包)
-│   └── app/
-│       ├── main.py                # FastAPI 应用程序入口与 CORS 中间件
-│       ├── api/v1/                # RESTful 业务路由接口层
-│       │   ├── documents.py       # 文档上传接入、列表查询与组织架构权限管理
-│       │   ├── pipeline.py        # 11 节点流水线生命周期控制与断点重试触发
-│       │   └── retrieval.py       # 8 阶段漏斗检索调度与 SSE 多路复用流式问答总线
-│       ├── core/                  # 基础设施配置与底层驱动
-│       │   ├── config.py          # 全局配置驱动管理与模型统一映射
-│       │   ├── database.py        # PostgreSQL 16 + pgvector 异步连接池
-│       │   ├── init_db.py         # 向量扩展、数据表结构及初始部门树自动化初始化脚本
-│       │   └── oss.py             # 阿里云 OSS 真实对象存储客户端
-│       ├── models/                # SQLAlchemy ORM 数据库实体层
-│       │   ├── chunk.py           # 切片实体 (承载三路混合向量特征、BBox坐标与页码)
-│       │   └── document.py        # 文档主表实体 (权限隔离树、哈希防重与 11 节点执行快照)
-│       ├── schemas/               # Pydantic v2 强类型请求与响应契约
-│       │   ├── document.py        # 文档元数据模型
-│       │   ├── pipeline.py        # 流水线阶段状态模型
-│       │   └── retrieval.py       # 问答、思考看板 (ThinkingProcess) 与溯源卡片模型
-│       └── services/              # 核心业务领域服务层
-│           ├── mcp/               # FastMCP 跨平台标准化智能体协议适配
-│           │   ├── server.py      # 标准 MCP Server 实例与启动入口
-│           │   └── tools_rag.py   # RAG 检索能力工具化封装
-│           ├── parser/            # MinerU 高精版面分析与多模态提炼
-│           │   ├── code_flowchart_service.py # 代码块与 Mermaid 流程图状态机保护
-│           │   ├── mineru_adapter.py         # MinerU 云端 API 适配器与 OCR 版面分析
-│           │   ├── table_service.py          # 复杂表格抽取、格式清洗与跨页拼接
-│           │   └── vlm_service.py            # VLM 多模态大模型配图语义理解
-│           ├── pipeline/          # 11 节点入库流水线编排引擎
-│           │   ├── chunker.py     # Markdown 两阶段切分与 Breadcrumb 标题链继承
-│           │   ├── dedup_service.py          # 标题语义向量防重校验
-│           │   ├── state_machine.py          # 流水线状态机、日志事件广播与断点快照
-│           │   ├── steps.py       # 11 节点具体执行逻辑
-│           │   └── update_service.py         # 先增后删版本平滑演进服务
-│           └── retrieval/         # 在线 8 阶段多漏斗检索引擎
-│               ├── embedding_service.py      # BGE-M3 1024 维稠密特征提取
-│               ├── hyde_service.py           # HyDE 假想技术解答生成与熔断器
-│               ├── mmr_filter.py             # MMR 最大边际相关性贪心去重 (lambda=0.7)
-│               ├── multi_retriever.py        # 稠密(HNSW)+倒排(TSVector)+稀疏内积三路并行召回
-│               ├── preprocessor.py           # 多轮历史指代消除改写与特征生成
-│               ├── rerank_service.py         # BGE-Reranker-v2 交叉注意力深度精排
-│               ├── rrf_fusion.py             # 场景化加权倒数排名动态融合
-│               └── vector_utils.py           # 稀疏向量归一化处理工具
-│
-└── frontend/                      # Vue 3 现代化工控交互前端工程 (Vite + Tailwind CSS + Pinia)
-    ├── package.json               # 前端工程与依赖描述
+│   ├── requirements.txt           # 生产环境依赖清单
+│   ├── app/
+│   │   └── main.py                # 容器与既有服务无缝适配层
+│   └── src/
+│       ├── rag_kb/                # 知识库管理、入库图编排与资产持久化
+│       │   ├── api/               # 现代化 RESTful 业务路由
+│       │   ├── core/              # 配置驱动、数据库连接与阿里云 OSS 客户端
+│       │   ├── db/                # SQLAlchemy ORM 数据库实体层 (pgvector + BM25)
+│       │   ├── graph/             # 基于 LangGraph 的 11 节点多模态入库图编排引擎
+│       │   ├── nodes/             # 入库图原子计算节点 (MinerU解析/VLM/表格/分块/向量化)
+│       │   └── services/          # 知识库服务支撑层
+│       └── rag_search/            # 基于 LangGraph 的多阶段检索与生成图引擎
+│           ├── answer.py          # 流式生成与角标溯源
+│           ├── build.py           # 检索计算图构建器
+│           ├── fusion.py          # RRF 倒数融合 (Dense+Sparse+BM25+HyDE)
+│           ├── mmr.py             # MMR 最大边际相关性去重
+│           ├── nodes.py           # 检索图原子计算节点
+│           ├── rerank.py          # BGE-Reranker-Large 交叉编码深度精排
+│           └── state.py           # 检索状态定义 (SearchState)
+└── frontend/                      # 现代化 Vue 3 + TS + Vite 前端工程
+    ├── package.json               # 前端工程与依赖描述 (集成 mermaid, markdown-it 等)
     ├── vite.config.ts             # Vite 构建与开发反代配置
     ├── tailwind.config.js         # Tailwind CSS 主题配置
     └── src/
         ├── App.vue                # 布局主框架 (常驻侧边栏与会话切换)
         ├── api/                   # 前后端通信客户端 (含 原生 Fetch SSE 长连接解析)
         ├── components/
-        │   ├── documents/         # 11 节点流转看板、切片树弹窗与人机审核工作台
-        │   └── retrieval/         # 思考流看板、流式气泡渲染与 PDF 原文高亮溯源弹窗
+        │   ├── documents/         # 11 节点流转看板、切片多模态资产详情(Mermaid/Table/Image)、人机审核工作台
+        │   └── retrieval/         # 动态思维链、流式气泡渲染与 PDF 原文高亮溯源弹窗
         ├── stores/                # Pinia 响应式状态管理 (文档/会话/生成状态机)
         ├── types/                 # TypeScript 强类型接口契约
         └── views/                 # 核心功能页面 (文档列表 / 提交入库 / 智能问答)
