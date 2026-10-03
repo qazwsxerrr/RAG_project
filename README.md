@@ -14,7 +14,6 @@
 ├── README.md                      # 项目快速启动与运行指南
 ├── pyproject.toml                 # 现代化 Python 构建配置
 ├── requirements.txt               # 生产环境依赖清单 (严格排除臃肿 PyTorch 本地大包)
-├── start.sh / start.bat           # 一键启动脚本
 │
 ├── backend/                       # Python 异步高性能后端工程 (FastAPI + LangGraph)
 │   ├── Dockerfile                 # 后端生产环境镜像构建文件
