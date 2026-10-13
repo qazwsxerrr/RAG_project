@@ -3,18 +3,12 @@ import time
 import base64
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from openai import (
-    OpenAI,
-    AuthenticationError,
-    PermissionDeniedError,
-    NotFoundError,
-    BadRequestError,
-    RateLimitError,
-    APIConnectionError,
-    APITimeoutError,
-    InternalServerError,
-)
+import logging
+from openai import OpenAI
 from rag_kb.core.config import settings
+from rag_kb.core.llm import llm_gateway
+
+logger = logging.getLogger(__name__)
 
 class MultimodalVLMService:
     """
@@ -67,72 +61,34 @@ class MultimodalVLMService:
 
     def _call_chat_completion(
         self,
-        client: OpenAI,
+        client: Any,
         messages: List[Dict[str, Any]],
         max_tokens: int = 800,
         temperature: float = 0.1,
         action_name: str = "多模态视觉 API"
     ) -> str:
         """
-        统一模型调用执行引擎：
-        - 遇 401 (凭据无效)、403 (权限不足)、404 (模型未找到)、400 (参数非法) 致命错误立即中断 (Fail-Fast)，绝不重试；
-        - 仅在网络连接抖动、超时、429 并发限流或 5xx 临时服务端故障时执行 3 次指数退避重试 (1s -> 2s -> 4s)；
-        - 彻底消除针对不可恢复凭据错误的虚假循环等待与误导性报错。
+        统一通过全局大模型网关 llm_gateway.chat_sync 执行多模态图文调用：
+        - 自动享受共享连接池与长连接保持；
+        - 遇到 401/403/404/400 立即 Fail-Fast，绝不盲目重试；
+        - 遇到网络抖动、超时、429 并发限流或 5xx 故障时自动执行 3 次指数退避重试；
+        - 彻底消除手写循环与不可恢复凭据错误的虚假循环等待。
         """
-        max_attempts = 3
-        last_error = None
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    timeout=45.0,
-                )
-                choice_msg = response.choices[0].message
-                content = choice_msg.content or getattr(choice_msg, "reasoning_content", None)
-                if not content or not str(content).strip():
-                    raise ValueError(f"【{action_name}错误】: 模型返回内容为空！")
-                return str(content).strip()
-            except Exception as e:
-                last_error = e
-                status_code = getattr(e, "status_code", None)
-
-                # 1. 致命凭据与权限错误：Fail-Fast 立即中断，绝不重试！
-                if isinstance(e, AuthenticationError) or status_code == 401:
-                    raise RuntimeError(f"【{action_name}凭据无效】API Key 鉴权失败 (HTTP 401): {e}，请检查 .env 中的 API_KEY 配置！") from e
-
-                if isinstance(e, PermissionDeniedError) or status_code == 403:
-                    raise RuntimeError(f"【{action_name}权限不足】无权访问该模型或 API 资源 (HTTP 403): {e}") from e
-
-                if isinstance(e, NotFoundError) or status_code == 404:
-                    raise RuntimeError(f"【{action_name}模型未找到】请求的模型不存在或路径错误 (HTTP 404): {e}") from e
-
-                if isinstance(e, BadRequestError) or status_code == 400:
-                    raise RuntimeError(f"【{action_name}请求参数非法】(HTTP 400): {e}") from e
-
-                # 2. 判断是否属于可恢复的临时故障（网络抖动、429限流、5xx服务端故障、模型空返回）
-                is_transient = (
-                    isinstance(e, (APIConnectionError, APITimeoutError, RateLimitError, InternalServerError, ValueError))
-                    or status_code in [429, 500, 502, 503, 504]
-                    or isinstance(e, (TimeoutError, ConnectionResetError))
-                )
-
-                if not is_transient:
-                    # 非瞬态或未知异常，直接抛出
-                    raise RuntimeError(f"【{action_name}调用失败】: {e}") from e
-
-                # 3. 瞬态故障：执行真正的 3 次指数退避 (1s -> 2s -> 4s)
-                if attempt < max_attempts:
-                    backoff_delay = 2 ** (attempt - 1)
-                    time.sleep(backoff_delay)
-                    continue
-
-                raise RuntimeError(
-                    f"【{action_name}调用失败】(已尝试 {max_attempts} 次指数退避): {last_error}"
-                ) from last_error
+        try:
+            content = llm_gateway.chat_sync(
+                messages=messages,
+                model=self.model,
+                base_url=self.base_url,
+                api_key=self.api_key,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            if not content or not str(content).strip():
+                raise ValueError(f"【{action_name}错误】: 模型返回内容为空！")
+            return str(content).strip()
+        except Exception as e:
+            logger.error(f"【{action_name}执行异常】: {e}")
+            raise
 
 
     def describe_image(self, image_url_or_path: str, context: Dict[str, Any]) -> str:

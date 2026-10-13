@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from rag_kb.core.config import settings
+from rag_kb.core.llm import llm_gateway
 from rag_kb.utils.embedding import embedding_service
 from rag_search.channels import dense
 
@@ -20,14 +21,7 @@ logger = logging.getLogger(__name__)
 NAME = "hyde"
 
 async def generate_hypothetical_document(query: str, timeout_seconds: float = 90.0) -> str:
-    """调用大模型生成 150~250 字假想技术解答"""
-    api_key = settings.active_llm_api_key
-    base_url = settings.active_llm_base_url.rstrip("/")
-    model_name = settings.active_llm_model
-
-    if not api_key:
-        raise RuntimeError("【HyDE 错误】未配置大模型 API_KEY！")
-
+    """调用大模型网关生成 150~250 字假想技术解答"""
     system_prompt = (
         "你是一名资深的技术架构师与专业知识库解答顾问。请针对用户提出的问题，直接撰写一段 150~250 字的专业、严谨的技术假想解答文档。"
         "该假想解答用于高维向量空间特征匹配，请包含核心术语、技术要点和关键概念。\n"
@@ -36,45 +30,17 @@ async def generate_hypothetical_document(query: str, timeout_seconds: float = 90
         "2. 字数严格控制在 150~250 字之间。"
     )
 
-    endpoint = f"{base_url}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": model_name,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"问题：{query.strip()}"}
-        ],
-        "temperature": 0.3,
-        "max_tokens": 300,
-        "stream": True
-    }
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"问题：{query.strip()}"}
+    ]
 
-    tokens: List[str] = []
-    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-        async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
-            if resp.status_code != 200:
-                err_bytes = await resp.aread()
-                raise RuntimeError(f"【HyDE 生成失败】HTTP {resp.status_code}: {err_bytes.decode(errors='ignore')}")
-            async for line in resp.aiter_lines():
-                line = line.strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                raw = line[5:].strip()
-                if raw == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(raw)
-                    delta = chunk["choices"][0].get("delta", {})
-                    c = delta.get("content")
-                    if c:
-                        tokens.append(c)
-                except Exception:
-                    continue
-
-    return "".join(tokens).strip()
+    doc = await llm_gateway.chat(
+        messages=messages,
+        temperature=0.3,
+        max_tokens=300
+    )
+    return doc.strip()
 
 async def search(
     session: AsyncSession,

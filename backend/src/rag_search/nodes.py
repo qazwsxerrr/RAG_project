@@ -13,6 +13,7 @@ from langgraph.types import StreamWriter
 from langchain_core.runnables import RunnableConfig
 
 from rag_kb.core.config import settings
+from rag_kb.core.llm import llm_gateway
 from rag_kb.db.session import AsyncSessionLocal
 from rag_kb.utils.embedding import embedding_service
 from rag_kb.utils import tokenize
@@ -86,27 +87,18 @@ async def prepare_node(
             )
             user_prompt = f"【对话历史】：\n{conv_text}\n\n【最新提问】：\n{query}\n\n请输出独立检索查询："
             endpoint = f"{settings.active_llm_base_url.rstrip('/')}/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {settings.active_llm_api_key}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": settings.active_llm_model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "temperature": 0.1,
-                "max_tokens": 150
-            }
             try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(endpoint, headers=headers, json=payload)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        rw = data["choices"][0]["message"]["content"].strip().strip('"\'')
-                        if rw:
-                            rewritten_query = rw
+                rw = await llm_gateway.chat(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=150
+                )
+                rw = rw.strip().strip('"\'')
+                if rw:
+                    rewritten_query = rw
             except Exception as e:
                 logger.warning(f"【指代消除跳过】LLM 改写异常: {e}")
 

@@ -5,11 +5,10 @@
 片段的编号顺序就是回答里 [1]、[2] 引用的来源序号。提供流式打字机 token 输出。
 """
 
-import json
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
-import httpx
 from rag_kb.core.config import settings
+from rag_kb.core.llm import llm_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -59,121 +58,17 @@ async def stream_answer(
     citations: Optional[List[Dict[str, Any]]] = None
 ) -> AsyncGenerator[Tuple[str, str], None]:
     """流式打字机生成解答增量 token，分流返回 (event_type, token)，其中 event_type 为 'reasoning' 或 'message'"""
-    if not settings.active_llm_api_key:
-        raise RuntimeError("【生成错误】未配置大模型 API_KEY！")
-
     system_prompt, user_prompt = build_generation_prompts(query, hits, citations)
-    endpoint = f"{settings.active_llm_base_url.rstrip('/')}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {settings.active_llm_api_key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": settings.active_llm_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 0.2,
-        "stream": True
-    }
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
 
-    in_think = False
-    seen_think = False
-    buffer = ""
-
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
-            if resp.status_code != 200:
-                err_text = await resp.aread()
-                raise RuntimeError(f"【LLM 生成异常】HTTP {resp.status_code}: {err_text.decode(errors='ignore')}")
-
-            async for line in resp.aiter_lines():
-                line = line.strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                raw = line[5:].strip()
-                if raw == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(raw)
-                    choices = chunk.get("choices")
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta", {})
-
-                    # 1. 兼容网关直接下发 reasoning_content 独立字段
-                    reasoning_token = delta.get("reasoning_content", "")
-                    if reasoning_token:
-                        yield ("reasoning", reasoning_token)
-
-                    # 2. 解析正文流中的 <think>...</think> 标签
-                    raw_token = delta.get("content", "")
-                    if not raw_token:
-                        continue
-
-                    # 极速快道：如果已经完成思考闭合，后续内容 100% 为正式答案，直接直通推流无任何开销
-                    if seen_think and not in_think:
-                        yield ("message", raw_token)
-                        continue
-
-                    buffer += raw_token
-
-                    while buffer:
-                        if not in_think:
-                            if "<think>" in buffer:
-                                before, after = buffer.split("<think>", 1)
-                                if before:
-                                    yield ("message", before)
-                                in_think = True
-                                buffer = after
-                            elif "<" in buffer:
-                                idx = buffer.find("<")
-                                prefix_cand = buffer[idx:]
-                                if "<think>".startswith(prefix_cand):
-                                    if idx > 0:
-                                        yield ("message", buffer[:idx])
-                                        buffer = prefix_cand
-                                    break
-                                else:
-                                    yield ("message", buffer[:idx + 1])
-                                    buffer = buffer[idx + 1:]
-                            else:
-                                yield ("message", buffer)
-                                buffer = ""
-                        else:
-                            # 处于 <think> 思考块内部
-                            if "</think>" in buffer:
-                                thought_part, after = buffer.split("</think>", 1)
-                                if thought_part:
-                                    yield ("reasoning", thought_part)
-                                in_think = False
-                                seen_think = True
-                                buffer = after.lstrip("\r\n")
-                            elif "</" in buffer:
-                                idx = buffer.rfind("</")
-                                prefix_cand = buffer[idx:]
-                                if "</think>".startswith(prefix_cand):
-                                    if idx > 0:
-                                        yield ("reasoning", buffer[:idx])
-                                        buffer = prefix_cand
-                                    break
-                                else:
-                                    yield ("reasoning", buffer)
-                                    buffer = ""
-                            else:
-                                yield ("reasoning", buffer)
-                                buffer = ""
-
-                except Exception:
-                    continue
-
-            # 处理末尾残余缓冲区
-            if buffer:
-                if in_think:
-                    yield ("reasoning", buffer)
-                else:
-                    yield ("message", buffer)
+    async for event_type, token in llm_gateway.stream_chat(
+        messages=messages,
+        temperature=0.2
+    ):
+        yield (event_type, token)
 
 async def generate_answer(
     query: str,
