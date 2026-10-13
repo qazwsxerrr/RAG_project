@@ -109,6 +109,14 @@ class Settings(BaseSettings):
     API_KEY: str = ""
     BASE_URL: str = ""
     MODEL_NAME: str = "grok-4.5"
+    LLM_API_BACKEND: str = "responses"
+
+    @property
+    def active_llm_api_backend(self) -> str:
+        backend = (self.LLM_API_BACKEND or "responses").strip().lower()
+        if backend in ("responses", "response"):
+            return "responses"
+        return "chat_completions"
 
     @property
     def active_api_key(self) -> str:

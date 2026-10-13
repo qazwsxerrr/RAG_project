@@ -8,22 +8,15 @@
 import logging
 from typing import List
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from rag_kb.core.config import settings
+from rag_kb.core.resilience import retry_on_transient
 
 logger = logging.getLogger(__name__)
 
-retry_embedding_post = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=8),
-    retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError)),
-    reraise=True
-)
-
-@retry_embedding_post
+@retry_on_transient(service_name="EmbeddingService")
 async def _post_batch_with_retry(client: httpx.AsyncClient, endpoint: str, headers: dict, payload: dict) -> httpx.Response:
     resp = await client.post(endpoint, headers=headers, json=payload)
-    if resp.status_code in [429, 500, 502, 503, 504]:
+    if resp.status_code != 200:
         resp.raise_for_status()
     return resp
 

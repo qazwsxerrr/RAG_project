@@ -9,8 +9,16 @@ import logging
 from typing import Any, Dict, List, Tuple
 import httpx
 from rag_kb.core.config import settings
+from rag_kb.core.resilience import retry_on_transient
 
 logger = logging.getLogger(__name__)
+
+@retry_on_transient(service_name="Reranker.post")
+async def _post_rerank_with_retry(client: httpx.AsyncClient, endpoint: str, headers: dict, payload: dict) -> httpx.Response:
+    res = await client.post(endpoint, headers=headers, json=payload)
+    if res.status_code != 200:
+        res.raise_for_status()
+    return res
 
 class Reranker:
     """云端 Cross-Encoder 重排器"""
@@ -52,7 +60,7 @@ class Reranker:
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
-                res = await client.post(endpoint, headers=headers, json=payload)
+                res = await _post_rerank_with_retry(client, endpoint, headers, payload)
             except Exception as e:
                 logger.error(f"【Rerank 网络异常】请求失败: {e}")
                 raise RuntimeError(f"BGE Rerank API 连接失败: {e}") from e

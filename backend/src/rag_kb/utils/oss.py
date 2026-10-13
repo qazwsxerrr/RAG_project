@@ -10,20 +10,8 @@ import hashlib
 from pathlib import Path
 from typing import Optional, Dict, Any
 import oss2
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from rag_kb.core.config import settings
-
-retry_oss_network = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=4),
-    retry=retry_if_exception_type((
-        oss2.exceptions.RequestError,
-        oss2.exceptions.ServerError,
-        ConnectionResetError,
-        TimeoutError
-    )),
-    reraise=True
-)
+from rag_kb.core.resilience import retry_on_transient
 
 class AliyunOSSService:
     """阿里云 OSS 真实对象存储管理封装"""
@@ -77,7 +65,7 @@ class AliyunOSSService:
         if content_type:
             headers["Content-Type"] = content_type
 
-        @retry_oss_network
+        @retry_on_transient(service_name="AliyunOSS.upload_bytes")
         def _put():
             return bucket.put_object(clean_key, file_bytes, headers=headers if headers else None)
 
