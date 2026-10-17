@@ -74,6 +74,26 @@
           </div>
         </div>
 
+        <!-- 安全合规熔断与拦截专属警示卡片 (工控级黄盾/红盾警示) -->
+        <div v-if="isSecurityBlocked" class="p-3.5 rounded-xl bg-amber-50/90 border border-amber-200/90 text-xs text-amber-800 flex items-start gap-3 shadow-xs my-2 select-none animate-in fade-in duration-200">
+          <div class="w-7 h-7 rounded-lg bg-amber-100 flex items-center justify-center flex-shrink-0 text-amber-600 mt-0.5">
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+          </div>
+          <div class="space-y-1 flex-1">
+            <div class="font-bold text-amber-900 flex items-center justify-between">
+              <span>企业级内容安全防御系统已触发阻断</span>
+              <span class="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-amber-200/70 text-amber-800">SAFETY FUSED</span>
+            </div>
+            <div class="text-[12px] text-amber-800 leading-relaxed font-sans select-text">
+              {{ securityBlockMessage }}
+            </div>
+          </div>
+        </div>
+
         <!-- 正文 Markdown 渲染区域 (仅在实际有文本内容时渲染，避免未出字前孤立出现占位) -->
         <div v-if="hasCleanContent" class="relative group pt-1">
           <!-- 正文渲染与角标点击捕获 -->
@@ -195,16 +215,32 @@ watch(
 );
 
 // ==================== 2. 正文纯净 Markdown 与角标渲染 ====================
+const isSecurityBlocked = computed(() => {
+  const content = props.message.content || '';
+  return content.includes('【安全合规拦截】') || content.includes('【系统安全拦截】');
+});
+
+const securityBlockMessage = computed(() => {
+  const content = props.message.content || '';
+  const match = content.match(/【(安全合规拦截|系统安全拦截)】([\s\S]*)/);
+  if (match) {
+    return match[2].trim() || match[0].trim();
+  }
+  return content;
+});
+
 const cleanContentText = computed(() => {
   if (!props.message.content) return '';
-  // 彻底剔除任何闭合与未闭合的 <think> 标签残留，严防污染正文 (推流期间不使用 trim，避免丢失自然分词空格)
+  // 彻底剔除任何闭合与未闭合的 <think> 标签残留及安全拦截声明 (避免重复渲染在正文普通文本中)
   return props.message.content
     .replace(/<think>[\s\S]*?<\/think>\s*/g, '')
-    .replace(/<think>[\s\S]*$/g, '');
+    .replace(/<think>[\s\S]*$/g, '')
+    .replace(/【(安全合规拦截|系统安全拦截)】[\s\S]*/g, '')
+    .trim();
 });
 
 const hasCleanContent = computed(() => {
-  return cleanContentText.value.trim().length > 0;
+  return cleanContentText.value.length > 0;
 });
 
 // 提取正文中实际引用的 [1], [2] 角标 ID 集合

@@ -1,8 +1,8 @@
 """src/rag_kb/api/deps.py —— 跨路由共用的 FastAPI 依赖。
 
 提供：
-- get_tenant_id: 从 Header 或配置获取当前租户
 - get_db: 数据库异步会话生成器
+- get_tenant_id: 从 Header 或配置获取当前租户
 """
 
 from typing import Optional

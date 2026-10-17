@@ -191,3 +191,23 @@ class ChatMessage(Base):
     )
 
     session = relationship("ChatSession", back_populates="messages")
+
+class AuditLog(Base):
+    """企业级操作审计日志表 (sys_audit_logs)"""
+    __tablename__ = "sys_audit_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default="default_tenant", index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(32), default="SUCCESS", index=True)
+    error_msg: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    details: Mapped[Dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True
+    )

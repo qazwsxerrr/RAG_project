@@ -87,17 +87,84 @@ class LLMGateway:
             "Content-Type": "application/json"
         }
 
-        # 1. 新一代 Responses 协议分支
+        # 1. 新一代 Responses 协议分支 (POST /v1/responses)
         if effective_backend == "responses":
             endpoint = f"{final_base_url}/responses"
             sys_msg = next((m.get("content") for m in messages if m.get("role") == "system"), None)
             non_sys_msgs = [m for m in messages if m.get("role") != "system"]
 
-            # 单条纯文本用户提问直接作为 input 字符串；多轮对话作为 input 数组
-            if len(non_sys_msgs) == 1 and isinstance(non_sys_msgs[0].get("content"), str):
-                input_data = non_sys_msgs[0]["content"]
+            # 系统提示词归一化为 instructions 字符串
+            sys_instruction = None
+            if sys_msg is not None:
+                if isinstance(sys_msg, str):
+                    sys_instruction = sys_msg
+                elif isinstance(sys_msg, list):
+                    tp = [p.get("text", "") for p in sys_msg if isinstance(p, dict) and p.get("type") in ("text", "input_text")]
+                    sys_instruction = "\n".join(tp) if tp else ""
+                else:
+                    sys_instruction = str(sys_msg)
+
+            # 探测是否包含多模态图片
+            has_multimodal = any(
+                isinstance(m.get("content"), list) and any(
+                    isinstance(p, dict) and p.get("type") in ("image_url", "input_image")
+                    for p in m.get("content")
+                )
+                for m in non_sys_msgs
+            )
+
+            if not has_multimodal and len(non_sys_msgs) == 1:
+                # 纯文本单轮调用极速快道：提取为规范的 input 纯文本字符串
+                content = non_sys_msgs[0].get("content")
+                if isinstance(content, str):
+                    input_data = content
+                elif isinstance(content, list):
+                    text_parts = [
+                        p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") in ("text", "input_text")
+                    ]
+                    input_data = "\n".join(text_parts) if text_parts else ""
+                else:
+                    input_data = str(content)
             elif non_sys_msgs:
-                input_data = non_sys_msgs
+                # 多模态图文调用 或 多轮对话：转换为官方 Responses API 原生规范
+                sanitized_msgs = []
+                for m in non_sys_msgs:
+                    c = m.get("content")
+                    role = m.get("role", "user")
+                    if isinstance(c, list):
+                        converted_parts = []
+                        for p in c:
+                            if not isinstance(p, dict):
+                                converted_parts.append({"type": "input_text", "text": str(p)})
+                                continue
+                            p_type = p.get("type", "")
+                            if p_type in ("text", "input_text"):
+                                converted_parts.append({
+                                    "type": "input_text",
+                                    "text": p.get("text", "")
+                                })
+                            elif p_type in ("image_url", "input_image"):
+                                raw_img = p.get("image_url")
+                                if isinstance(raw_img, dict):
+                                    url_str = raw_img.get("url", "")
+                                else:
+                                    url_str = str(raw_img or "")
+                                img_part = {
+                                    "type": "input_image",
+                                    "image_url": url_str
+                                }
+                                if "detail" in p:
+                                    img_part["detail"] = p["detail"]
+                                converted_parts.append(img_part)
+                            else:
+                                converted_parts.append(p)
+                        sanitized_msgs.append({"role": role, "content": converted_parts})
+                    elif isinstance(c, str):
+                        sanitized_msgs.append({"role": role, "content": c})
+                    else:
+                        sanitized_msgs.append({"role": role, "content": str(c)})
+                input_data = sanitized_msgs
             else:
                 input_data = messages
 
@@ -107,8 +174,8 @@ class LLMGateway:
                 "stream": stream,
                 **kwargs
             }
-            if sys_msg and isinstance(sys_msg, str):
-                payload["instructions"] = sys_msg
+            if sys_instruction:
+                payload["instructions"] = sys_instruction
             if temperature is not None:
                 payload["temperature"] = temperature
             if max_tokens is not None:
@@ -153,7 +220,7 @@ class LLMGateway:
             # 兼容部分中转平台下发的 output_text 根属性
             if "output_text" in data and isinstance(data["output_text"], str):
                 return data["output_text"].strip()
-            return ""
+            raise RuntimeError(f"【LLM 异常响应】Responses 协议返回未包含有效的 message/output 节点: {data}")
 
         # Chat completions
         choices = data.get("choices")

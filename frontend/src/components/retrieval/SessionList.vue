@@ -13,7 +13,15 @@
 
     <!-- 历史会话卡片列表 -->
     <div class="flex-1 overflow-y-auto p-2.5 space-y-1.5">
+      <div v-if="chatStore.isLoadingSessions" class="flex flex-col items-center justify-center py-8 text-slate-400 text-xs space-y-2">
+        <svg class="w-5 h-5 animate-spin text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10" stroke-opacity="0.25" stroke="currentColor" fill="none"/>
+          <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
+        </svg>
+        <span>同步云端会话中...</span>
+      </div>
       <div 
+        v-else
         v-for="session in chatStore.sessions" 
         :key="session.id"
         @click="chatStore.switchSession(session.id)"
@@ -45,7 +53,7 @@
 
         <!-- 会话副标：轮数与时间戳 -->
         <div class="flex items-center space-x-2 text-[10px] text-slate-400 font-mono mt-1.5">
-          <span>{{ session.messages.length }} 条问答</span>
+          <span>{{ session.messageCount ?? session.messages.length }} 条问答</span>
           <span>·</span>
           <span>{{ formatTime(session.updatedAt) }}</span>
         </div>
@@ -65,13 +73,21 @@ import { useChatStore } from '../../stores/chat';
 
 const chatStore = useChatStore();
 
-const handleNewSession = () => {
-  chatStore.createNewSession();
+const handleNewSession = async () => {
+  try {
+    await chatStore.createNewSession();
+  } catch (e) {
+    console.error('新建会话失败:', e);
+  }
 };
 
-const handleDeleteSession = (id: string) => {
-  if (confirm('确认删除此问答会话及其历史记录吗？')) {
-    chatStore.deleteSession(id);
+const handleDeleteSession = async (id: string) => {
+  if (confirm('确认删除此问答会话及其全部云端历史记录吗？')) {
+    try {
+      await chatStore.deleteSession(id);
+    } catch (e) {
+      console.error('删除会话失败:', e);
+    }
   }
 };
 

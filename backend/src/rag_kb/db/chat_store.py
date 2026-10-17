@@ -6,7 +6,7 @@ append_message()、delete_session() 等函数，向 api 层只暴露普通 dict�
 
 import uuid
 from typing import Dict, List, Optional, Any
-from sqlalchemy import select, desc, delete
+from sqlalchemy import select, desc, delete, func
 from rag_kb.db.session import AsyncSessionLocal
 from rag_kb.db.models import ChatSession, ChatMessage
 
@@ -37,31 +37,38 @@ async def create_session(tenant_id: str = "default_tenant", title: Optional[str]
             "id": str(new_sess.id),
             "title": new_sess.title,
             "tenant_id": new_sess.tenant_id,
+            "message_count": 0,
             "created_at": new_sess.created_at.isoformat(),
             "updated_at": new_sess.updated_at.isoformat()
         }
 
 async def list_sessions(tenant_id: str = "default_tenant", limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
-    """查询指定租户的会话列表"""
+    """查询指定租户的会话列表并统计消息数"""
     async with AsyncSessionLocal() as db:
         stmt = (
-            select(ChatSession)
+            select(
+                ChatSession,
+                func.count(ChatMessage.id).label("message_count")
+            )
+            .outerjoin(ChatMessage, ChatMessage.session_id == ChatSession.id)
             .where(ChatSession.tenant_id == tenant_id)
+            .group_by(ChatSession.id)
             .order_by(desc(ChatSession.updated_at))
             .limit(limit)
             .offset(offset)
         )
         res = await db.execute(stmt)
-        sessions = res.scalars().all()
+        rows = res.all()
         return [
             {
                 "id": str(s.id),
                 "title": s.title,
                 "tenant_id": s.tenant_id,
+                "message_count": count,
                 "created_at": s.created_at.isoformat(),
                 "updated_at": s.updated_at.isoformat()
             }
-            for s in sessions
+            for s, count in rows
         ]
 
 def to_session_uuid(session_id: str) -> uuid.UUID:

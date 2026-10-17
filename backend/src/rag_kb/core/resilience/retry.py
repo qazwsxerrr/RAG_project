@@ -29,7 +29,7 @@ def is_transient_error(exc: Exception) -> bool:
     # 2. HTTP 状态码精准识别
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
-        if status in (429, 502, 503, 504):
+        if status in (429, 502, 503, 504, 529):
             return True
         return False  # 400, 401, 403, 404 等业务错误坚决不重试
 

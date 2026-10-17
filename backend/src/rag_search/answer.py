@@ -9,6 +9,7 @@ import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 from rag_kb.core.config import settings
 from rag_kb.core.llm import llm_gateway
+from rag_kb.core.security import validate_prompt_security, default_stream_moderator
 
 logger = logging.getLogger(__name__)
 
@@ -57,17 +58,26 @@ async def stream_answer(
     hits: List[Dict[str, Any]],
     citations: Optional[List[Dict[str, Any]]] = None
 ) -> AsyncGenerator[Tuple[str, str], None]:
-    """流式打字机生成解答增量 token，分流返回 (event_type, token)，其中 event_type 为 'reasoning' 或 'message'"""
+    """流式打字机生成解答增量 token，分流返回 (event_type, token)，内置敏感词脱敏与 Prompt 注入防御"""
+    # 1. 前置 Prompt 注入与越狱指令拦截
+    is_safe, error_msg = validate_prompt_security(query)
+    if not is_safe:
+        yield ("message", f"【安全合规拦截】{error_msg}")
+        return
+
     system_prompt, user_prompt = build_generation_prompts(query, hits, citations)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ]
 
-    async for event_type, token in llm_gateway.stream_chat(
+    # 2. 从网关获取原始双流并通过安全管道实时脱敏正式回答流
+    raw_stream = llm_gateway.stream_chat(
         messages=messages,
         temperature=0.2
-    ):
+    )
+
+    async for event_type, token in default_stream_moderator.filter_chat_stream(raw_stream):
         yield (event_type, token)
 
 async def generate_answer(

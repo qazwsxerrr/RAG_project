@@ -13,6 +13,7 @@ from langgraph.errors import GraphInterrupt
 from rag_kb.core.config import settings
 from rag_kb.core.constants import IngestStatus
 from rag_kb.graph.state import IngestState
+from rag_kb.core.logging import get_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,9 @@ class BaseNode:
                 "status": "running"
             })
 
-        self.logger.info(f"▶ [节点 {self.step_index}/11: {self.name}] 开始执行 (doc_id={state.get('doc_id')})...")
+        req_id = get_request_id()
+
+        self.logger.info(f"[{req_id}] ▶ [节点 {self.step_index}/11: {self.name}] 开始执行 (doc_id={state.get('doc_id')})...")
         t0 = time.perf_counter()
 
         try:
@@ -64,7 +67,7 @@ class BaseNode:
                     "duration_ms": duration_ms
                 })
 
-            self.logger.info(f"✔ [节点 {self.step_index}/11: {self.name}] 执行完成，耗时 {duration_ms}ms")
+            self.logger.info(f"[{req_id}] ✔ [节点 {self.step_index}/11: {self.name}] 执行完成，耗时 {duration_ms}ms")
             return result_state
 
         except GraphInterrupt:
@@ -81,13 +84,13 @@ class BaseNode:
                     "status": "pending_review",
                     "duration_ms": duration_ms
                 })
-            self.logger.info(f"⏸ [节点 {self.step_index}/11: {self.name}] 触发人工审核挂起 (GraphInterrupt)")
+            self.logger.info(f"[{req_id}] ⏸ [节点 {self.step_index}/11: {self.name}] 触发人工审核挂起 (GraphInterrupt)")
             raise
 
         except Exception as e:
             duration_ms = int((time.perf_counter() - t0) * 1000)
             err_msg = str(e)
-            self.logger.error(f"✖ [节点 {self.step_index}/11: {self.name}] 执行异常: {err_msg}", exc_info=True)
+            self.logger.error(f"[{req_id}] ✖ [节点 {self.step_index}/11: {self.name}] 执行异常: {err_msg}", exc_info=True)
 
             state["error"] = err_msg
             state["overall_status"] = IngestStatus.FAILED.value

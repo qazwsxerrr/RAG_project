@@ -97,9 +97,21 @@
       class="flex-1 overflow-y-auto px-4 sm:px-8 py-6 space-y-6 scroll-smooth select-text bg-[#FAFBFD]"
     >
       <div class="max-w-3xl mx-auto w-full pb-28">
+        <!-- 正在加载历史消息状态 -->
+        <div 
+          v-if="chatStore.isLoadingMessages && (!chatStore.currentSession || chatStore.currentSession.messages.length === 0)"
+          class="min-h-[40vh] flex flex-col items-center justify-center text-center space-y-3 select-none"
+        >
+          <svg class="w-6 h-6 animate-spin text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" stroke-opacity="0.25" stroke="currentColor" fill="none"/>
+            <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
+          </svg>
+          <span class="text-xs text-slate-400 font-medium">正在拉取云端对话历史...</span>
+        </div>
+
         <!-- 空状态欢迎区域 (去除所有彩色大卡片与莫名其妙套框) -->
         <div 
-          v-if="!chatStore.currentSession || chatStore.currentSession.messages.length === 0"
+          v-else-if="!chatStore.currentSession || chatStore.currentSession.messages.length === 0"
           class="min-h-[48vh] flex flex-col items-center justify-center text-center max-w-lg mx-auto space-y-5 animate-in fade-in duration-300 select-none"
         >
           <div class="w-11 h-11 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-700">
@@ -206,6 +218,12 @@ const departmentList = ref<DepartmentItem[]>([]);
 const categoryList = ref<string[]>(['全部', '技术规范', '操作规程', '产品文档', '行业报告', '面试题']);
 
 onMounted(async () => {
+  try {
+    await chatStore.initSessions();
+  } catch (err) {
+    console.error('初始化云端会话列表失败:', err);
+  }
+
   try {
     const depts = await documentsApi.getDepartments();
     departmentList.value = depts;

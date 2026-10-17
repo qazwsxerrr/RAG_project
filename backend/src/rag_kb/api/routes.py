@@ -46,6 +46,7 @@ from rag_kb.api.schemas import (
     ReviewItem
 )
 from rag_kb.api.sse import pipeline_manager, format_sse
+from rag_kb.core.logging.audit import record_audit_log
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,19 @@ async def upload_document(
     clean_endpoint = oss_service.endpoint.replace("https://", "").replace("http://", "").rstrip("/")
     real_oss_url = f"https://{oss_service.bucket_name}.{clean_endpoint}/rag_storage/raw/{department}/{file_hash[:8]}_{actual_file_name}"
 
+    await record_audit_log(
+        action="DOCUMENT_UPLOAD",
+        resource_id=doc_id,
+        status="SUCCESS",
+        details={
+            "file_name": actual_file_name,
+            "file_size": file_size,
+            "file_hash": file_hash,
+            "department": department,
+            "category": category
+        }
+    )
+
     return DocumentUploadResponse(
         doc_id=doc_id,
         file_name=actual_file_name,
@@ -209,6 +223,12 @@ async def delete_document(doc_id: str, db: AsyncSession = Depends(get_db)):
 
     if doc_id in pipeline_manager._active_states:
         del pipeline_manager._active_states[doc_id]
+
+    await record_audit_log(
+        action="DOCUMENT_DELETE",
+        resource_id=doc_id,
+        status="SUCCESS"
+    )
 
     return {"status": "success", "message": f"文档 {doc_id} 及其切片已彻底删除"}
 
@@ -462,6 +482,16 @@ async def submit_pipeline_review(doc_id: str, request: ReviewSubmitRequest):
         "reviewed_items_count": len(request.items)
     })
 
+    await record_audit_log(
+        action="DOCUMENT_REVIEW",
+        resource_id=doc_id,
+        status="SUCCESS",
+        details={
+            "reviewed_items_count": len(request.items),
+            "action": "resume"
+        }
+    )
+
     return {
         "status": "success",
         "message": "人工审核已确认，流水线已继续执行",
@@ -707,6 +737,14 @@ async def retry_pipeline(doc_id: str, request: Optional[RetryPipelineRequest] = 
             logger.error(f"流水线重试异常 [doc_id={doc_id}]: {e}", exc_info=True)
 
     asyncio.create_task(_safe_retry())
+
+    await record_audit_log(
+        action="DOCUMENT_RETRY",
+        resource_id=doc_id,
+        status="SUCCESS",
+        details={"from_step": request.from_step if request else 1}
+    )
+
     return {
         "doc_id": doc_id,
         "status": "retrying",

@@ -65,7 +65,8 @@ class MultimodalVLMService:
         messages: List[Dict[str, Any]],
         max_tokens: int = 800,
         temperature: float = 0.1,
-        action_name: str = "多模态视觉 API"
+        action_name: str = "多模态视觉 API",
+        backend: Optional[str] = None
     ) -> str:
         """
         统一通过全局大模型网关 llm_gateway.chat_sync 执行多模态图文调用：
@@ -81,7 +82,8 @@ class MultimodalVLMService:
                 base_url=self.base_url,
                 api_key=self.api_key,
                 max_tokens=max_tokens,
-                temperature=temperature
+                temperature=temperature,
+                backend=backend
             )
             if not content or not str(content).strip():
                 raise ValueError(f"【{action_name}错误】: 模型返回内容为空！")

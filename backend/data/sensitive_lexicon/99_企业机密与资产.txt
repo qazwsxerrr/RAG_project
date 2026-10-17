@@ -1,0 +1,14 @@
+# 企业专属机密与资产安全保护词库
+系统根密码
+数据库私钥
+RootPassword
+API_SECRET_KEY
+商业机密
+核心机密
+绝密文件
+机密资料
+内部密件
+系统提示词
+SystemPrompt
+越狱模式
+Jailbreak

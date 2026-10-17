@@ -3,7 +3,6 @@
 支持：
 - POST /retrieval/search: 纯检索阶段接口（返回 8 阶段思考流元数据、引文卡片与黄金切片）
 - POST /retrieval/chat: 阶段 1~8 全流程智能问答流式打字机接口 (POST SSE 协议)
-- POST /chat/query: 兼容别名接口
 """
 
 import time
@@ -22,6 +21,8 @@ from rag_kb.api.schemas import (
     RetrievedChunk
 )
 from rag_kb.api.sse import format_sse
+from rag_kb.core.logging.audit import record_audit_log
+from rag_kb.core.security import validate_prompt_security
 from rag_kb.db.chat_store import chat_store
 from rag_search.build import get_retrieval_graph
 from rag_search.answer import stream_answer
@@ -83,6 +84,21 @@ class ThinkingProcessBuilder:
 @router.post("/retrieval/search", response_model=ChatQueryResponse)
 async def search_endpoint(request: ChatQueryRequest):
     """纯检索接口 (阶段 1 ~ 阶段 6)：获取经过多阶段漏斗精选的切片与思考流"""
+    # 前置安全熔断护栏：拦截涉黄、暴恐、涉枪涉爆违禁词与越狱注入
+    is_safe, error_msg = validate_prompt_security(request.query)
+    if not is_safe:
+        await record_audit_log(
+            action="RETRIEVAL_SEARCH_BLOCKED",
+            resource_id=request.conversation_id,
+            status="BLOCKED",
+            error_msg=error_msg,
+            details={"query": request.query}
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"【安全合规拦截】{error_msg}"
+        )
+
     history_dicts = [h.model_dump() for h in request.history] if request.history else []
     initial_state = get_default_state(
         query=request.query,
@@ -141,6 +157,18 @@ async def search_endpoint(request: ChatQueryRequest):
             for c in final_chunks_raw
         ]
 
+        await record_audit_log(
+            action="RETRIEVAL_SEARCH",
+            resource_id=request.conversation_id,
+            duration_ms=builder.retrieve_ms,
+            status="SUCCESS",
+            details={
+                "query": request.query,
+                "chunks_count": len(final_chunks),
+                "citations_count": len(citations),
+            }
+        )
+
         return ChatQueryResponse(
             conversation_id=request.conversation_id,
             rewritten_query=latest_state.get("rewritten_query", request.query),
@@ -151,6 +179,13 @@ async def search_endpoint(request: ChatQueryRequest):
         )
     except Exception as e:
         logger.error(f"检索执行失败: {e}", exc_info=True)
+        await record_audit_log(
+            action="RETRIEVAL_SEARCH",
+            resource_id=request.conversation_id,
+            status="FAILED",
+            error_msg=str(e),
+            details={"query": request.query}
+        )
         raise HTTPException(status_code=500, detail=f"检索服务异常: {str(e)}")
 
 @router.post("/retrieval/chat")
@@ -179,6 +214,40 @@ async def chat_endpoint(request: ChatQueryRequest):
             await chat_store.append_message(request.conversation_id, "user", request.query)
         except Exception as e:
             logger.warning(f"记录用户消息失败: {e}")
+
+    # 前置安全熔断护栏：拦截涉黄、暴恐、涉枪涉爆违禁词与越狱注入
+    is_safe, error_msg = validate_prompt_security(request.query)
+    if not is_safe:
+        async def blocked_stream() -> AsyncGenerator[str, None]:
+            block_reply = f"【安全合规拦截】{error_msg}"
+            yield format_sse("message", {"content": block_reply})
+            yield format_sse("done", {"total_overall_ms": 1, "total_retrieve_ms": 0})
+            if request.conversation_id:
+                try:
+                    await chat_store.append_message(
+                        request.conversation_id,
+                        "assistant",
+                        block_reply
+                    )
+                except Exception as e:
+                    logger.warning(f"记录合规拒绝消息失败: {e}")
+            await record_audit_log(
+                action="RETRIEVAL_CHAT_BLOCKED",
+                resource_id=request.conversation_id,
+                status="BLOCKED",
+                error_msg=error_msg,
+                details={"query": request.query}
+            )
+
+        return StreamingResponse(
+            blocked_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
 
     async def chat_event_stream() -> AsyncGenerator[str, None]:
         t0 = time.perf_counter()
@@ -234,6 +303,19 @@ async def chat_endpoint(request: ChatQueryRequest):
                 except Exception as e:
                     logger.warning(f"记录助手消息失败: {e}")
 
+            # 记录审计日志
+            await record_audit_log(
+                action="RETRIEVAL_CHAT",
+                resource_id=request.conversation_id,
+                duration_ms=total_overall_ms,
+                status="SUCCESS",
+                details={
+                    "query": request.query,
+                    "answer_length": len(full_answer),
+                    "citations_count": len(citations),
+                }
+            )
+
             # 3. 派发完成事件
             yield format_sse("done", {
                 "total_overall_ms": total_overall_ms,
@@ -242,6 +324,13 @@ async def chat_endpoint(request: ChatQueryRequest):
 
         except Exception as err:
             logger.error(f"问答推流异常: {err}", exc_info=True)
+            await record_audit_log(
+                action="RETRIEVAL_CHAT",
+                resource_id=request.conversation_id,
+                status="FAILED",
+                error_msg=str(err),
+                details={"query": request.query}
+            )
             yield format_sse("error", {"error": str(err)})
 
     return StreamingResponse(
@@ -253,10 +342,3 @@ async def chat_endpoint(request: ChatQueryRequest):
             "X-Accel-Buffering": "no"
         }
     )
-
-@router.post("/chat/query")
-async def chat_query_alias(request: ChatQueryRequest):
-    """前端兼容别名路由"""
-    if request.stream:
-        return await chat_endpoint(request)
-    return await search_endpoint(request)

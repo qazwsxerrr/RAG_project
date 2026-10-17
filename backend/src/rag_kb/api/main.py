@@ -24,7 +24,11 @@ from rag_kb.api.sessions import router as sessions_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理器"""
-    # 启动时保证数据库表与 pgvector 扩展已就绪
+    # 1. 初始化全局企业级链路日志体系 (装配 TraceLogFilter 与标准 Formatter)
+    from rag_kb.core.logging import setup_logging
+    setup_logging()
+
+    # 2. 启动时保证数据库表与 pgvector 扩展已就绪
     try:
         await init_db()
     except Exception as e:
@@ -43,7 +47,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan
     )
 
-    # 1. 跨域 CORS 中间件
+    # 1. 全链路追踪与统一异常掩码中间件 (首层拦截)
+    from rag_kb.core.logging import TraceLoggingMiddleware
+    app.add_middleware(TraceLoggingMiddleware)
+
+    # 2. 跨域 CORS 中间件
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,

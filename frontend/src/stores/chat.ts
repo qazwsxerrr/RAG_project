@@ -2,90 +2,154 @@ import { defineStore } from 'pinia';
 import { ref, computed, reactive } from 'vue';
 import type { ChatSession, ChatMessage, ThinkingProcess, CitationSource } from '../types';
 import { retrievalApi } from '../api/retrieval';
+import { sessionsApi } from '../api/sessions';
 
-const STORAGE_KEY = 'rag_chat_sessions_v1';
+const ACTIVE_SESSION_STORAGE_KEY = 'rag_active_session_id';
 
 export const useChatStore = defineStore('chat', () => {
-  // 从 localStorage 恢复会话列表
-  const loadInitialSessions = (): ChatSession[] => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch (e) {
-      console.warn('恢复历史会话失败:', e);
-    }
-    const defaultId = 'session_' + Date.now();
-    return [
-      {
-        id: defaultId,
-        title: '新知识问答会话',
-        messageCount: 0,
-        updatedAt: Date.now(),
-        messages: [],
-        scene_type: 'general',
-        enable_hyde: false,
-      },
-    ];
-  };
-
-  const sessions = ref<ChatSession[]>(loadInitialSessions());
-  const currentSessionId = ref<string>(sessions.value[0]?.id || '');
+  const sessions = ref<ChatSession[]>([]);
+  const currentSessionId = ref<string>('');
+  const isLoadingSessions = ref<boolean>(false);
+  const isLoadingMessages = ref<boolean>(false);
   const isGenerating = ref<boolean>(false);
+  const loadedMessagesMap = reactive<Record<string, boolean>>({});
   let abortController: AbortController | null = null;
-
-  // 持久化保存到 localStorage
-  const persistSessions = () => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions.value));
-    } catch (e) {
-      console.warn('持久化会话失败:', e);
-    }
-  };
 
   const currentSession = computed(() => {
     return sessions.value.find((s) => s.id === currentSessionId.value) || sessions.value[0];
   });
 
-  /** 创建全新会话 */
-  const createNewSession = (): string => {
-    const newId = 'session_' + Date.now();
+  /** 加载指定会话的云端历史消息 */
+  const loadSessionMessages = async (sessionId: string, force: boolean = false) => {
+    if (!sessionId) return;
+    if (!force && loadedMessagesMap[sessionId]) return;
+
+    isLoadingMessages.value = true;
+    try {
+      const msgs = await sessionsApi.getSessionMessages(sessionId, 100);
+      const target = sessions.value.find((s) => s.id === sessionId);
+      if (target) {
+        target.messages = msgs.map((m) => ({
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          citations: m.citations || [],
+          timestamp: new Date(m.created_at).getTime(),
+        }));
+        target.messageCount = target.messages.length;
+        loadedMessagesMap[sessionId] = true;
+      }
+    } catch (e) {
+      console.error(`加载会话 ${sessionId} 消息失败:`, e);
+      throw e;
+    } finally {
+      isLoadingMessages.value = false;
+    }
+  };
+
+  /** 初始化加载云端会话列表 */
+  const initSessions = async () => {
+    isLoadingSessions.value = true;
+    try {
+      const list = await sessionsApi.listSessions('default_tenant', 50, 0);
+      if (list && list.length > 0) {
+        sessions.value = list.map((item) => ({
+          id: item.id,
+          title: item.title || '新知识问答会话',
+          messageCount: item.message_count ?? 0,
+          updatedAt: new Date(item.updated_at || item.created_at).getTime(),
+          messages: [],
+          scene_type: 'general',
+          enable_hyde: false,
+        }));
+
+        const lastActiveId = localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+        const matched = sessions.value.find((s) => s.id === lastActiveId);
+        const targetId = matched ? matched.id : sessions.value[0].id;
+        currentSessionId.value = targetId;
+        localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, targetId);
+
+        await loadSessionMessages(targetId);
+      } else {
+        // 云端尚无历史会话，创建云端新会话
+        const created = await sessionsApi.createSession('新知识问答会话', 'default_tenant');
+        const newSession: ChatSession = {
+          id: created.id,
+          title: created.title || '新知识问答会话',
+          messageCount: 0,
+          updatedAt: new Date(created.updated_at || created.created_at).getTime(),
+          messages: [],
+          scene_type: 'general',
+          enable_hyde: false,
+        };
+        sessions.value = [newSession];
+        currentSessionId.value = created.id;
+        loadedMessagesMap[created.id] = true;
+        localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, created.id);
+      }
+    } catch (e) {
+      console.error('初始化云端会话列表失败:', e);
+      throw e;
+    } finally {
+      isLoadingSessions.value = false;
+    }
+  };
+
+  /** 创建全新云端会话 */
+  const createNewSession = async (title: string = '新知识问答会话'): Promise<string> => {
+    if (isGenerating.value) {
+      stopGeneration();
+    }
+    const created = await sessionsApi.createSession(title, 'default_tenant');
     const newSession: ChatSession = {
-      id: newId,
-      title: '新知识问答会话',
+      id: created.id,
+      title: created.title || title,
       messageCount: 0,
-      updatedAt: Date.now(),
+      updatedAt: new Date(created.updated_at || created.created_at).getTime(),
       messages: [],
       scene_type: 'general',
       enable_hyde: false,
     };
     sessions.value.unshift(newSession);
-    currentSessionId.value = newId;
-    persistSessions();
-    return newId;
+    currentSessionId.value = created.id;
+    loadedMessagesMap[created.id] = true;
+    localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, created.id);
+    return created.id;
   };
 
   /** 切换会话 */
-  const switchSession = (id: string) => {
+  const switchSession = async (id: string) => {
     if (isGenerating.value) {
       stopGeneration();
     }
     currentSessionId.value = id;
+    localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, id);
+
+    if (!loadedMessagesMap[id]) {
+      await loadSessionMessages(id);
+    }
   };
 
-  /** 删除会话 */
-  const deleteSession = (id: string) => {
+  /** 物理删除云端会话及其名下所有历史消息 */
+  const deleteSession = async (id: string) => {
+    if (isGenerating.value && currentSessionId.value === id) {
+      stopGeneration();
+    }
+    await sessionsApi.deleteSession(id, 'default_tenant');
     const idx = sessions.value.findIndex((s) => s.id === id);
     if (idx !== -1) {
       sessions.value.splice(idx, 1);
+      delete loadedMessagesMap[id];
       if (sessions.value.length === 0) {
-        createNewSession();
+        await createNewSession();
       } else if (currentSessionId.value === id) {
-        currentSessionId.value = sessions.value[0].id;
+        const nextId = sessions.value[0].id;
+        currentSessionId.value = nextId;
+        localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, nextId);
+        if (!loadedMessagesMap[nextId]) {
+          await loadSessionMessages(nextId);
+        }
       }
-      persistSessions();
     }
   };
 
@@ -98,13 +162,11 @@ export const useChatStore = defineStore('chat', () => {
     isGenerating.value = false;
   };
 
-  /** 清空当前会话消息 */
-  const clearCurrentMessages = () => {
-    if (currentSession.value) {
-      currentSession.value.messages = [];
-      currentSession.value.messageCount = 0;
-      persistSessions();
-    }
+  /** 清空当前会话：物理删除云端旧会话并新建全新会话 */
+  const clearCurrentMessages = async () => {
+    const activeId = currentSessionId.value;
+    if (!activeId) return;
+    await deleteSession(activeId);
   };
 
   /** 发送问题并处理全流程流式问答 */
@@ -120,11 +182,14 @@ export const useChatStore = defineStore('chat', () => {
   ) => {
     if (!query.trim() || isGenerating.value) return;
 
+    if (!currentSession.value) {
+      await createNewSession();
+    }
     const session = currentSession.value;
     if (!session) return;
 
-    // 若为会话第一条提问，自动根据问题前 20 字更新会话标题
-    if (session.messages.length === 0 || session.title === '新知识问答会话') {
+    // 若为会话第一条提问，自动根据问题前 22 字更新前端标题展示
+    if (session.messages.length === 0 || session.title === '新知识问答会话' || session.title === '新会话') {
       session.title = query.length > 22 ? query.slice(0, 22) + '...' : query;
     }
 
@@ -151,7 +216,6 @@ export const useChatStore = defineStore('chat', () => {
 
     session.messageCount = session.messages.length;
     session.updatedAt = Date.now();
-    persistSessions();
 
     isGenerating.value = true;
     abortController = new AbortController();
@@ -212,8 +276,9 @@ export const useChatStore = defineStore('chat', () => {
             if (t.thinking) {
               t.thinking.total_overall_ms = meta.total_overall_ms;
             }
+            session.messageCount = session.messages.length;
+            session.updatedAt = Date.now();
             isGenerating.value = false;
-            persistSessions();
           },
           onError: (err: Error) => {
             console.error('[Chat Error]', err);
@@ -223,7 +288,6 @@ export const useChatStore = defineStore('chat', () => {
             t.isReasoning = false;
             t.error = err.message;
             isGenerating.value = false;
-            persistSessions();
           },
         },
         abortController.signal
@@ -232,25 +296,23 @@ export const useChatStore = defineStore('chat', () => {
       assistantMessage.isStreaming = false;
       assistantMessage.error = e.message || '请求发生异常';
       isGenerating.value = false;
-      persistSessions();
     }
-  };
-
-  const reloadSessions = () => {
-    sessions.value = loadInitialSessions();
   };
 
   return {
     sessions,
     currentSessionId,
     currentSession,
+    isLoadingSessions,
+    isLoadingMessages,
     isGenerating,
+    initSessions,
+    loadSessionMessages,
     createNewSession,
     switchSession,
     deleteSession,
     stopGeneration,
     clearCurrentMessages,
     sendMessage,
-    reloadSessions,
   };
 });
