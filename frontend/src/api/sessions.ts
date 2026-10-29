@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { CitationSource } from '../types';
+import type { CitationSource, ThinkingProcess } from '../types';
 
 export interface BackendSessionItem {
   id: string;
@@ -16,6 +16,8 @@ export interface BackendMessageItem {
   role: 'user' | 'assistant';
   content: string;
   citations: CitationSource[];
+  reasoning_content?: string;
+  thinking_process?: ThinkingProcess;
   created_at: string;
 }
 

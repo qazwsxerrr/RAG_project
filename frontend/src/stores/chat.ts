@@ -34,6 +34,8 @@ export const useChatStore = defineStore('chat', () => {
           role: m.role,
           content: m.content,
           citations: m.citations || [],
+          reasoning_content: m.reasoning_content || undefined,
+          thinking: m.thinking_process || undefined,
           timestamp: new Date(m.created_at).getTime(),
         }));
         target.messageCount = target.messages.length;

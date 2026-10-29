@@ -114,6 +114,8 @@ async def get_messages(session_id: str, limit: int = 50) -> List[Dict[str, Any]]
                 "role": m.role,
                 "content": m.content,
                 "citations": m.citations or [],
+                "reasoning_content": getattr(m, "reasoning_content", None),
+                "thinking_process": getattr(m, "thinking_process", None),
                 "created_at": m.created_at.isoformat()
             }
             for m in msgs
@@ -123,7 +125,9 @@ async def append_message(
     session_id: str,
     role: str,
     content: str,
-    citations: Optional[List[dict]] = None
+    citations: Optional[List[dict]] = None,
+    reasoning_content: Optional[str] = None,
+    thinking_process: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """向会话追加一条消息并自动更新会话更新时间"""
     from datetime import datetime, timezone
@@ -157,6 +161,8 @@ async def append_message(
             role=role,
             content=content,
             citations=citations or [],
+            reasoning_content=reasoning_content,
+            thinking_process=thinking_process,
             created_at=now
         )
         db.add(new_msg)
@@ -168,6 +174,8 @@ async def append_message(
             "role": new_msg.role,
             "content": new_msg.content,
             "citations": new_msg.citations,
+            "reasoning_content": new_msg.reasoning_content,
+            "thinking_process": new_msg.thinking_process,
             "created_at": new_msg.created_at.isoformat()
         }
 

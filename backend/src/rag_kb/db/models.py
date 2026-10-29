@@ -185,6 +185,8 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False) # user / assistant
     content: Mapped[str] = mapped_column(Text, nullable=False)
     citations: Mapped[List[dict]] = mapped_column(JSONB, default=list)
+    reasoning_content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    thinking_process: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc)

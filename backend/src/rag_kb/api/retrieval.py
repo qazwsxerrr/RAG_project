@@ -281,24 +281,30 @@ async def chat_endpoint(request: ChatQueryRequest):
 
             # 2. 阶段 7~8: 大模型流式问答生成 (分流推理思考与正式解答)
             full_answer_parts = []
+            full_reasoning_parts = []
             async for evt_type, token in stream_answer(request.query, final_chunks, citations):
                 if evt_type == "reasoning":
+                    full_reasoning_parts.append(token)
                     yield format_sse("reasoning", {"content": token})
                 else:
                     full_answer_parts.append(token)
                     yield format_sse("message", {"content": token})
 
             full_answer = "".join(full_answer_parts)
+            full_reasoning = "".join(full_reasoning_parts)
             total_overall_ms = int((time.perf_counter() - t0) * 1000)
+            thinking_payload = builder.to_thinking_process(total_overall_ms=total_overall_ms).model_dump()
 
-            # 记录 Assistant 消息
+            # 记录 Assistant 消息 (持久化包含深度思考与检索流水线摘要)
             if request.conversation_id:
                 try:
                     await chat_store.append_message(
                         request.conversation_id,
                         "assistant",
                         full_answer,
-                        citations=citations
+                        citations=citations,
+                        reasoning_content=full_reasoning if full_reasoning else None,
+                        thinking_process=thinking_payload if thinking_payload else None
                     )
                 except Exception as e:
                     logger.warning(f"记录助手消息失败: {e}")

@@ -65,6 +65,10 @@ async def init_db():
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
         await conn.run_sync(Base.metadata.create_all)
 
+        # 幂等补齐历史会话表扩展列 (reasoning_content 与 thinking_process)
+        await conn.execute(text("ALTER TABLE rag_chat_messages ADD COLUMN IF NOT EXISTS reasoning_content TEXT;"))
+        await conn.execute(text("ALTER TABLE rag_chat_messages ADD COLUMN IF NOT EXISTS thinking_process JSONB;"))
+
         # 创建 HNSW 向量索引与 GIN 全文检索索引
         await conn.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_docs_title_embedding 
