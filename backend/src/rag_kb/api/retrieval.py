@@ -9,8 +9,14 @@ import time
 import json
 import logging
 from typing import AsyncGenerator, Dict, List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import StreamingResponse
+
+from rag_kb.api.deps import (
+    UserContext,
+    get_current_user_optional,
+    derive_secure_department_scope
+)
 
 from rag_kb.api.schemas import (
     ChatQueryRequest,
@@ -82,8 +88,16 @@ class ThinkingProcessBuilder:
         )
 
 @router.post("/retrieval/search", response_model=ChatQueryResponse)
-async def search_endpoint(request: ChatQueryRequest):
+async def search_endpoint(
+    request: ChatQueryRequest,
+    user: Optional[UserContext] = Depends(get_current_user_optional)
+):
     """纯检索接口 (阶段 1 ~ 阶段 6)：获取经过多阶段漏斗精选的切片与思考流"""
+    # 0. RBAC 鉴权与部门防越权拦截
+    effective_dept_scope = request.department_scope
+    if user:
+        effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
+
     # 前置安全熔断护栏：拦截涉黄、暴恐、涉枪涉爆违禁词与越狱注入
     is_safe, error_msg = validate_prompt_security(request.query)
     if not is_safe:
@@ -104,7 +118,7 @@ async def search_endpoint(request: ChatQueryRequest):
         query=request.query,
         conversation_id=request.conversation_id,
         history=history_dicts,
-        department_scope=request.department_scope,
+        department_scope=effective_dept_scope,
         category_scope=request.category_scope,
         tags_scope=request.tags_scope,
         scene_type=request.scene_type,
@@ -189,19 +203,27 @@ async def search_endpoint(request: ChatQueryRequest):
         raise HTTPException(status_code=500, detail=f"检索服务异常: {str(e)}")
 
 @router.post("/retrieval/chat")
-async def chat_endpoint(request: ChatQueryRequest):
+async def chat_endpoint(
+    request: ChatQueryRequest,
+    user: Optional[UserContext] = Depends(get_current_user_optional)
+):
     """
     阶段 1 ~ 阶段 8 全流程智能问答流式打字机接口 (POST SSE 协议)
     - 阶段 1~6: 执行 LangGraph 检索图，实时派发 event: thinking 思考流与 event: citations
     - 阶段 7~8: 动态组装防幻觉 Prompt，调用云端大模型流式派发 event: message 打字机输出
     - 结束: 派发 event: done
     """
+    # 0. RBAC 鉴权与部门防越权拦截
+    effective_dept_scope = request.department_scope
+    if user:
+        effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
+
     history_dicts = [h.model_dump() for h in request.history] if request.history else []
     initial_state = get_default_state(
         query=request.query,
         conversation_id=request.conversation_id,
         history=history_dicts,
-        department_scope=request.department_scope,
+        department_scope=effective_dept_scope,
         category_scope=request.category_scope,
         tags_scope=request.tags_scope,
         scene_type=request.scene_type,

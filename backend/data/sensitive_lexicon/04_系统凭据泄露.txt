@@ -1,0 +1,11 @@
+# 04 真实系统根凭据与敏感私钥
+系统根密码
+数据库私钥
+RootPassword
+API_SECRET_KEY
+-----BEGIN RSA PRIVATE KEY-----
+-----BEGIN PRIVATE KEY-----
+-----BEGIN OPENSSH PRIVATE KEY-----
+-----BEGIN EC PRIVATE KEY-----
+aws_secret_access_key
+aliyun_access_key_secret

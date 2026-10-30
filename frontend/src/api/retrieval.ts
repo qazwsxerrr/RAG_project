@@ -36,11 +36,17 @@ export const retrievalApi = {
     abortSignal?: AbortSignal
   ) {
     try {
+      const token = localStorage.getItem('rag_auth_token');
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const response = await fetch('/api/v1/retrieval/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({
           ...payload,
           stream: true,
@@ -49,8 +55,14 @@ export const retrievalApi = {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`问答服务异常 (${response.status}): ${errorText}`);
+        let errorMsg = `HTTP ${response.status}`;
+        try {
+          const errJson = await response.json();
+          errorMsg = errJson.detail || errorMsg;
+        } catch {
+          errorMsg = await response.text();
+        }
+        throw new Error(errorMsg);
       }
 
       if (!response.body) {

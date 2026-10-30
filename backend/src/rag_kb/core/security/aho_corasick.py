@@ -19,12 +19,7 @@ from rag_kb.core.security.normalizer import normalize_text, clean_confusable_var
 logger = logging.getLogger(__name__)
 
 DEFAULT_SENSITIVE_WORDS = [
-    # 商业机密与企业资产
-    "商业机密",
-    "核心机密",
-    "绝密文件",
-    "机密资料",
-    "内部密件",
+    # 核心系统根凭据与私钥防泄密
     "系统根密码",
     "数据库私钥",
     "RootPassword",
@@ -36,6 +31,10 @@ DEFAULT_SENSITIVE_WORDS = [
     "IgnoreAllInstructions",
     "越狱模式",
     "Jailbreak",
+    # P0 真实违规违禁红线保底
+    "色情淫秽",
+    "军用手枪",
+    "自制炸药",
 ]
 
 class TrieNode:

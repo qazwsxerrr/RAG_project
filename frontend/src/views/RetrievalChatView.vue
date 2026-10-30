@@ -1,31 +1,45 @@
 <template>
   <div class="retrieval-chat-view h-full flex flex-col overflow-hidden relative select-none">
     
-    <!-- 顶部极简顶栏 (对齐参考图专业工控风格) -->
-    <header class="h-13 border-b border-slate-200/80 bg-white px-6 flex items-center justify-between z-10">
+    <!-- 顶部极简顶栏 (专业平铺工控风格，杜绝大框套小框与文字折行) -->
+    <header class="h-13 border-b border-slate-200/80 bg-white px-5 flex items-center justify-between z-10 gap-3">
       <!-- 左侧：页面标题与状态 -->
-      <div class="flex items-center space-x-3">
-        <h2 class="text-sm font-bold text-slate-900 tracking-tight">
+      <div class="flex items-center space-x-3 shrink-0 min-w-0">
+        <h2 class="text-sm font-bold text-slate-900 tracking-tight truncate max-w-[160px] md:max-w-[220px]" :title="chatStore.currentSession?.title">
           {{ chatStore.currentSession?.title || '知识问答' }}
         </h2>
-        <span class="inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
+        <span class="hidden sm:inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-400 shrink-0">
           <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-          <span>PostgreSQL + OSS 在线</span>
+          <span>在线</span>
         </span>
       </div>
 
-      <!-- 右侧控制区：范围过滤、分段控制器与操作项 -->
-      <div class="flex items-center space-x-2.5 text-xs">
-        <!-- 部门权限范围选择器 -->
-        <div class="inline-flex items-center bg-slate-100 rounded-lg p-0.5 text-xs">
-          <span class="px-2 text-slate-500 font-medium flex items-center gap-1">
-            <svg class="w-3.5 h-3.5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-            部门
-          </span>
+      <!-- 右侧控制区：统一纯平铺下拉与分段控制器 -->
+      <div class="flex items-center space-x-2 text-xs shrink-0 whitespace-nowrap overflow-x-auto py-1">
+        <!-- 身份选择器 (纯平铺，杜绝套框) -->
+        <div class="flex items-center gap-1.5 shrink-0 whitespace-nowrap">
+          <span class="text-slate-500 font-medium text-xs select-none">身份:</span>
+          <select 
+            :value="authStore.currentRoleId"
+            @change="handleRoleChange"
+            class="h-7 px-2 bg-slate-100 hover:bg-slate-200/70 text-slate-800 font-medium text-xs rounded-md outline-none border border-slate-200/80 cursor-pointer transition-colors"
+            title="切换当前 RBAC 权限身份"
+          >
+            <option v-for="r in authStore.MOCK_ROLES" :key="r.id" :value="r.id">
+              {{ r.name }}
+            </option>
+          </select>
+        </div>
+
+        <div class="h-4 w-px bg-slate-200 shrink-0"></div>
+
+        <!-- 部门范围选择器 (纯平铺，杜绝套框) -->
+        <div class="flex items-center gap-1.5 shrink-0 whitespace-nowrap">
+          <span class="text-slate-500 font-medium text-xs select-none">部门:</span>
           <select 
             v-model="selectedDeptPath"
-            class="bg-white text-slate-800 text-xs rounded-md px-2 py-1 outline-none border-none shadow-xs font-medium cursor-pointer"
-            title="限定检索部门范围（组织架构前缀权限隔离）"
+            class="h-7 px-2 bg-slate-100 hover:bg-slate-200/70 text-slate-800 font-medium text-xs rounded-md outline-none border border-slate-200/80 cursor-pointer transition-colors"
+            title="限定检索部门范围"
           >
             <option value="">全部部门</option>
             <option v-for="d in departmentList" :key="d.id" :value="d.path">
@@ -34,16 +48,15 @@
           </select>
         </div>
 
-        <!-- 知识分类收敛选择器 -->
-        <div class="inline-flex items-center bg-slate-100 rounded-lg p-0.5 text-xs">
-          <span class="px-2 text-slate-500 font-medium flex items-center gap-1">
-            <svg class="w-3.5 h-3.5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-            分类
-          </span>
+        <div class="h-4 w-px bg-slate-200 shrink-0"></div>
+
+        <!-- 分类选择器 (纯平铺，杜绝套框) -->
+        <div class="flex items-center gap-1.5 shrink-0 whitespace-nowrap">
+          <span class="text-slate-500 font-medium text-xs select-none">分类:</span>
           <select 
             v-model="selectedCategory"
-            class="bg-white text-slate-800 text-xs rounded-md px-2 py-1 outline-none border-none shadow-xs font-medium cursor-pointer"
-            title="前置过滤知识分类，细化检索范围"
+            class="h-7 px-2 bg-slate-100 hover:bg-slate-200/70 text-slate-800 font-medium text-xs rounded-md outline-none border border-slate-200/80 cursor-pointer transition-colors"
+            title="前置过滤知识分类"
           >
             <option v-for="c in categoryList" :key="c" :value="c">
               {{ c }}
@@ -51,28 +64,27 @@
           </select>
         </div>
 
-        <div class="h-4 w-px bg-slate-200"></div>
+        <div class="h-4 w-px bg-slate-200 shrink-0"></div>
 
-        <!-- 检索场景分段控制组 (彻底废弃突兀的 select 框) -->
-        <!-- 场景分段选择 (参考图样式) -->
-        <div class="inline-flex p-0.5 bg-slate-100 rounded-lg text-xs font-medium">
+        <!-- 检索场景分段控制组 -->
+        <div class="inline-flex p-0.5 bg-slate-100 rounded-lg text-xs font-medium shrink-0">
           <button 
             v-for="s in sceneOptions" 
             :key="s.value"
             @click="sceneType = s.value"
-            class="px-2.5 py-1 rounded-md transition-all text-xs"
+            class="px-2 py-1 rounded-md transition-all text-xs"
             :class="sceneType === s.value ? 'bg-white text-slate-900 shadow-xs font-medium' : 'text-slate-500 hover:text-slate-800'"
           >
             {{ s.label }}
           </button>
         </div>
 
-        <div class="h-4 w-px bg-slate-200"></div>
+        <div class="h-4 w-px bg-slate-200 shrink-0"></div>
 
-        <!-- HyDE 假想开关 (纯平铺文字与状态点，消除独立药丸外边框) -->
+        <!-- HyDE 假想开关 -->
         <button 
           @click="enableHyde = !enableHyde" 
-          class="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium transition-colors cursor-pointer rounded-md hover:bg-slate-50"
+          class="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-medium transition-colors cursor-pointer rounded-md hover:bg-slate-50 shrink-0 whitespace-nowrap"
           :class="enableHyde ? 'text-blue-600' : 'text-slate-500 hover:text-slate-700'"
           title="开启后系统将先调用大模型做假想推理再二次召回"
         >
@@ -80,10 +92,10 @@
           <span>HyDE 假想</span>
         </button>
 
-        <!-- 清空对话 (纯平铺微图标) -->
+        <!-- 清空对话 -->
         <button 
           @click="chatStore.clearCurrentMessages" 
-          class="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 transition-colors"
+          class="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 transition-colors shrink-0"
           title="清空当前会话消息"
         >
           <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
@@ -97,6 +109,32 @@
       class="flex-1 overflow-y-auto px-4 sm:px-8 py-6 space-y-6 scroll-smooth select-text bg-[#FAFBFD]"
     >
       <div class="max-w-3xl mx-auto w-full pb-28">
+        <!-- 越权拦截全局浮动警示横幅 (403 Forbidden 醒目弹窗) -->
+        <div 
+          v-if="authStore.interceptAlert"
+          class="mb-6 p-4 bg-rose-50/95 border-2 border-rose-400 rounded-xl flex items-start gap-3.5 shadow-lg animate-in fade-in slide-in-from-top-3 duration-300"
+        >
+          <div class="text-rose-600 font-bold text-2xl leading-none mt-0.5 select-none">🛡️</div>
+          <div class="flex-1 text-xs">
+            <div class="font-bold text-rose-800 text-sm flex items-center gap-2">
+              <span>BOLA / IDOR 越权访问物理拦截</span>
+              <span class="px-2 py-0.5 rounded bg-rose-200 text-rose-900 text-[10px] font-mono font-bold">403 Forbidden</span>
+            </div>
+            <div class="text-rose-800 font-mono text-xs mt-1.5 bg-white/90 p-2.5 rounded-lg border border-rose-300 leading-relaxed break-all">
+              ❌ {{ authStore.interceptAlert }}
+            </div>
+            <div class="text-[11px] text-rose-700 mt-2 flex items-center gap-1 font-medium">
+              <span>💡 当前身份为 <b>{{ authStore.currentRole().name }}</b>。您可以在右上角切换为【超级管理员】后再试！</span>
+            </div>
+          </div>
+          <button 
+            @click="authStore.interceptAlert = ''" 
+            class="text-rose-400 hover:text-rose-700 text-lg font-bold p-1 rounded hover:bg-rose-100 transition-colors"
+            title="关闭提示"
+          >
+            ✕
+          </button>
+        </div>
         <!-- 正在加载历史消息状态 -->
         <div 
           v-if="chatStore.isLoadingMessages && (!chatStore.currentSession || chatStore.currentSession.messages.length === 0)"
@@ -198,12 +236,14 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, onMounted } from 'vue';
 import { useChatStore } from '../stores/chat';
+import { useAuthStore } from '../stores/auth';
 import { documentsApi } from '../api/documents';
 import type { CitationSource, DepartmentItem, DocumentItem } from '../types';
 import ChatMessage from '../components/retrieval/ChatMessage.vue';
 import CitationModal from '../components/retrieval/CitationModal.vue';
 
 const chatStore = useChatStore();
+const authStore = useAuthStore();
 
 const inputQuery = ref('');
 const inputRef = ref<HTMLTextAreaElement | null>(null);
@@ -218,6 +258,16 @@ const departmentList = ref<DepartmentItem[]>([]);
 const categoryList = ref<string[]>(['全部', '技术规范', '操作规程', '产品文档', '行业报告', '面试题']);
 
 onMounted(async () => {
+  try {
+    await authStore.initAuth();
+    const role = authStore.currentRole();
+    if (role.deptPath && role.deptPath !== '/') {
+      selectedDeptPath.value = role.deptPath;
+    }
+  } catch (err) {
+    console.error('初始化模拟身份失败:', err);
+  }
+
   try {
     await chatStore.initSessions();
   } catch (err) {
@@ -266,10 +316,22 @@ const scrollToBottom = async () => {
   }
 };
 
+const handleRoleChange = async (e: Event) => {
+  const targetVal = (e.target as HTMLSelectElement).value;
+  await authStore.switchRole(targetVal);
+  const role = authStore.currentRole();
+  if (role.deptPath && role.deptPath !== '/') {
+    selectedDeptPath.value = role.deptPath;
+  } else {
+    selectedDeptPath.value = '';
+  }
+};
+
 const handleSend = async () => {
   const q = inputQuery.value.trim();
   if (!q || chatStore.isGenerating) return;
 
+  authStore.interceptAlert = '';
   inputQuery.value = '';
   scrollToBottom();
 

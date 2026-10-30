@@ -1,4 +1,4 @@
-"""src/rag_kb/core/security/__init__.py —— 企业级安全护栏与敏感词过滤模块导出。
+"""src/rag_kb/core/security/__init__.py —— 企业级安全护栏、敏感词过滤与隐私脱敏模块导出。
 """
 
 from rag_kb.core.security.aho_corasick import (
@@ -14,6 +14,15 @@ from rag_kb.core.security.stream_moderation import (
     StreamModerator,
     default_stream_moderator,
     moderate_stream,
+    FUSE_BREAKER_MESSAGE,
+)
+from rag_kb.core.security.pii_masker import (
+    mask_all_pii,
+    StreamingPIIMasker,
+)
+from rag_kb.core.security.credential_guard import (
+    detect_credential_leak,
+    CREDENTIAL_FUSE_MESSAGE,
 )
 
 __all__ = [
@@ -25,4 +34,9 @@ __all__ = [
     "StreamModerator",
     "default_stream_moderator",
     "moderate_stream",
+    "FUSE_BREAKER_MESSAGE",
+    "mask_all_pii",
+    "StreamingPIIMasker",
+    "detect_credential_leak",
+    "CREDENTIAL_FUSE_MESSAGE",
 ]

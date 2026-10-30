@@ -3,6 +3,7 @@ import { ref, computed, reactive } from 'vue';
 import type { ChatSession, ChatMessage, ThinkingProcess, CitationSource } from '../types';
 import { retrievalApi } from '../api/retrieval';
 import { sessionsApi } from '../api/sessions';
+import { useAuthStore } from './auth';
 
 const ACTIVE_SESSION_STORAGE_KEY = 'rag_active_session_id';
 
@@ -290,6 +291,11 @@ export const useChatStore = defineStore('chat', () => {
             t.isReasoning = false;
             t.error = err.message;
             isGenerating.value = false;
+
+            if (err.message && (err.message.includes('越权') || err.message.includes('403'))) {
+              const authStore = useAuthStore();
+              authStore.interceptAlert = err.message;
+            }
           },
         },
         abortController.signal
@@ -298,6 +304,11 @@ export const useChatStore = defineStore('chat', () => {
       assistantMessage.isStreaming = false;
       assistantMessage.error = e.message || '请求发生异常';
       isGenerating.value = false;
+
+      if (e.message && (e.message.includes('越权') || e.message.includes('403'))) {
+        const authStore = useAuthStore();
+        authStore.interceptAlert = e.message;
+      }
     }
   };
 

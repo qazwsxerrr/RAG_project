@@ -20,6 +20,7 @@ from rag_kb.api.routes import router as documents_router, router_chunks as chunk
 from rag_kb.api.departments import router as departments_router
 from rag_kb.api.retrieval import router as retrieval_router
 from rag_kb.api.sessions import router as sessions_router
+from rag_kb.api.auth import router as auth_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -65,12 +66,13 @@ def create_app() -> FastAPI:
     parsed_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/static/parsed", StaticFiles(directory=str(parsed_dir)), name="parsed")
 
-    # 3. 注册 API 业务路由
+    # 3. 注册 API 业务路由 (优先展示鉴权与检索核心路由)
     prefix = settings.API_V1_PREFIX
+    app.include_router(auth_router, prefix=prefix)
+    app.include_router(retrieval_router, prefix=prefix)
+    app.include_router(departments_router, prefix=prefix)
     app.include_router(documents_router, prefix=prefix)
     app.include_router(chunks_router, prefix=prefix)
-    app.include_router(departments_router, prefix=prefix)
-    app.include_router(retrieval_router, prefix=prefix)
     app.include_router(sessions_router, prefix=prefix)
 
     # 4. 健康检查与根路由

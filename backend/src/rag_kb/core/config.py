@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     PORT: int = 8000
     API_V1_PREFIX: str = "/api/v1"
     SECRET_KEY: str = "rag-enterprise-secret-key-change-in-production"
+    JWT_SECRET_KEY: str = "rag-enterprise-jwt-secret-key-change-in-production"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24小时
     DATA_PARSED_DIR: str = str(WORKSPACE_ROOT / "data" / "parsed")
     DEFAULT_TENANT_ID: str = "default_tenant"
 
