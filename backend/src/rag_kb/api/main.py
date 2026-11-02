@@ -21,6 +21,7 @@ from rag_kb.api.departments import router as departments_router
 from rag_kb.api.retrieval import router as retrieval_router
 from rag_kb.api.sessions import router as sessions_router
 from rag_kb.api.auth import router as auth_router
+from rag_kb.api.system import router as system_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(documents_router, prefix=prefix)
     app.include_router(chunks_router, prefix=prefix)
     app.include_router(sessions_router, prefix=prefix)
+    app.include_router(system_router, prefix=prefix)
 
     # 4. 健康检查与根路由
     @app.get("/health", tags=["监控"])

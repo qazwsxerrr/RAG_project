@@ -136,10 +136,18 @@ async def append_message(
         sid = to_session_uuid(session_id)
         msg_id = uuid.uuid4()
 
-        # 检查会话是否存在，若前端直接发起对话则自动补充会话记录
-        stmt = select(ChatSession).where(ChatSession.id == sid)
+        # 采用 SELECT ... FOR UPDATE 加行级排他锁，杜绝并发竞态条件
+        stmt = select(ChatSession).where(ChatSession.id == sid).with_for_update()
         res = await db.execute(stmt)
         sess = res.scalar_one_or_none()
+
+        # 统计当前会话中已经存在的 user 消息数量（客观事实）
+        count_stmt = select(func.count(ChatMessage.id)).where(
+            ChatMessage.session_id == sid,
+            ChatMessage.role == "user"
+        )
+        user_msg_count = (await db.execute(count_stmt)).scalar() or 0
+
         if not sess:
             sess = ChatSession(
                 id=sid,
@@ -151,7 +159,9 @@ async def append_message(
             db.add(sess)
             await db.flush()
         else:
-            if role == "user" and sess.title == "新会话":
+            # 严格基于客观事实：只有当该会话此前没有任何 user 消息时，才将首条提问作为标题
+            # 并发到达的请求因行锁排队，等待前序提交后读取到的 user_msg_count 将 > 0，故不会篡改标题
+            if role == "user" and user_msg_count == 0:
                 sess.title = make_title(content)
             sess.updated_at = now
 
@@ -179,6 +189,33 @@ async def append_message(
             "created_at": new_msg.created_at.isoformat()
         }
 
+async def update_session(
+    session_id: str,
+    title: Optional[str] = None,
+    tenant_id: str = "default_tenant"
+) -> Optional[Dict[str, Any]]:
+    """更新会话元数据（如自定义标题），加行级排他锁保证原子性"""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as db:
+        sid = to_session_uuid(session_id)
+        stmt = select(ChatSession).where(ChatSession.id == sid, ChatSession.tenant_id == tenant_id).with_for_update()
+        res = await db.execute(stmt)
+        sess = res.scalar_one_or_none()
+        if not sess:
+            return None
+        if title is not None:
+            sess.title = title.strip() or "新会话"
+        sess.updated_at = now
+        await db.commit()
+        return {
+            "id": str(sess.id),
+            "title": sess.title,
+            "tenant_id": sess.tenant_id,
+            "created_at": sess.created_at.isoformat(),
+            "updated_at": sess.updated_at.isoformat()
+        }
+
 async def delete_session(session_id: str, tenant_id: str = "default_tenant") -> bool:
     """删除会话及其名下所有历史消息"""
     async with AsyncSessionLocal() as db:
@@ -196,6 +233,7 @@ class ChatStore:
     get_messages = staticmethod(get_messages)
     append_message = staticmethod(append_message)
     add_message = staticmethod(append_message)
+    update_session = staticmethod(update_session)
     delete_session = staticmethod(delete_session)
 
 chat_store = ChatStore()

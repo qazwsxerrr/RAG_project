@@ -44,6 +44,15 @@ export const sessionsApi = {
     });
   },
 
+  /** 更新云端会话元数据（如显式重命名标题） */
+  async updateSession(sessionId: string, title: string, tenantId: string = 'default_tenant'): Promise<BackendSessionItem> {
+    return apiClient.patch(`/sessions/${sessionId}`, {
+      title,
+    }, {
+      params: { tenant_id: tenantId },
+    });
+  },
+
   /** 获取指定会话的历史多轮对话消息 */
   async getSessionMessages(sessionId: string, limit: number = 100): Promise<BackendMessageItem[]> {
     return apiClient.get(`/sessions/${sessionId}/messages`, {

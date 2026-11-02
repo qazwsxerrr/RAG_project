@@ -14,6 +14,7 @@ from rag_kb.db.chat_store import (
     create_session,
     list_sessions,
     get_messages,
+    update_session,
     delete_session
 )
 
@@ -22,6 +23,9 @@ router = APIRouter(prefix="/sessions", tags=["会话历史"])
 class CreateSessionRequest(BaseModel):
     title: Optional[str] = "新会话"
     tenant_id: str = "default_tenant"
+
+class UpdateSessionRequest(BaseModel):
+    title: Optional[str] = None
 
 @router.get("")
 async def get_sessions(
@@ -46,6 +50,22 @@ async def remove_session(session_id: str, tenant_id: str = Query("default_tenant
     if not ok:
         raise HTTPException(status_code=404, detail="未找到该会话或已被删除")
     return {"status": "success", "message": f"会话 {session_id} 已删除"}
+
+@router.patch("/{session_id}")
+async def update_session_info(
+    session_id: str,
+    req: UpdateSessionRequest,
+    tenant_id: str = Query("default_tenant")
+):
+    """更新会话元数据（如自定义标题），严格加行锁防止并发覆盖"""
+    updated = await update_session(
+        session_id=session_id,
+        title=req.title,
+        tenant_id=tenant_id
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="未找到该会话")
+    return updated
 
 @router.get("/{session_id}/messages")
 async def get_session_messages(

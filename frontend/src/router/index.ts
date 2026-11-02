@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router';
 import DocumentListView from '../views/DocumentListView.vue';
 import DocumentUploadView from '../views/DocumentUploadView.vue';
 import RetrievalChatView from '../views/RetrievalChatView.vue';
+import ChannelStatusView from '../views/ChannelStatusView.vue';
 
 const routes = [
   {
@@ -25,6 +26,12 @@ const routes = [
     name: 'RetrievalChat',
     component: RetrievalChatView,
     meta: { title: '智能问答检索' },
+  },
+  {
+    path: '/channels',
+    name: 'ChannelStatus',
+    component: ChannelStatusView,
+    meta: { title: '大模型渠道状态与SLA监控' },
   },
   {
     path: '/chat',

@@ -23,12 +23,13 @@ export const useChatStore = defineStore('chat', () => {
   /** 加载指定会话的云端历史消息 */
   const loadSessionMessages = async (sessionId: string, force: boolean = false) => {
     if (!sessionId) return;
-    if (!force && loadedMessagesMap[sessionId]) return;
+    const target = sessions.value.find((s) => s.id === sessionId);
+    // 缓存防御：只有在非强制、已标记加载、且内存中确实已持有消息时才跳过，杜绝空数组死锁
+    if (!force && loadedMessagesMap[sessionId] && target && target.messages.length > 0) return;
 
     isLoadingMessages.value = true;
     try {
       const msgs = await sessionsApi.getSessionMessages(sessionId, 100);
-      const target = sessions.value.find((s) => s.id === sessionId);
       if (target) {
         target.messages = msgs.map((m) => ({
           id: m.id,
@@ -50,18 +51,32 @@ export const useChatStore = defineStore('chat', () => {
     }
   };
 
-  /** 初始化加载云端会话列表 */
-  const initSessions = async () => {
+  /** 初始化加载云端会话列表（幂等保活与增量同步） */
+  const initSessions = async (force: boolean = false) => {
+    // 治理原则：单页应用路由切换时，若 Store 中已有会话列表且当前会话数据完整，直接复用避免清空闪烁
+    if (!force && sessions.value.length > 0) {
+      if (currentSessionId.value) {
+        const active = sessions.value.find((s) => s.id === currentSessionId.value);
+        if (!active || !active.messages || active.messages.length === 0) {
+          await loadSessionMessages(currentSessionId.value);
+        }
+      }
+      return;
+    }
+
     isLoadingSessions.value = true;
     try {
       const list = await sessionsApi.listSessions('default_tenant', 50, 0);
       if (list && list.length > 0) {
+        // 保留现有已加载的消息对象映射，杜绝粗暴清空现有对话树
+        const existingMessagesMap = new Map(sessions.value.map((s) => [s.id, s.messages]));
+
         sessions.value = list.map((item) => ({
           id: item.id,
-          title: item.title || '新知识问答会话',
+          title: item.title,
           messageCount: item.message_count ?? 0,
           updatedAt: new Date(item.updated_at || item.created_at).getTime(),
-          messages: [],
+          messages: existingMessagesMap.get(item.id) || [],
           scene_type: 'general',
           enable_hyde: false,
         }));
@@ -72,13 +87,16 @@ export const useChatStore = defineStore('chat', () => {
         currentSessionId.value = targetId;
         localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, targetId);
 
-        await loadSessionMessages(targetId);
+        const current = sessions.value.find((s) => s.id === targetId);
+        if (!current || !current.messages || current.messages.length === 0) {
+          await loadSessionMessages(targetId, true);
+        }
       } else {
         // 云端尚无历史会话，创建云端新会话
-        const created = await sessionsApi.createSession('新知识问答会话', 'default_tenant');
+        const created = await sessionsApi.createSession('新会话', 'default_tenant');
         const newSession: ChatSession = {
           id: created.id,
-          title: created.title || '新知识问答会话',
+          title: created.title || '新会话',
           messageCount: 0,
           updatedAt: new Date(created.updated_at || created.created_at).getTime(),
           messages: [],
@@ -191,9 +209,15 @@ export const useChatStore = defineStore('chat', () => {
     const session = currentSession.value;
     if (!session) return;
 
-    // 若为会话第一条提问，自动根据问题前 22 字更新前端标题展示
-    if (session.messages.length === 0 || session.title === '新知识问答会话' || session.title === '新会话') {
-      session.title = query.length > 22 ? query.slice(0, 22) + '...' : query;
+    // 治理原则：基于客观事实判断。若当前会话此前尚无任何用户提问，自动生成标题并显式同步至后端 SSOT
+    const priorUserMessages = session.messages.filter((m) => m.role === 'user');
+    if (priorUserMessages.length === 0) {
+      const derivedTitle = query.length > 22 ? query.slice(0, 22) + '...' : query;
+      session.title = derivedTitle;
+      // 显式调用 RESTful PATCH 契约持久化，后端在事务行锁中兜底防止并发覆盖
+      sessionsApi.updateSession(session.id, derivedTitle).catch((err) => {
+        console.warn('异步更新会话标题警告 (后端事务行锁将兜底保证一致性):', err);
+      });
     }
 
     // 1. 压入用户提问

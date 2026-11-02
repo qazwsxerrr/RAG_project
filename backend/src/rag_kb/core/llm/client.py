@@ -14,12 +14,18 @@
 import asyncio
 import json
 import logging
+import time
 from typing import AsyncGenerator, Dict, Any, List, Optional, Tuple, Type, TypeVar
 from pydantic import BaseModel
 import httpx
 
-from rag_kb.core.config import settings
+from rag_kb.core.config import settings, ModelNodeConfig, ResilientLLMConfig, load_resilient_llm_config
 from rag_kb.core.resilience.retry import retry_on_transient, is_transient_error
+from rag_kb.core.resilience.classifier import classify_error
+from rag_kb.core.resilience.circuit_breaker import ModelHealthTracker
+from rag_kb.core.resilience.alert import trigger_webhook_alert
+from rag_kb.core.logging.context import get_request_id, get_tenant_id, get_user_id
+from rag_kb.core.logging.audit import record_audit_log
 from rag_kb.core.llm.stream_parser import parse_sse_stream
 from rag_kb.core.network.egress import validate_outbound_url
 
@@ -34,17 +40,19 @@ class LLMGateway:
         self._sync_client: Optional[httpx.Client] = None
 
     def get_client(self) -> httpx.AsyncClient:
-        """获取或惰性初始化全局共享的 httpx.AsyncClient 客户端长连接池"""
+        """获取或惰性初始化全局共享的 httpx.AsyncClient 客户端长连接池 (集成精细化分级超时)"""
         if self._client is None or self._client.is_closed:
             limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
-            self._client = httpx.AsyncClient(limits=limits, timeout=90.0)
+            timeout = httpx.Timeout(connect=3.0, read=60.0, write=10.0, pool=5.0)
+            self._client = httpx.AsyncClient(limits=limits, timeout=timeout)
         return self._client
 
     def get_sync_client(self) -> httpx.Client:
         """获取或惰性初始化全局共享的同步 httpx.Client 客户端长连接池"""
         if self._sync_client is None or self._sync_client.is_closed:
             limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
-            self._sync_client = httpx.Client(limits=limits, timeout=90.0)
+            timeout = httpx.Timeout(connect=3.0, read=60.0, write=10.0, pool=5.0)
+            self._sync_client = httpx.Client(limits=limits, timeout=timeout)
         return self._sync_client
 
     async def close(self):
@@ -418,5 +426,365 @@ class LLMGateway:
 
         return schema.model_validate_json(cleaned_json)
 
-# 全局单例导出
-llm_gateway = LLMGateway()
+# ==================== Phase-7: 高可用弹性多模型网关门面 ====================
+
+class ResilientLLMGateway(LLMGateway):
+    """
+    具备动态多模型热切换、全链路指标观测与容灾熔断的企业级 LLM 网关门面 (Phase-7)
+    """
+
+    def __init__(self, config: Optional[ResilientLLMConfig] = None):
+        super().__init__()
+        self.config = config or load_resilient_llm_config(settings)
+        self.health_tracker = ModelHealthTracker(
+            window_size=self.config.sliding_window_size,
+            cooldown_seconds=self.config.circuit_breaker_cooldown_seconds,
+            error_threshold_percent=self.config.error_threshold_percentage
+        )
+
+    def reload_config(self, config: Optional[ResilientLLMConfig] = None):
+        """支持配置热重载"""
+        self.config = config or load_resilient_llm_config(settings)
+        self.health_tracker.window_size = self.config.sliding_window_size
+        self.health_tracker.cooldown_seconds = self.config.circuit_breaker_cooldown_seconds
+        self.health_tracker.error_threshold_percent = self.config.error_threshold_percentage
+
+    def _get_candidate_nodes(
+        self,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        backend: Optional[str] = None
+    ) -> List[ModelNodeConfig]:
+        """获取目标执行候选链：若调用方显式指定 endpoint/model 则以指定参数优先，否则按候选池顺序调度"""
+        if model or base_url or api_key:
+            return [
+                ModelNodeConfig(
+                    name="caller-override",
+                    model=model or self.config.primary.model,
+                    base_url=base_url or self.config.primary.base_url,
+                    api_key=api_key or self.config.primary.api_key,
+                    backend=backend or self.config.primary.backend
+                )
+            ]
+        return [self.config.primary] + self.config.fallbacks
+
+    async def stream_chat(
+        self,
+        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        temperature: float = 0.2,
+        max_tokens_budget: int = 4096,
+        backend: Optional[str] = None,
+        **kwargs
+    ) -> AsyncGenerator[Tuple[str, str], None]:
+        candidate_nodes = self._get_candidate_nodes(model, base_url, api_key, backend)
+        req_id = get_request_id()
+        last_error = None
+
+        for idx, node in enumerate(candidate_nodes):
+            if not self.health_tracker.is_node_available(node.name):
+                logger.warning(f"[{req_id}][LLMGateway] 节点 [{node.name}] 处于熔断冷却中，自动跳过。")
+                continue
+
+            t0 = time.perf_counter()
+            first_token_time = None
+            token_yielded = False
+
+            try:
+                logger.info(f"[{req_id}][LLMGateway] 尝试由节点 [{node.name} ({node.model})] 执行流式推理...")
+                client = self.get_client()
+                endpoint, headers, payload, eff_backend = self._prepare_request(
+                    messages=messages,
+                    model=node.model,
+                    base_url=node.base_url,
+                    api_key=node.api_key,
+                    temperature=temperature,
+                    stream=True,
+                    backend=node.backend,
+                    **kwargs
+                )
+
+                async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
+                    if resp.status_code != 200:
+                        err_text = await resp.aread()
+                        raise httpx.HTTPStatusError(
+                            f"HTTP {resp.status_code} ({eff_backend}): {err_text.decode(errors='ignore')}",
+                            request=resp.request,
+                            response=resp
+                        )
+
+                    token_counter = 0
+                    stream_iter = parse_sse_stream(resp).__aiter__()
+                    while True:
+                        if first_token_time is None:
+                            # 首字超时控制：8.0 秒内未接收到首个 Token，判定主节点假死，主动掐断并切换
+                            try:
+                                event = await asyncio.wait_for(stream_iter.__anext__(), timeout=8.0)
+                            except asyncio.TimeoutError:
+                                raise httpx.ReadTimeout("首字响应超时 (TTFT > 8.0s)，判定上游节点假死")
+                            except StopAsyncIteration:
+                                break
+                            first_token_time = time.perf_counter()
+                            token_yielded = True
+                        else:
+                            try:
+                                event = await stream_iter.__anext__()
+                            except StopAsyncIteration:
+                                break
+
+                        event_type, token = event
+                        token_counter += 1
+                        if token_counter > max_tokens_budget:
+                            logger.warning(f"[{req_id}][LLMGateway] 达到单次请求 Token 预算上限 ({max_tokens_budget})，主动阻断流式响应！")
+                            break
+                        yield (event_type, token)
+
+                total_ms = int((time.perf_counter() - t0) * 1000)
+                ttft_ms = int((first_token_time - t0) * 1000) if first_token_time else total_ms
+
+                self.health_tracker.record_success(node.name, total_ms, ttft_ms)
+                logger.info(f"[{req_id}][LLM_INFERENCE] 节点 [{node.name}] 流式完成 | TTFT: {ttft_ms}ms | 总耗时: {total_ms}ms")
+
+                await record_audit_log(
+                    action="LLM_INFERENCE",
+                    resource_id=node.name,
+                    duration_ms=total_ms,
+                    status="SUCCESS",
+                    details={
+                        "model": node.model,
+                        "ttft_ms": ttft_ms,
+                        "backend": eff_backend,
+                        "failover": idx > 0
+                    }
+                )
+                return
+
+            except Exception as exc:
+                last_error = exc
+                total_ms = int((time.perf_counter() - t0) * 1000)
+                err_category = classify_error(exc)
+                self.health_tracker.record_failure(node.name, total_ms, err_category)
+
+                logger.error(f"[{req_id}][LLM_FAILOVER] 节点 [{node.name}] 发生故障 ({err_category}): {exc} | 耗时: {total_ms}ms")
+
+                await record_audit_log(
+                    action="LLM_INFERENCE",
+                    resource_id=node.name,
+                    duration_ms=total_ms,
+                    status="FAILED",
+                    error_msg=str(exc),
+                    details={"error_category": err_category, "model": node.model}
+                )
+
+                if self.health_tracker.should_alert(node.name):
+                    err_rate, avg_lat, p95_lat = self.health_tracker.get_sla_stats(node.name)
+                    await trigger_webhook_alert(
+                        node_name=node.name,
+                        err_category=err_category,
+                        detail=str(exc),
+                        error_rate=err_rate,
+                        avg_latency=avg_lat,
+                        p95_latency=p95_lat,
+                        webhook_url=self.config.alert_webhook_url
+                    )
+
+                # 安全拦截必须 Fail-Fast，严禁切换
+                if err_category == "ERR_SECURITY":
+                    raise exc
+
+                # 若流式已经开始向前端抛出 Token，中途中断不能静默切换
+                if token_yielded:
+                    raise RuntimeError(f"流式输出中途传输中断: {exc}") from exc
+
+                # 还有备选节点则热切换
+                if idx < len(candidate_nodes) - 1:
+                    next_node = candidate_nodes[idx + 1]
+                    logger.warning(
+                        f"[{req_id}][LLM_FAILOVER] 毫秒级热切换: [{node.name}] -> [{next_node.name}] (原因: {err_category})"
+                    )
+                    await record_audit_log(
+                        action="LLM_FAILOVER",
+                        resource_id=f"{node.name}->{next_node.name}",
+                        status="SWITCHED",
+                        details={"from_node": node.name, "to_node": next_node.name, "reason": err_category}
+                    )
+                    continue
+                else:
+                    raise RuntimeError(f"【LLM 网关灾难性故障】所有候选模型均不可用！最后错误: {last_error}") from exc
+
+    async def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
+        backend: Optional[str] = None,
+        **kwargs
+    ) -> str:
+        candidate_nodes = self._get_candidate_nodes(model, base_url, api_key, backend)
+        req_id = get_request_id()
+        last_error = None
+
+        for idx, node in enumerate(candidate_nodes):
+            if not self.health_tracker.is_node_available(node.name):
+                logger.warning(f"[{req_id}][LLMGateway] 节点 [{node.name}] 处于熔断冷却中，自动跳过。")
+                continue
+
+            t0 = time.perf_counter()
+            try:
+                client = self.get_client()
+                endpoint, headers, payload, eff_backend = self._prepare_request(
+                    messages=messages,
+                    model=node.model,
+                    base_url=node.base_url,
+                    api_key=node.api_key,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=False,
+                    backend=node.backend,
+                    **kwargs
+                )
+
+                resp = await client.post(endpoint, headers=headers, json=payload)
+                if resp.status_code != 200:
+                    err_msg = resp.text
+                    logger.error(f"[{req_id}][LLMGateway] HTTP {resp.status_code} 调用失败 ({eff_backend}): {err_msg}")
+                    resp.raise_for_status()
+
+                data = resp.json()
+                content = self._extract_content(data, eff_backend)
+                total_ms = int((time.perf_counter() - t0) * 1000)
+
+                self.health_tracker.record_success(node.name, total_ms)
+                logger.info(f"[{req_id}][LLM_INFERENCE] 节点 [{node.name}] 调用成功 | 耗时: {total_ms}ms")
+
+                await record_audit_log(
+                    action="LLM_INFERENCE",
+                    resource_id=node.name,
+                    duration_ms=total_ms,
+                    status="SUCCESS",
+                    details={"model": node.model, "backend": eff_backend, "failover": idx > 0}
+                )
+                return content
+
+            except Exception as exc:
+                last_error = exc
+                total_ms = int((time.perf_counter() - t0) * 1000)
+                err_category = classify_error(exc)
+                self.health_tracker.record_failure(node.name, total_ms, err_category)
+
+                logger.error(f"[{req_id}][LLM_FAILOVER] 节点 [{node.name}] 故障 ({err_category}): {exc} | 耗时: {total_ms}ms")
+
+                await record_audit_log(
+                    action="LLM_INFERENCE",
+                    resource_id=node.name,
+                    duration_ms=total_ms,
+                    status="FAILED",
+                    error_msg=str(exc),
+                    details={"error_category": err_category, "model": node.model}
+                )
+
+                if self.health_tracker.should_alert(node.name):
+                    err_rate, avg_lat, p95_lat = self.health_tracker.get_sla_stats(node.name)
+                    await trigger_webhook_alert(
+                        node_name=node.name,
+                        err_category=err_category,
+                        detail=str(exc),
+                        error_rate=err_rate,
+                        avg_latency=avg_lat,
+                        p95_latency=p95_lat,
+                        webhook_url=self.config.alert_webhook_url
+                    )
+
+                if err_category == "ERR_SECURITY":
+                    raise exc
+
+                if idx < len(candidate_nodes) - 1:
+                    next_node = candidate_nodes[idx + 1]
+                    logger.warning(
+                        f"[{req_id}][LLM_FAILOVER] 毫秒级热切换: [{node.name}] -> [{next_node.name}] (原因: {err_category})"
+                    )
+                    await record_audit_log(
+                        action="LLM_FAILOVER",
+                        resource_id=f"{node.name}->{next_node.name}",
+                        status="SWITCHED",
+                        details={"from_node": node.name, "to_node": next_node.name, "reason": err_category}
+                    )
+                    continue
+                else:
+                    raise RuntimeError(f"【LLM 网关灾难性故障】所有候选模型均不可用！最后错误: {last_error}") from exc
+
+    def chat_sync(
+        self,
+        messages: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
+        backend: Optional[str] = None,
+        **kwargs
+    ) -> str:
+        candidate_nodes = self._get_candidate_nodes(model, base_url, api_key, backend)
+        last_error = None
+
+        for idx, node in enumerate(candidate_nodes):
+            if not self.health_tracker.is_node_available(node.name):
+                logger.warning(f"[LLMGateway] 节点 [{node.name}] 处于熔断冷却中，自动跳过。")
+                continue
+
+            t0 = time.perf_counter()
+            try:
+                client = self.get_sync_client()
+                endpoint, headers, payload, eff_backend = self._prepare_request(
+                    messages=messages,
+                    model=node.model,
+                    base_url=node.base_url,
+                    api_key=node.api_key,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=False,
+                    backend=node.backend,
+                    **kwargs
+                )
+
+                resp = client.post(endpoint, headers=headers, json=payload)
+                if resp.status_code != 200:
+                    err_msg = resp.text
+                    logger.error(f"[LLMGateway] HTTP {resp.status_code} 同步调用失败 ({eff_backend}): {err_msg}")
+                    resp.raise_for_status()
+
+                data = resp.json()
+                content = self._extract_content(data, eff_backend)
+                total_ms = int((time.perf_counter() - t0) * 1000)
+
+                self.health_tracker.record_success(node.name, total_ms)
+                logger.info(f"[LLM_INFERENCE] 节点 [{node.name}] 同步调用成功 | 耗时: {total_ms}ms")
+                return content
+
+            except Exception as exc:
+                last_error = exc
+                total_ms = int((time.perf_counter() - t0) * 1000)
+                err_category = classify_error(exc)
+                self.health_tracker.record_failure(node.name, total_ms, err_category)
+                logger.error(f"[LLM_FAILOVER] 节点 [{node.name}] 同步调用故障 ({err_category}): {exc} | 耗时: {total_ms}ms")
+
+                if err_category == "ERR_SECURITY":
+                    raise exc
+
+                if idx < len(candidate_nodes) - 1:
+                    next_node = candidate_nodes[idx + 1]
+                    logger.warning(
+                        f"[LLM_FAILOVER] 同步调用热切换: [{node.name}] -> [{next_node.name}] (原因: {err_category})"
+                    )
+                    continue
+                else:
+                    raise RuntimeError(f"【LLM 网关灾难性故障】所有候选模型均不可用！最后错误: {last_error}") from exc
+
+# 全局单例导出 (默认使用具备热切换与可观测性的 ResilientLLMGateway)
+llm_gateway = ResilientLLMGateway()

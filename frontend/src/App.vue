@@ -65,6 +65,15 @@
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             <span>提交入库</span>
           </router-link>
+
+          <router-link 
+            to="/channels" 
+            class="flex items-center space-x-2.5 px-2.5 py-2 rounded-lg text-xs transition-colors"
+            :class="route.path === '/channels' ? 'bg-blue-50 text-blue-600 font-semibold' : 'text-slate-600 hover:bg-slate-100/70 hover:text-slate-900'"
+          >
+            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <span>渠道状态</span>
+          </router-link>
         </div>
 
         <!-- 导航分组 2：问答会话管理 (在问答页面时激活) -->

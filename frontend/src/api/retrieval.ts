@@ -1,5 +1,6 @@
 import { apiClient } from './client';
 import type { ThinkingProcess, CitationSource } from '../types';
+import { useAuthStore, isTokenExpired } from '../stores/auth';
 
 export interface ChatQueryPayload {
   query: string;
@@ -36,7 +37,17 @@ export const retrievalApi = {
     abortSignal?: AbortSignal
   ) {
     try {
-      const token = localStorage.getItem('rag_auth_token');
+      let token = localStorage.getItem('rag_auth_token');
+      // 前置检查：若本地 Token 缺失或已接近过期，提前自动静默续期
+      if (!token || isTokenExpired(token)) {
+        try {
+          const authStore = useAuthStore();
+          token = await authStore.refreshToken();
+        } catch (e) {
+          console.warn('[Retrieval] 前置静默换签异常:', e);
+        }
+      }
+
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
       };
@@ -44,7 +55,7 @@ export const retrievalApi = {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const response = await fetch('/api/v1/retrieval/chat', {
+      let response = await fetch('/api/v1/retrieval/chat', {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -53,6 +64,27 @@ export const retrievalApi = {
         }),
         signal: abortSignal,
       });
+
+      // 遇到 401 凭据失效（例如长时间休眠后被掐断），自动静默换卡并透明重发一次
+      if (response.status === 401) {
+        console.warn('[Retrieval] 检测到 401 凭据失效，自动触发静默续签并重试...');
+        try {
+          const authStore = useAuthStore();
+          const newToken = await authStore.refreshToken();
+          headers['Authorization'] = `Bearer ${newToken}`;
+          response = await fetch('/api/v1/retrieval/chat', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              ...payload,
+              stream: true,
+            }),
+            signal: abortSignal,
+          });
+        } catch (retryErr) {
+          console.error('[Retrieval] 401 静默重试失败:', retryErr);
+        }
+      }
 
       if (!response.ok) {
         let errorMsg = `HTTP ${response.status}`;

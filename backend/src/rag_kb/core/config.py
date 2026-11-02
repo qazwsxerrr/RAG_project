@@ -5,14 +5,19 @@
 """
 
 import os
+import json
+import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
 try:
     from pydantic_settings import BaseSettings, SettingsConfigDict
 except ImportError:
     from pydantic import BaseModel as BaseSettings  # type: ignore
     SettingsConfigDict = dict  # type: ignore
+
+config_logger = logging.getLogger("rag_kb.config")
 
 # 寻找 .env 文件路径（优先当前包根目录，次优先父级项目根目录）
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -55,7 +60,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "rag-enterprise-secret-key-change-in-production"
     JWT_SECRET_KEY: str = "rag-enterprise-jwt-secret-key-change-in-production"
     JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24小时
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 默认 7 天 (10080 分钟)，配合前端静默续期机制保障开发演示永不断裂
     DATA_PARSED_DIR: str = str(WORKSPACE_ROOT / "data" / "parsed")
     DEFAULT_TENANT_ID: str = "default_tenant"
 
@@ -179,6 +184,17 @@ class Settings(BaseSettings):
     MMR_LAMBDA: float = 0.7
     CHAT_HISTORY_TURNS: int = 5
 
+    # ==================== Phase-7: 多模型热切换与智能监控预警配置 ====================
+    LLM_FALLBACKS_JSON: Optional[str] = None
+    ALERT_WEBHOOK_URL: Optional[str] = None
+    ALERT_ERROR_THRESHOLD: float = 5.0
+    CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = 300
+    SLIDING_WINDOW_SIZE: int = 100
+
+    @property
+    def resilient_llm_config(self) -> "ResilientLLMConfig":
+        return load_resilient_llm_config(self)
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_PATH) if ENV_PATH.exists() else None,
         env_file_encoding="utf-8",
@@ -191,3 +207,83 @@ def get_settings() -> Settings:
     return Settings()
 
 settings: Settings = get_settings()
+
+# ==================== Phase-7 模型节点配置与候选链数据模型 ====================
+
+class ModelNodeConfig(BaseModel):
+    """单模型服务节点配置模型"""
+    name: str                           # 节点唯一标识，如 "primary-default", "fallback-qwen"
+    model: str                          # 实际模型名称
+    base_url: str                       # 供应商接口 Base URL
+    api_key: str                        # API 密钥 (对外输出与日志中自动前4后4脱敏)
+    backend: str = "responses"          # "responses" 或 "chat_completions"
+    weight: int = 100                   # 优先级权重 (越大优先级越高)
+    is_active: bool = True              # 是否启用
+
+    def masked_api_key(self) -> str:
+        """敏感密钥脱敏展示"""
+        if not self.api_key or len(self.api_key) <= 8:
+            return "******"
+        return f"{self.api_key[:4]}****{self.api_key[-4:]}"
+
+class ResilientLLMConfig(BaseModel):
+    """具备弹性候选池与监控预警的 LLM 集群配置"""
+    primary: ModelNodeConfig
+    fallbacks: List[ModelNodeConfig] = Field(default_factory=list)
+    alert_webhook_url: Optional[str] = None          # 告警 Webhook 地址
+    error_threshold_percentage: float = 5.0          # 报警错误率阈值 (5%)
+    sliding_window_size: int = 100                  # SLA 统计滑动窗口大小
+    circuit_breaker_cooldown_seconds: int = 300     # 熔断冷却时间 (默认 5 分钟)
+
+def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
+    """从当前 settings 与环境变量动态组装高可用模型链"""
+    primary = ModelNodeConfig(
+        name="primary-default",
+        model=cfg.active_llm_model,
+        base_url=cfg.active_llm_base_url,
+        api_key=cfg.active_llm_api_key,
+        backend=cfg.active_llm_api_backend,
+        weight=100
+    )
+
+    fallbacks: List[ModelNodeConfig] = []
+    # 优先解析环境变量中的结构化候选池配置 (JSON 格式)
+    raw_fallbacks = cfg.LLM_FALLBACKS_JSON or ""
+    if raw_fallbacks.strip():
+        try:
+            items = json.loads(raw_fallbacks)
+            for item in items:
+                fallbacks.append(ModelNodeConfig(**item))
+        except Exception as e:
+            config_logger.warning(f"解析 LLM_FALLBACKS_JSON 失败: {e}")
+
+    # 若未配置独立 JSON，但存在 SiliconFlow 等其他已配置密钥，智能构建高可用备选节点池 (DeepSeek-V3 + Qwen-2.5-72B)
+    effective_sf_key = (cfg.RERANK_API_KEY or cfg.EMBEDDING_API_KEY or "").strip()
+    sf_base_url = (cfg.RERANK_BASE_URL or cfg.EMBEDDING_BASE_URL or "https://api.siliconflow.cn/v1").strip()
+    if not fallbacks and effective_sf_key and not effective_sf_key.startswith("your_"):
+        fallbacks.append(ModelNodeConfig(
+            name="fallback-siliconflow-deepseek",
+            model="deepseek-ai/DeepSeek-V3",
+            base_url=sf_base_url,
+            api_key=effective_sf_key,
+            backend="chat_completions",
+            weight=90
+        ))
+        fallbacks.append(ModelNodeConfig(
+            name="fallback-siliconflow-qwen",
+            model="Qwen/Qwen2.5-72B-Instruct",
+            base_url=sf_base_url,
+            api_key=effective_sf_key,
+            backend="chat_completions",
+            weight=80
+        ))
+
+    return ResilientLLMConfig(
+        primary=primary,
+        fallbacks=fallbacks,
+        alert_webhook_url=cfg.ALERT_WEBHOOK_URL,
+        error_threshold_percentage=cfg.ALERT_ERROR_THRESHOLD,
+        sliding_window_size=cfg.SLIDING_WINDOW_SIZE,
+        circuit_breaker_cooldown_seconds=cfg.CIRCUIT_BREAKER_COOLDOWN_SECONDS
+    )
+
