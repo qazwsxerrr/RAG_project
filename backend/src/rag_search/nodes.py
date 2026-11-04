@@ -76,7 +76,9 @@ async def prepare_node(
 
     # 1. 多轮指代消除
     rewritten_query = query
-    if history and len(history) > 0 and settings.active_llm_api_key:
+    # Phase-6 §7: 模型凭据已 100% 租约化，不再依赖本地明文 Key 做前置判定；
+    # 若租约换取失败由 llm_gateway 内部 Fail-Fast 抛出真实异常。
+    if history and len(history) > 0:
         valid_history = [m for m in history if m.get("content") and m.get("content") != query]
         has_assistant = any(m.get("role") == "assistant" for m in valid_history)
         if has_assistant:

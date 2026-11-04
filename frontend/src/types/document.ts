@@ -37,6 +37,7 @@ export interface DocumentItem {
   tags: string[];
   status: string;
   step_index: number;
+  chunk_count?: number;
   created_at: string;
   updated_at: string;
 }

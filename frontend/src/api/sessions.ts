@@ -22,34 +22,29 @@ export interface BackendMessageItem {
 }
 
 export const sessionsApi = {
-  /** 获取租户下的云端历史会话列表 */
-  async listSessions(tenantId: string = 'default_tenant', limit: number = 50, offset: number = 0): Promise<BackendSessionItem[]> {
+  /** 获取当前登录员工租户下的历史会话列表 */
+  async listSessions(limit: number = 50, offset: number = 0): Promise<BackendSessionItem[]> {
     return apiClient.get('/sessions', {
-      params: { tenant_id: tenantId, limit, offset },
+      params: { limit, offset },
     });
   },
 
-  /** 创建云端新会话 */
-  async createSession(title: string = '新会话', tenantId: string = 'default_tenant'): Promise<BackendSessionItem> {
+  /** 创建云端新会话 (租户由后端从 Token 派生) */
+  async createSession(title: string = '新会话'): Promise<BackendSessionItem> {
     return apiClient.post('/sessions', {
       title,
-      tenant_id: tenantId,
     });
   },
 
   /** 物理删除云端会话及其全部级联消息 */
-  async deleteSession(sessionId: string, tenantId: string = 'default_tenant'): Promise<{ status: string; message: string }> {
-    return apiClient.delete(`/sessions/${sessionId}`, {
-      params: { tenant_id: tenantId },
-    });
+  async deleteSession(sessionId: string): Promise<{ status: string; message: string }> {
+    return apiClient.delete(`/sessions/${sessionId}`);
   },
 
   /** 更新云端会话元数据（如显式重命名标题） */
-  async updateSession(sessionId: string, title: string, tenantId: string = 'default_tenant'): Promise<BackendSessionItem> {
+  async updateSession(sessionId: string, title: string): Promise<BackendSessionItem> {
     return apiClient.patch(`/sessions/${sessionId}`, {
       title,
-    }, {
-      params: { tenant_id: tenantId },
     });
   },
 

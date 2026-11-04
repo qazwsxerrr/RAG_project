@@ -302,7 +302,7 @@
                 <!-- 真实图元缩略图（若存在资源） -->
                 <div v-if="item.asset_url || item.raw_oss_url" class="flex items-start gap-3 bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
                   <img 
-                    :src="item.asset_url || item.raw_oss_url" 
+                    :src="withTokenUrl(item.asset_url || item.raw_oss_url)" 
                     :alt="item.title"
                     class="h-16 w-auto max-w-[120px] object-contain rounded border border-slate-200/80 bg-white shrink-0 cursor-pointer"
                     loading="lazy"
@@ -481,6 +481,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import type { PipelineStep, PipelineStepStatus, ReviewItem } from '../../types';
 import { DEFAULT_PIPELINE_STEPS } from '../../types';
 import { documentsApi } from '../../api/documents';
+import { withTokenUrl } from '../../stores/auth';
 
 const props = defineProps<{
   docId: string;

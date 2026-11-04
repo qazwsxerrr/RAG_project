@@ -166,6 +166,7 @@ class DocumentItemSchema(BaseModel):
     tags: List[str] = Field(default_factory=list)
     status: str
     step_index: int = 11
+    chunk_count: int = 0
     created_at: Optional[Any] = None
     updated_at: Optional[Any] = None
 

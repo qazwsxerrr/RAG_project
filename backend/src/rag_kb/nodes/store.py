@@ -60,15 +60,22 @@ class StoreNode(BaseNode):
             })
 
         async with AsyncSessionLocal() as session:
-            # 1. 匹配或动态创建部门
-            dept_stmt = select(Department).where(Department.name == department_name)
+            # 1. 匹配或依据 Token 真实部门路径建档 (严禁伪造“动态部门”)
+            is_path = department_name.startswith("/")
+            if is_path:
+                dept_stmt = select(Department).where(Department.path == department_name)
+            else:
+                dept_stmt = select(Department).where(Department.name == department_name)
             dept_res = await session.execute(dept_stmt)
             dept_obj = dept_res.scalar_one_or_none()
+
             if not dept_obj:
+                dept_pure_name = department_name.strip("/").split("/")[-1] if is_path else department_name
+                exact_path = department_name if is_path else f"/总公司/{department_name}"
                 dept_obj = Department(
                     id=uuid.uuid4(),
-                    name=department_name,
-                    path=f"/总公司/动态部门/{department_name}"
+                    name=dept_pure_name,
+                    path=exact_path
                 )
                 session.add(dept_obj)
                 await session.flush()

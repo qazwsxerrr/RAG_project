@@ -24,10 +24,20 @@ class Reranker:
     """云端 Cross-Encoder 重排器"""
 
     def __init__(self):
-        self.api_key = settings.RERANK_API_KEY
         self.base_url = settings.RERANK_BASE_URL.rstrip("/")
         self.model_name = settings.RERANK_MODEL
         self.enabled = settings.RERANK_ENABLED
+
+    async def _resolve_credentials(self) -> Tuple[str, str]:
+        """解析精排模型凭据 (Phase-6 §7.2: 强制通过 Java 鉴权中心换取 10min 短期租约，严禁回退本地 .env)"""
+        try:
+            from rag_kb.core.model_credentials import get_credential
+            cred = await get_credential("siliconflow", scope="model:rerank")
+            return cred.api_key, cred.base_url.rstrip("/")
+        except Exception as e:
+            raise RuntimeError(
+                f"【精排模型凭据错误】未能从鉴权中心获取 Rerank 短期租约凭据: {e} (Fail-Fast)"
+            )
 
     async def rerank(
         self,
@@ -39,15 +49,13 @@ class Reranker:
         if not self.enabled or not chunks:
             return chunks[:top_n], []
 
-        if not self.api_key:
-            logger.warning("【Rerank 提示】未配置 RERANK_API_KEY，按原 RRF 顺序截断。")
-            return chunks[:top_n], []
+        api_key, base_url = await self._resolve_credentials()
 
         clean_query = query.strip()
         documents = [c.get("content", "") for c in chunks]
-        endpoint = f"{self.base_url}/rerank"
+        endpoint = f"{base_url}/rerank"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         payload = {

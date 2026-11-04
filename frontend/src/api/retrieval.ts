@@ -37,11 +37,11 @@ export const retrievalApi = {
     abortSignal?: AbortSignal
   ) {
     try {
-      let token = localStorage.getItem('rag_auth_token');
-      // 前置检查：若本地 Token 缺失或已接近过期，提前自动静默续期
+      const authStore = useAuthStore();
+      let token = authStore.token;
+      // 前置检查：若内存中 Token 缺失或已接近过期，提前自动静默续期
       if (!token || isTokenExpired(token)) {
         try {
-          const authStore = useAuthStore();
           token = await authStore.refreshToken();
         } catch (e) {
           console.warn('[Retrieval] 前置静默换签异常:', e);
@@ -69,7 +69,6 @@ export const retrievalApi = {
       if (response.status === 401) {
         console.warn('[Retrieval] 检测到 401 凭据失效，自动触发静默续签并重试...');
         try {
-          const authStore = useAuthStore();
           const newToken = await authStore.refreshToken();
           headers['Authorization'] = `Bearer ${newToken}`;
           response = await fetch('/api/v1/retrieval/chat', {
@@ -84,6 +83,23 @@ export const retrievalApi = {
         } catch (retryErr) {
           console.error('[Retrieval] 401 静默重试失败:', retryErr);
         }
+      }
+
+      if (response.status === 403) {
+        let errorMsg = '您无权访问所选部门或执行该检索操作';
+        try {
+          const errJson = await response.json();
+          errorMsg = errJson.detail || errorMsg;
+        } catch {
+          // ignore
+        }
+        authStore.interceptAlert = errorMsg;
+        setTimeout(() => {
+          if (authStore.interceptAlert === errorMsg) {
+            authStore.interceptAlert = '';
+          }
+        }, 5000);
+        throw new Error(errorMsg);
       }
 
       if (!response.ok) {

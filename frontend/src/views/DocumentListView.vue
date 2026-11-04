@@ -14,7 +14,7 @@
         <div class="px-4">
           <div class="text-[11px] text-slate-400 font-medium">知识切片总数</div>
           <div class="mt-1 flex items-baseline gap-1.5">
-            <span class="text-xl font-bold text-slate-900 font-mono">89</span>
+            <span class="text-xl font-bold text-slate-900 font-mono">{{ totalChunkCount }}</span>
             <span class="text-[11px] text-slate-500">条切片</span>
           </div>
         </div>
@@ -128,7 +128,11 @@ const categoryOptions = computed(() => {
 });
 
 const departmentCount = computed(() => {
-  return departmentOptions.value.length || 1;
+  return departmentOptions.value.length || 0;
+});
+
+const totalChunkCount = computed(() => {
+  return documentStore.documents.reduce((acc, doc: DocumentItem) => acc + (doc.chunk_count ?? 0), 0);
 });
 
 const filteredDocuments = computed(() => {

@@ -1,49 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
-import axios from 'axios';
-
-export interface MockRoleProfile {
-  id: string;
-  name: string;
-  userId: string;
-  deptName: string;
-  deptPath: string;
-  roles: string[];
-  description: string;
-}
-
-export const MOCK_ROLES: MockRoleProfile[] = [
-  {
-    id: 'developer',
-    name: '研发工程师',
-    userId: 'dev_user_01',
-    deptName: '技术部',
-    deptPath: '/总公司/研发中心/技术部',
-    roles: ['developer'],
-    description: '仅允许检索技术部及公共文档',
-  },
-  {
-    id: 'accountant',
-    name: '财务主管',
-    userId: 'fin_user_01',
-    deptName: '财务部',
-    deptPath: '/总公司/职能中心/财务部',
-    roles: ['accountant'],
-    description: '仅允许检索财务部及公共文档',
-  },
-  {
-    id: 'admin',
-    name: '超级管理员',
-    userId: 'admin_user_01',
-    deptName: '总经办',
-    deptPath: '/',
-    roles: ['admin'],
-    description: '拥有全公司所有部门的穿透权限',
-  },
-];
-
-const TOKEN_KEY = 'rag_auth_token';
-const ROLE_KEY = 'rag_mock_role_id';
+import { fetchToken, getMe, logout as apiLogout, type UserProfile } from '../api/auth';
 
 /** 解析 JWT 载荷信息 */
 export function parseJwtPayload(token: string): Record<string, any> | null {
@@ -79,14 +36,14 @@ export function isTokenExpired(token: string, offsetSeconds = 60): boolean {
 let refreshPromise: Promise<string> | null = null;
 
 export const useAuthStore = defineStore('auth', () => {
-  const currentRoleId = ref<string>(localStorage.getItem(ROLE_KEY) || 'developer');
-  const token = ref<string>(localStorage.getItem(TOKEN_KEY) || '');
+  // Phase-6 核心要求：业务 JWT 仅存在 Pinia 内存态，严禁持久化落 localStorage (防御 XSS)
+  const token = ref<string>('');
+  const currentUser = ref<UserProfile | null>(null);
   const interceptAlert = ref<string>('');
-
-  const currentRole = () => MOCK_ROLES.find((r) => r.id === currentRoleId.value) || MOCK_ROLES[0];
+  const isPermissionDenied = ref<boolean>(false);
 
   /**
-   * 静默续签当前角色的 JWT 访问凭据 (自带互斥锁与并发去重)
+   * 凭会话 Cookie 向 Java 鉴权中心换取业务 JWT (30min)，支持并发互斥锁
    */
   const refreshToken = async (): Promise<string> => {
     if (refreshPromise) {
@@ -95,23 +52,25 @@ export const useAuthStore = defineStore('auth', () => {
 
     refreshPromise = (async () => {
       try {
-        const target = currentRole();
-        const resp = await axios.post('/api/v1/auth/dev-token', {
-          user_id: target.userId,
-          tenant_id: 'default_tenant',
-          department_name: target.deptName,
-          department_path: target.deptPath !== '/' ? target.deptPath : undefined,
-          roles: target.roles,
-        });
-
-        if (resp.data && resp.data.access_token) {
-          const newToken = resp.data.access_token;
-          token.value = newToken;
-          localStorage.setItem(TOKEN_KEY, newToken);
-          console.log(`[RBAC] 已成功静默签发/续期身份凭据: ${target.name}`);
-          return newToken;
+        const resp = await fetchToken();
+        if (resp && resp.access_token) {
+          token.value = resp.access_token;
+          isPermissionDenied.value = false;
+          try {
+            currentUser.value = await getMe();
+          } catch {
+            // me 接口非阻塞
+          }
+          return resp.access_token;
         }
-        throw new Error('未返回有效 access_token');
+        throw new Error('鉴权中心未返回有效 access_token');
+      } catch (err: any) {
+        token.value = '';
+        currentUser.value = null;
+        // 会话失效，跳转至企业 IdP 单点登录
+        console.warn('[RBAC] 会话已失效或换票失败，重定向至企业 IdP SSO...');
+        window.location.href = '/oauth2/authorization/corp-sso';
+        throw err;
       } finally {
         refreshPromise = null;
       }
@@ -121,29 +80,10 @@ export const useAuthStore = defineStore('auth', () => {
   };
 
   /**
-   * 切换当前模拟身份并立即签发对应的 JWT 凭据
-   */
-  const switchRole = async (roleId: string) => {
-    const target = MOCK_ROLES.find((r) => r.id === roleId);
-    if (!target) return;
-
-    currentRoleId.value = roleId;
-    localStorage.setItem(ROLE_KEY, roleId);
-    interceptAlert.value = '';
-
-    try {
-      await refreshToken();
-    } catch (err) {
-      console.error('[RBAC] 获取模拟身份 Token 失败:', err);
-    }
-  };
-
-  /**
-   * 初始化应用鉴权：若本地 Token 缺失或已过期，自动触发静默续签
+   * 初始化应用鉴权：若内存中无票或已接近过期，自动触发静默换票
    */
   const initAuth = async () => {
     if (!token.value || isTokenExpired(token.value)) {
-      console.log('[RBAC] 本地 Token 缺失或已接近过期，自动执行静默签发...');
       try {
         await refreshToken();
       } catch (err) {
@@ -152,14 +92,49 @@ export const useAuthStore = defineStore('auth', () => {
     }
   };
 
+  /**
+   * 登出当前员工会话并强制跳转企业 IdP 重新认证 (prompt=login 强制弹出账号密码页切换账号)
+   */
+  const logout = async () => {
+    try {
+      await apiLogout();
+    } catch {
+      // 忽略登出网络错误
+    } finally {
+      token.value = '';
+      currentUser.value = null;
+      interceptAlert.value = '';
+      isPermissionDenied.value = false;
+      localStorage.removeItem('rag_active_session_id');
+      sessionStorage.setItem('rag_auth_redirect', window.location.pathname || '/documents');
+      window.location.href = '/oauth2/authorization/corp-sso?prompt=login';
+    }
+  };
+
   return {
-    currentRoleId,
     token,
+    currentUser,
     interceptAlert,
-    MOCK_ROLES,
-    currentRole,
+    isPermissionDenied,
     refreshToken,
-    switchRole,
     initAuth,
+    logout,
   };
 });
+
+/**
+ * 为原生浏览器标签 (<img> / <a> / EventSource) 受控注入当前内存态 JWT
+ * 仅对本系统后端代理路径 (/api/v1/...) 追加 ?token=，外部绝对链接保持原样
+ */
+export function withTokenUrl(url?: string | null): string {
+  if (!url) return '';
+  if (!url.startsWith('/api/')) return url;
+  const authStore = useAuthStore();
+  const tk = authStore.token;
+  if (!tk) return url;
+
+  const [pathAndQuery, hash] = url.split('#');
+  const sep = pathAndQuery.includes('?') ? '&' : '?';
+  const withParam = `${pathAndQuery}${sep}token=${encodeURIComponent(tk)}`;
+  return hash ? `${withParam}#${hash}` : withParam;
+}

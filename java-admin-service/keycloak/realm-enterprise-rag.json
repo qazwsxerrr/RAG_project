@@ -1,0 +1,128 @@
+{
+  "realm": "enterprise-rag",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "accessTokenLifespan": 1800,
+  "ssoSessionIdleTimeout": 28800,
+  "ssoSessionMaxLifespan": 86400,
+  "groups": [
+    {
+      "name": "roles",
+      "path": "/roles",
+      "subGroups": [
+        { "name": "admin", "path": "/roles/admin" },
+        { "name": "developer", "path": "/roles/developer" },
+        { "name": "accountant", "path": "/roles/accountant" }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "rag-admin-service",
+      "name": "RAG Admin Service",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "rag-admin-secret",
+      "clientAuthenticatorType": "client-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "redirectUris": [
+        "http://localhost:5173/login/oauth2/code/corp-sso",
+        "http://localhost:8080/login/oauth2/code/corp-sso",
+        "https://rag.sakivo.com/login/oauth2/code/corp-sso",
+        "http://rag.sakivo.com/login/oauth2/code/corp-sso"
+      ],
+      "webOrigins": [
+        "http://localhost:5173",
+        "http://localhost:8080",
+        "https://rag.sakivo.com"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*##https://rag.sakivo.com/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "dept_path",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "dept_path",
+            "claim.name": "dept_path",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "系统",
+      "lastName": "管理员",
+      "email": "admin@corp.local",
+      "attributes": { "dept_path": ["/"] },
+      "groups": ["/roles/admin"],
+      "requiredActions": [],
+      "credentials": [
+        { "type": "password", "value": "Rag@123456", "temporary": false }
+      ]
+    },
+    {
+      "username": "developer",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "张",
+      "lastName": "工",
+      "email": "developer@corp.local",
+      "attributes": { "dept_path": ["/总公司/研发中心/技术部"] },
+      "groups": ["/roles/developer"],
+      "requiredActions": [],
+      "credentials": [
+        { "type": "password", "value": "Rag@123456", "temporary": false }
+      ]
+    },
+    {
+      "username": "accountant",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "王",
+      "lastName": "会计",
+      "email": "accountant@corp.local",
+      "attributes": { "dept_path": ["/总公司/职能中心/财务部"] },
+      "groups": ["/roles/accountant"],
+      "requiredActions": [],
+      "credentials": [
+        { "type": "password", "value": "Rag@123456", "temporary": false }
+      ]
+    }
+  ]
+}

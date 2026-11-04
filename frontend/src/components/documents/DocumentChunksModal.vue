@@ -188,10 +188,10 @@
               <!-- Tab 3: 原版切图展示 (若存在) -->
               <div v-show="getTab(chunk.chunk_index) === 'asset'" v-if="chunk.asset_url" class="relative group bg-white border border-slate-200 rounded-lg p-3 flex justify-center">
                 <img 
-                  :src="chunk.asset_url" 
+                  :src="withTokenUrl(chunk.asset_url)" 
                   alt="流程图原文档截取" 
                   class="max-h-72 object-contain rounded cursor-zoom-in transition-transform duration-150 group-hover:scale-[1.01]" 
-                  @click="openLightbox(chunk.asset_url)" 
+                  @click="openLightbox(withTokenUrl(chunk.asset_url))" 
                   loading="lazy"
                 />
                 <div class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900/80 text-white text-[11px] px-2.5 py-1 rounded flex items-center gap-1 pointer-events-none">
@@ -243,10 +243,10 @@
                 class="relative group bg-white border border-slate-200 rounded-lg p-3 flex justify-center"
               >
                 <img 
-                  :src="chunk.asset_url" 
+                  :src="withTokenUrl(chunk.asset_url)" 
                   alt="表格原文档截取" 
                   class="max-h-72 object-contain rounded cursor-zoom-in transition-transform duration-150 group-hover:scale-[1.01]" 
-                  @click="openLightbox(chunk.asset_url)" 
+                  @click="openLightbox(withTokenUrl(chunk.asset_url))" 
                   loading="lazy"
                 />
                 <div class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900/80 text-white text-[11px] px-2.5 py-1 rounded flex items-center gap-1 pointer-events-none">
@@ -292,7 +292,7 @@
                   <span>原文档配图 (原图预览)</span>
                 </div>
                 <a 
-                  :href="chunk.asset_url" 
+                  :href="withTokenUrl(chunk.asset_url)" 
                   target="_blank" 
                   class="text-[11px] text-purple-700 hover:text-purple-800 font-medium flex items-center gap-1"
                 >
@@ -303,10 +303,10 @@
 
               <div class="relative group bg-white border border-slate-200 rounded-lg p-3 flex justify-center overflow-hidden">
                 <img 
-                  :src="chunk.asset_url" 
+                  :src="withTokenUrl(chunk.asset_url)" 
                   :alt="chunk.chunk_label" 
                   class="max-h-72 object-contain rounded cursor-zoom-in transition-transform duration-150 group-hover:scale-[1.01]" 
-                  @click="openLightbox(chunk.asset_url)" 
+                  @click="openLightbox(withTokenUrl(chunk.asset_url))" 
                   loading="lazy"
                 />
                 <div class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900/80 text-white text-[11px] px-2.5 py-1 rounded flex items-center gap-1 pointer-events-none">
@@ -340,7 +340,7 @@
             <!-- 关联 OSS 产物链接 (非配图类型时显示) -->
             <div v-if="chunk.asset_url && !isImage(chunk)" class="flex items-center justify-end text-xs pt-1">
               <a 
-                :href="chunk.asset_url" 
+                :href="withTokenUrl(chunk.asset_url)" 
                 target="_blank" 
                 class="text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1 transition-colors text-[11px]"
               >
@@ -408,6 +408,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import mermaid from 'mermaid';
 import type { ChunkItem } from '../../types';
 import { documentsApi } from '../../api/documents';
+import { withTokenUrl } from '../../stores/auth';
 
 const props = defineProps<{
   visible: boolean;

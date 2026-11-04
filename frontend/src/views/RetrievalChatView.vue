@@ -16,19 +16,23 @@
 
       <!-- 右侧控制区：统一纯平铺下拉与分段控制器 -->
       <div class="flex items-center space-x-2 text-xs shrink-0 whitespace-nowrap overflow-x-auto py-1">
-        <!-- 身份选择器 (纯平铺，杜绝套框) -->
-        <div class="flex items-center gap-1.5 shrink-0 whitespace-nowrap">
-          <span class="text-slate-500 font-medium text-xs select-none">身份:</span>
-          <select 
-            :value="authStore.currentRoleId"
-            @change="handleRoleChange"
-            class="h-7 px-2 bg-slate-100 hover:bg-slate-200/70 text-slate-800 font-medium text-xs rounded-md outline-none border border-slate-200/80 cursor-pointer transition-colors"
-            title="切换当前 RBAC 权限身份"
+        <!-- 当前登录员工身份与可见部门范围展示 (只读回显，支持真实 SSO 切换账号) -->
+        <div class="flex items-center gap-1.5 shrink-0 whitespace-nowrap bg-slate-100 px-2 py-1 rounded-md border border-slate-200/80">
+          <span class="text-slate-500 font-medium text-xs select-none">当前员工:</span>
+          <span class="text-slate-800 font-semibold text-xs">
+            {{ authStore.currentUser?.username || '已登录员工' }}
+          </span>
+          <span class="text-slate-400 text-xs">|</span>
+          <span class="text-indigo-600 font-medium text-xs">
+            {{ authStore.currentUser?.dept_path === '/' ? '全域 (/)' : (authStore.currentUser?.dept_path || '全域') }}
+          </span>
+          <button
+            @click="authStore.logout()"
+            class="ml-1 px-1.5 py-0.5 rounded bg-white hover:bg-rose-50 text-slate-600 hover:text-rose-600 border border-slate-200/80 hover:border-rose-200 text-[11px] font-medium transition-colors cursor-pointer"
+            title="退出当前员工会话并切换 SSO 账号"
           >
-            <option v-for="r in authStore.MOCK_ROLES" :key="r.id" :value="r.id">
-              {{ r.name }}
-            </option>
-          </select>
+            切换账号
+          </button>
         </div>
 
         <div class="h-4 w-px bg-slate-200 shrink-0"></div>
@@ -41,9 +45,9 @@
             class="h-7 px-2 bg-slate-100 hover:bg-slate-200/70 text-slate-800 font-medium text-xs rounded-md outline-none border border-slate-200/80 cursor-pointer transition-colors"
             title="限定检索部门范围"
           >
-            <option value="">全部部门</option>
+            <option value="">{{ authStore.currentUser?.dept_path === '/' ? '全部部门 (全域)' : '本部门默认范围' }}</option>
             <option v-for="d in departmentList" :key="d.id" :value="d.path">
-              {{ d.name }}
+              {{ isDeptAllowed(d.path) ? d.name : `${d.name} (跨部门·受保护)` }}
             </option>
           </select>
         </div>
@@ -124,7 +128,7 @@
               ❌ {{ authStore.interceptAlert }}
             </div>
             <div class="text-[11px] text-rose-700 mt-2 flex items-center gap-1 font-medium">
-              <span>💡 当前身份为 <b>{{ authStore.currentRole().name }}</b>。您可以在右上角切换为【超级管理员】后再试！</span>
+              <span>💡 当前员工为 <b>{{ authStore.currentUser?.username || '已登录员工' }}</b>。若需跨部门检索，请联系企业系统管理员调整权限！</span>
             </div>
           </div>
           <button 
@@ -257,15 +261,23 @@ const selectedCategory = ref('全部');
 const departmentList = ref<DepartmentItem[]>([]);
 const categoryList = ref<string[]>(['全部', '技术规范', '操作规程', '产品文档', '行业报告', '面试题']);
 
+const isDeptAllowed = (deptPath: string): boolean => {
+  const u = authStore.currentUser;
+  if (!u) return true;
+  if (u.data_scope === 'ALL' || u.dept_path === '/') return true;
+  const prefix = u.dept_path.replace(/\/+$/, '');
+  const target = deptPath.replace(/\/+$/, '');
+  return target === prefix || target.startsWith(prefix + '/');
+};
+
 onMounted(async () => {
   try {
     await authStore.initAuth();
-    const role = authStore.currentRole();
-    if (role.deptPath && role.deptPath !== '/') {
-      selectedDeptPath.value = role.deptPath;
+    if (authStore.currentUser?.dept_path && authStore.currentUser.dept_path !== '/') {
+      selectedDeptPath.value = authStore.currentUser.dept_path;
     }
   } catch (err) {
-    console.error('初始化模拟身份失败:', err);
+    console.error('初始化员工身份失败:', err);
   }
 
   try {
@@ -313,17 +325,6 @@ const scrollToBottom = async () => {
   await nextTick();
   if (messageContainerRef.value) {
     messageContainerRef.value.scrollTop = messageContainerRef.value.scrollHeight;
-  }
-};
-
-const handleRoleChange = async (e: Event) => {
-  const targetVal = (e.target as HTMLSelectElement).value;
-  await authStore.switchRole(targetVal);
-  const role = authStore.currentRole();
-  if (role.deptPath && role.deptPath !== '/') {
-    selectedDeptPath.value = role.deptPath;
-  } else {
-    selectedDeptPath.value = '';
   }
 };
 

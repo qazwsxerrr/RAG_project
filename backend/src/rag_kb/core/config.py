@@ -21,8 +21,8 @@ config_logger = logging.getLogger("rag_kb.config")
 
 # 寻找 .env 文件路径（优先当前包根目录，次优先父级项目根目录）
 CURRENT_DIR = Path(__file__).resolve().parent
-PACKAGE_ROOT = CURRENT_DIR.parent.parent.parent  # knowledge/code
-WORKSPACE_ROOT = PACKAGE_ROOT.parent.parent      # RAG_project
+PACKAGE_ROOT = CURRENT_DIR.parent.parent.parent  # backend
+WORKSPACE_ROOT = PACKAGE_ROOT.parent              # RAG_project
 
 ENV_PATH = PACKAGE_ROOT / ".env"
 if not ENV_PATH.exists():
@@ -55,14 +55,24 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     DEBUG: bool = True
     HOST: str = "0.0.0.0"
-    PORT: int = 8000
+    PORT: int = 8001
     API_V1_PREFIX: str = "/api/v1"
-    SECRET_KEY: str = "rag-enterprise-secret-key-change-in-production"
-    JWT_SECRET_KEY: str = "rag-enterprise-jwt-secret-key-change-in-production"
-    JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 默认 7 天 (10080 分钟)，配合前端静默续期机制保障开发演示永不断裂
+    
+    # 跨服务 JWT 鉴权配置 (Phase-6: RS256 + 强校验，严禁本地对称签名密钥)
+    JWT_ALGORITHM: str = "RS256"
+    JWT_PUBLIC_KEY: Optional[str] = None
+    JWT_PUBLIC_KEY_PATH: Optional[str] = str(WORKSPACE_ROOT / "keys" / "rsa_public.pem")
+    JWT_JWKS_URL: Optional[str] = None
+    JWT_ISSUER: str = "rag-admin"
+    JWT_AUDIENCE: str = "rag-engine"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     DATA_PARSED_DIR: str = str(WORKSPACE_ROOT / "data" / "parsed")
     DEFAULT_TENANT_ID: str = "default_tenant"
+
+    # 模型密钥鉴权中心凭据托管 (Phase-6 §7: 内部租约换端点)
+    AUTH_CENTER_BASE_URL: str = "http://127.0.0.1:8080"
+    MODEL_KEY_SERVICE_ID: str = "rag-engine"
+    MODEL_KEY_SERVICE_SECRET: str = "rag-engine-service-secret"
 
     CORS_ORIGINS: List[str] = [
         "http://localhost:5173",
@@ -113,9 +123,8 @@ class Settings(BaseSettings):
     MINERU_PARSER_MODE: str = "auto"
     MINERU_AGENT_BASE_URL: str = "https://mineru.net/api/v1/agent"
 
-    # ==================== 通用 LLM & VLM 配置 (OpenAI 协议) ====================
-    API_KEY: str = ""
-    BASE_URL: str = ""
+    # ==================== 通用 LLM & VLM 配置 (OpenAI 协议，API Key 统一由 Java 鉴权中心托管) ====================
+    BASE_URL: str = "https://kedaya.ai/v1"
     MODEL_NAME: str = "grok-4.5"
     LLM_API_BACKEND: str = "responses"
 
@@ -127,20 +136,12 @@ class Settings(BaseSettings):
         return "chat_completions"
 
     @property
-    def active_api_key(self) -> str:
-        return self.API_KEY.strip()
-
-    @property
     def active_base_url(self) -> str:
-        return self.BASE_URL.strip()
+        return (self.BASE_URL or "https://kedaya.ai/v1").strip()
 
     @property
     def active_model_name(self) -> str:
         return self.MODEL_NAME.strip() or "grok-4.5"
-
-    @property
-    def active_llm_api_key(self) -> str:
-        return self.active_api_key
 
     @property
     def active_llm_base_url(self) -> str:
@@ -151,10 +152,6 @@ class Settings(BaseSettings):
         return self.active_model_name
 
     @property
-    def active_vlm_api_key(self) -> str:
-        return self.active_api_key
-
-    @property
     def active_vlm_base_url(self) -> str:
         return self.active_base_url
 
@@ -162,15 +159,13 @@ class Settings(BaseSettings):
     def active_vlm_model(self) -> str:
         return self.active_model_name
 
-    # ==================== 向量模型配置 (Dense & Sparse) ====================
-    EMBEDDING_API_KEY: str = ""
+    # ==================== 向量模型配置 (Dense & Sparse，API Key 统一由 Java 鉴权中心托管) ====================
     EMBEDDING_BASE_URL: str = "https://api.siliconflow.cn/v1"
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
     EMBEDDING_DIM: int = 1024
 
-    # ==================== 检索与重排配置 ====================
+    # ==================== 检索与重排配置 (API Key 统一由 Java 鉴权中心托管) ====================
     RERANK_ENABLED: bool = True
-    RERANK_API_KEY: str = ""
     RERANK_BASE_URL: str = "https://api.siliconflow.cn/v1"
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
     RERANK_TOP_N: int = 20
@@ -215,7 +210,8 @@ class ModelNodeConfig(BaseModel):
     name: str                           # 节点唯一标识，如 "primary-default", "fallback-qwen"
     model: str                          # 实际模型名称
     base_url: str                       # 供应商接口 Base URL
-    api_key: str                        # API 密钥 (对外输出与日志中自动前4后4脱敏)
+    api_key: str = ""                   # API 密钥 (对外输出与日志中自动脱敏，支持运行时凭据注入)
+    provider: Optional[str] = None      # 供应商标识，如 "siliconflow", "kedaya"
     backend: str = "responses"          # "responses" 或 "chat_completions"
     weight: int = 100                   # 优先级权重 (越大优先级越高)
     is_active: bool = True              # 是否启用
@@ -223,7 +219,7 @@ class ModelNodeConfig(BaseModel):
     def masked_api_key(self) -> str:
         """敏感密钥脱敏展示"""
         if not self.api_key or len(self.api_key) <= 8:
-            return "******"
+            return f"[{self.provider or 'managed'}]-lease-active"
         return f"{self.api_key[:4]}****{self.api_key[-4:]}"
 
 class ResilientLLMConfig(BaseModel):
@@ -236,12 +232,14 @@ class ResilientLLMConfig(BaseModel):
     circuit_breaker_cooldown_seconds: int = 300     # 熔断冷却时间 (默认 5 分钟)
 
 def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
-    """从当前 settings 与环境变量动态组装高可用模型链"""
+    """从当前 settings 与环境变量动态组装高可用模型链 (Phase-6 §7.5: 节点仅声明 provider，运行时通过租约注入凭据)"""
+    primary_provider = "kedaya" if "kedaya" in cfg.active_llm_base_url.lower() else "siliconflow"
     primary = ModelNodeConfig(
         name="primary-default",
         model=cfg.active_llm_model,
         base_url=cfg.active_llm_base_url,
-        api_key=cfg.active_llm_api_key,
+        api_key="",
+        provider=primary_provider,
         backend=cfg.active_llm_api_backend,
         weight=100
     )
@@ -253,19 +251,22 @@ def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
         try:
             items = json.loads(raw_fallbacks)
             for item in items:
+                if "provider" not in item or not item["provider"]:
+                    b_url = str(item.get("base_url", "")).lower()
+                    item["provider"] = "kedaya" if "kedaya" in b_url else "siliconflow"
                 fallbacks.append(ModelNodeConfig(**item))
         except Exception as e:
             config_logger.warning(f"解析 LLM_FALLBACKS_JSON 失败: {e}")
 
-    # 若未配置独立 JSON，但存在 SiliconFlow 等其他已配置密钥，智能构建高可用备选节点池 (DeepSeek-V3 + Qwen-2.5-72B)
-    effective_sf_key = (cfg.RERANK_API_KEY or cfg.EMBEDDING_API_KEY or "").strip()
-    sf_base_url = (cfg.RERANK_BASE_URL or cfg.EMBEDDING_BASE_URL or "https://api.siliconflow.cn/v1").strip()
-    if not fallbacks and effective_sf_key and not effective_sf_key.startswith("your_"):
+    # 若未配置独立 JSON，节点声明 provider，凭据在运行时从鉴权中心租约注入 (Phase-6 §7.5)
+    if not fallbacks:
+        sf_base_url = (cfg.RERANK_BASE_URL or cfg.EMBEDDING_BASE_URL or "https://api.siliconflow.cn/v1").strip()
         fallbacks.append(ModelNodeConfig(
             name="fallback-siliconflow-deepseek",
             model="deepseek-ai/DeepSeek-V3",
             base_url=sf_base_url,
-            api_key=effective_sf_key,
+            api_key="",
+            provider="siliconflow",
             backend="chat_completions",
             weight=90
         ))
@@ -273,10 +274,16 @@ def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
             name="fallback-siliconflow-qwen",
             model="Qwen/Qwen2.5-72B-Instruct",
             base_url=sf_base_url,
-            api_key=effective_sf_key,
+            api_key="",
+            provider="siliconflow",
             backend="chat_completions",
             weight=80
         ))
+
+    # Phase-6 §9 风险缓解：启动断言备用模型池与主模型节点均具备合法 provider 声明
+    for node in [primary] + fallbacks:
+        if not node.provider or not node.provider.strip():
+            raise RuntimeError(f"【配置断言失败】模型节点 [{node.name}] 未声明合法的 provider，拒绝装配！")
 
     return ResilientLLMConfig(
         primary=primary,

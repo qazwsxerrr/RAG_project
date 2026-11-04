@@ -80,7 +80,7 @@
           <div v-else-if="currentItem.asset_proxy_url || currentItem.image_url || currentItem.asset_url" class="border border-slate-200 rounded-xl overflow-hidden bg-slate-50 flex flex-col items-center justify-center p-2 min-h-48">
             <img 
               v-show="!imageLoadError"
-              :src="currentItem.asset_proxy_url || currentItem.image_url || currentItem.asset_url" 
+              :src="withTokenUrl(currentItem.asset_proxy_url || currentItem.image_url || currentItem.asset_url)" 
               :alt="currentItem.title || '审核资产截图'" 
               class="max-h-56 object-contain rounded shadow-xs"
               @error="imageLoadError = true"
@@ -186,6 +186,7 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue';
 import type { ReviewItem } from '../../types';
+import { withTokenUrl } from '../../stores/auth';
 
 const props = withDefaults(defineProps<{
   visible: boolean;

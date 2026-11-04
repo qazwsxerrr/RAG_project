@@ -23,14 +23,33 @@ def apply_filters(
         Document.is_active.is_(True)
     )
 
-    if department_scope:
-        dept_conditions = [
-            DocumentChunk.department_path.startswith(dept.strip())
-            for dept in department_scope
-            if dept and dept.strip()
-        ]
-        if dept_conditions:
-            stmt = stmt.where(or_(*dept_conditions))
+    # Phase-6 §5.3 & §5.5 铁律：department_scope 严禁为空，空值坚决 Fail-Closed 抛错拒绝，绝不全量放行
+    if not department_scope:
+        raise ValueError("【数据隔离安全拦截】未指定合法的部门权限范围 department_scope (Fail-Closed)")
+
+    dept_conditions = []
+    for dept in department_scope:
+        if not dept or not dept.strip():
+            continue
+        clean_dept = dept.strip()
+        if clean_dept == "/":
+            # 管理员具备全局根穿透权限
+            dept_conditions.append(True)
+            break
+        # 带 '/' 边界的前缀精准匹配：完全匹配 或 子路径匹配
+        prefix = clean_dept.rstrip("/")
+        dept_conditions.append(
+            or_(
+                DocumentChunk.department_path == prefix,
+                DocumentChunk.department_path.startswith(prefix + "/")
+            )
+        )
+
+    if not dept_conditions:
+        raise ValueError("【数据隔离安全拦截】解析后部门范围为空，拒绝跨部门全量检索 (Fail-Closed)")
+
+    if True not in dept_conditions:
+        stmt = stmt.where(or_(*dept_conditions))
 
     if category_scope and category_scope.strip() and category_scope.strip() != "全部":
         stmt = stmt.where(Document.category == category_scope.strip())

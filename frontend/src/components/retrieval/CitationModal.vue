@@ -110,7 +110,7 @@
               <span>🖼️</span> 原版版面提取截取图 (MinerU 原生抽取)
             </span>
             <a 
-              :href="citation.asset_proxy_url" 
+              :href="withTokenUrl(citation.asset_proxy_url)" 
               target="_blank" 
               class="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
             >
@@ -119,7 +119,7 @@
           </div>
           <div class="flex justify-center bg-white rounded-lg p-2.5 border border-slate-200 shadow-inner max-h-72 overflow-y-auto">
             <img 
-              :src="citation.asset_proxy_url" 
+              :src="withTokenUrl(citation.asset_proxy_url)" 
               alt="版面截取原图" 
               class="max-h-64 max-w-full object-contain rounded"
             />
@@ -209,6 +209,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
 import type { CitationSource } from '../../types';
+import { withTokenUrl } from '../../stores/auth';
 
 const props = defineProps<{
   visible: boolean;
@@ -251,14 +252,14 @@ const currentRenderUrl = computed(() => {
   const params = new URLSearchParams();
   params.set('scale', '2.0');
   loadingPage.value = true;
-  return `${base}?${params.toString()}`;
+  return withTokenUrl(`${base}?${params.toString()}`);
 });
 
 // 新标签页打开原生 PDF 的 URL
 const pdfExternalUrl = computed(() => {
   if (!props.citation) return '#';
   const base = props.citation.preview_url || `/api/v1/documents/${props.citation.document_id}/preview`;
-  return `${base}#page=${displayPage.value}`;
+  return withTokenUrl(`${base}#page=${displayPage.value}`);
 });
 
 const prevPage = () => {

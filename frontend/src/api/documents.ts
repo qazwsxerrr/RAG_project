@@ -1,5 +1,6 @@
 import { apiClient } from './client';
 import type { DepartmentItem, DocumentItem, ChunkItem, PipelineSnapshot } from '../types';
+import { withTokenUrl } from '../stores/auth';
 
 export const documentsApi = {
   /** 获取可用部门列表（支持下拉与动态匹配） */
@@ -58,13 +59,13 @@ export const documentsApi = {
     return apiClient.post(`/documents/${docId}/retry`, fromStep ? { from_step: fromStep } : {});
   },
 
-  /** 创建流水线 SSE 长连接 (监听 11 节点流转事件) */
+  /** 创建流水线 SSE 长连接 (监听 11 节点流转事件，受控附加内存态 JWT) */
   createPipelineEventSource(
     docId: string,
     onEvent: (eventName: string, data: any) => void,
     onError?: (err: any) => void
   ): EventSource {
-    const eventSource = new EventSource(`/api/v1/documents/${docId}/events`);
+    const eventSource = new EventSource(withTokenUrl(`/api/v1/documents/${docId}/events`));
 
     const knownEvents = [
       'initial_state',

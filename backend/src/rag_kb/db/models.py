@@ -153,12 +153,16 @@ class DocumentChunk(Base):
     )
 
 class ChatSession(Base):
-    """对话会话表"""
+    """对话会话表 (Phase-6 §5.4: 绑定 tenant_id + user_id 实现员工级私有会话隔离)"""
     __tablename__ = "rag_chat_sessions"
+    __table_args__ = (
+        Index("idx_chat_sessions_tenant_user", "tenant_id", "user_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="新会话")
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, default="default_tenant", index=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc)

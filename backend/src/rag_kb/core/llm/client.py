@@ -74,10 +74,11 @@ class LLMGateway:
         max_tokens: Optional[int] = None,
         stream: bool = False,
         backend: Optional[str] = None,
+        provider: Optional[str] = None,
         **kwargs
     ) -> Tuple[str, Dict[str, str], Dict[str, Any], str]:
         """请求入参归一化与鉴权凭据检查 (支持 Responses 与 Chat Completions 双协议自适应)"""
-        final_api_key = api_key if api_key is not None else settings.active_llm_api_key
+        final_api_key = api_key or ""
         final_base_url = (base_url if base_url is not None else settings.active_llm_base_url).rstrip("/")
         final_model = model if model is not None else settings.active_llm_model
 
@@ -88,7 +89,16 @@ class LLMGateway:
             effective_backend = "chat_completions"
 
         if not final_api_key or final_api_key.startswith("your_") or "*" in final_api_key:
-            raise RuntimeError("【LLM 网关致命错误】未配置有效的大模型 API_KEY！(Fail-Fast)")
+            # Phase-6 §7.5: 100% 从集中鉴权中心短期租约动态注入凭据，严禁回退本地 .env
+            try:
+                from rag_kb.core.model_credentials import get_credential_sync
+                eff_provider = provider or ("kedaya" if "kedaya" in final_base_url.lower() else "siliconflow")
+                cred = get_credential_sync(eff_provider, scope="model:llm")
+                final_api_key = cred.api_key
+                if (not base_url or not base_url.strip()) and cred.base_url:
+                    final_base_url = cred.base_url.rstrip("/")
+            except Exception as e:
+                raise RuntimeError(f"【LLM 网关致命错误】从 Java 鉴权中心换取模型租约失败: {e}！(Fail-Fast)")
 
         headers = {
             "Authorization": f"Bearer {final_api_key}",
@@ -458,12 +468,15 @@ class ResilientLLMGateway(LLMGateway):
     ) -> List[ModelNodeConfig]:
         """获取目标执行候选链：若调用方显式指定 endpoint/model 则以指定参数优先，否则按候选池顺序调度"""
         if model or base_url or api_key:
+            eff_url = base_url or self.config.primary.base_url
+            eff_provider = "kedaya" if "kedaya" in eff_url.lower() else "siliconflow"
             return [
                 ModelNodeConfig(
                     name="caller-override",
                     model=model or self.config.primary.model,
-                    base_url=base_url or self.config.primary.base_url,
+                    base_url=eff_url,
                     api_key=api_key or self.config.primary.api_key,
+                    provider=eff_provider,
                     backend=backend or self.config.primary.backend
                 )
             ]
@@ -496,14 +509,22 @@ class ResilientLLMGateway(LLMGateway):
             try:
                 logger.info(f"[{req_id}][LLMGateway] 尝试由节点 [{node.name} ({node.model})] 执行流式推理...")
                 client = self.get_client()
+                eff_api_key = node.api_key
+                eff_base_url = node.base_url
+                if not eff_api_key:
+                    from rag_kb.core.model_credentials import get_credential
+                    cred = await get_credential(node.provider or "kedaya", scope="model:llm")
+                    eff_api_key = cred.api_key
+                    eff_base_url = cred.base_url or eff_base_url
                 endpoint, headers, payload, eff_backend = self._prepare_request(
                     messages=messages,
                     model=node.model,
-                    base_url=node.base_url,
-                    api_key=node.api_key,
+                    base_url=eff_base_url,
+                    api_key=eff_api_key,
                     temperature=temperature,
                     stream=True,
                     backend=node.backend,
+                    provider=node.provider,
                     **kwargs
                 )
 
@@ -638,15 +659,23 @@ class ResilientLLMGateway(LLMGateway):
             t0 = time.perf_counter()
             try:
                 client = self.get_client()
+                eff_api_key = node.api_key
+                eff_base_url = node.base_url
+                if not eff_api_key:
+                    from rag_kb.core.model_credentials import get_credential
+                    cred = await get_credential(node.provider or "kedaya", scope="model:llm")
+                    eff_api_key = cred.api_key
+                    eff_base_url = cred.base_url or eff_base_url
                 endpoint, headers, payload, eff_backend = self._prepare_request(
                     messages=messages,
                     model=node.model,
-                    base_url=node.base_url,
-                    api_key=node.api_key,
+                    base_url=eff_base_url,
+                    api_key=eff_api_key,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     stream=False,
                     backend=node.backend,
+                    provider=node.provider,
                     **kwargs
                 )
 
@@ -750,6 +779,7 @@ class ResilientLLMGateway(LLMGateway):
                     max_tokens=max_tokens,
                     stream=False,
                     backend=node.backend,
+                    provider=node.provider,
                     **kwargs
                 )
 

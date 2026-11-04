@@ -66,7 +66,7 @@ export const useChatStore = defineStore('chat', () => {
 
     isLoadingSessions.value = true;
     try {
-      const list = await sessionsApi.listSessions('default_tenant', 50, 0);
+      const list = await sessionsApi.listSessions(50, 0);
       if (list && list.length > 0) {
         // 保留现有已加载的消息对象映射，杜绝粗暴清空现有对话树
         const existingMessagesMap = new Map(sessions.value.map((s) => [s.id, s.messages]));
@@ -93,7 +93,7 @@ export const useChatStore = defineStore('chat', () => {
         }
       } else {
         // 云端尚无历史会话，创建云端新会话
-        const created = await sessionsApi.createSession('新会话', 'default_tenant');
+        const created = await sessionsApi.createSession('新会话');
         const newSession: ChatSession = {
           id: created.id,
           title: created.title || '新会话',
@@ -121,7 +121,7 @@ export const useChatStore = defineStore('chat', () => {
     if (isGenerating.value) {
       stopGeneration();
     }
-    const created = await sessionsApi.createSession(title, 'default_tenant');
+    const created = await sessionsApi.createSession(title);
     const newSession: ChatSession = {
       id: created.id,
       title: created.title || title,
@@ -156,7 +156,7 @@ export const useChatStore = defineStore('chat', () => {
     if (isGenerating.value && currentSessionId.value === id) {
       stopGeneration();
     }
-    await sessionsApi.deleteSession(id, 'default_tenant');
+    await sessionsApi.deleteSession(id);
     const idx = sessions.value.findIndex((s) => s.id === id);
     if (idx !== -1) {
       sessions.value.splice(idx, 1);

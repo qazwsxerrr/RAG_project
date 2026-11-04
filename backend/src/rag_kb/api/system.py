@@ -10,8 +10,10 @@ import time
 import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy import select, desc, or_
+
+from rag_kb.api.deps import UserContext, require_permission
 
 from rag_kb.core.config import settings
 from rag_kb.core.llm import llm_gateway
@@ -39,7 +41,7 @@ def _derive_provider(base_url: str) -> str:
     return "other"
 
 @router.get("/llm/channels")
-async def get_llm_channels_status():
+async def get_llm_channels_status(user: UserContext = Depends(require_permission("kb:retrieve"))):
     """获取所有模型渠道的实时健康状态、SLA可用率、TTFT与近18次调用柱状条 (以 PostgreSQL sys_audit_logs 为单一真实源)"""
     tracker = llm_gateway.health_tracker
     cfg = llm_gateway.config
@@ -115,12 +117,17 @@ async def get_llm_channels_status():
         node_ttfts = [b["ttft_ms"] for b in recent_bars if b["ttft_ms"] is not None]
         avg_ttft = int(sum(node_ttfts) / len(node_ttfts)) if node_ttfts else 0
 
+        node_provider = node.provider or _derive_provider(node.base_url)
+        from rag_kb.core.model_credentials import get_cached_lease_info
+        lease_info = get_cached_lease_info(node_provider, "model:llm")
+
         channel_list.append({
             "name": node.name,
             "model": node.model,
-            "provider": _derive_provider(node.base_url),
+            "provider": node_provider,
             "base_url": node.base_url,
-            "masked_key": node.masked_api_key(),
+            "masked_key": lease_info["masked_display"],
+            "lease_expires_at": lease_info["expires_at"],
             "backend": node.backend,
             "role": "PRIMARY" if node.name == cfg.primary.name else "FALLBACK",
             "weight": node.weight,
@@ -134,14 +141,19 @@ async def get_llm_channels_status():
             "recent_bars": recent_bars
         })
 
-    # 检索支撑组件 (Embedding & Reranker)
+    # 检索支撑组件 (Embedding & Reranker，凭据统一由 Java 鉴权中心租约托管)
+    from rag_kb.core.model_credentials import get_cached_lease_info
+    emb_lease = get_cached_lease_info(_derive_provider(settings.EMBEDDING_BASE_URL), "model:embedding")
+    rerank_lease = get_cached_lease_info(_derive_provider(settings.RERANK_BASE_URL), "model:rerank")
+
     infra_channels = [
         {
             "name": "embedding-dense-bge",
             "model": settings.EMBEDDING_MODEL,
             "provider": _derive_provider(settings.EMBEDDING_BASE_URL),
             "base_url": settings.EMBEDDING_BASE_URL,
-            "masked_key": f"{settings.EMBEDDING_API_KEY[:4]}****{settings.EMBEDDING_API_KEY[-4:]}" if len(settings.EMBEDDING_API_KEY) > 8 else "******",
+            "masked_key": emb_lease["masked_display"],
+            "lease_expires_at": emb_lease["expires_at"],
             "backend": "embeddings",
             "role": "INFRA",
             "weight": 100,
@@ -159,7 +171,8 @@ async def get_llm_channels_status():
             "model": settings.RERANK_MODEL,
             "provider": _derive_provider(settings.RERANK_BASE_URL),
             "base_url": settings.RERANK_BASE_URL,
-            "masked_key": f"{settings.RERANK_API_KEY[:4]}****{settings.RERANK_API_KEY[-4:]}" if len(settings.RERANK_API_KEY) > 8 else "******",
+            "masked_key": rerank_lease["masked_display"],
+            "lease_expires_at": rerank_lease["expires_at"],
             "backend": "rerank",
             "role": "INFRA",
             "weight": 100,
@@ -206,7 +219,11 @@ async def get_llm_channels_status():
     }
 
 @router.get("/llm/channels/{node_name}/audits")
-async def get_channel_audit_logs(node_name: str, limit: int = 30):
+async def get_channel_audit_logs(
+    node_name: str,
+    limit: int = 30,
+    user: UserContext = Depends(require_permission("kb:retrieve"))
+):
     """查询指定模型节点的近 30 次真实审计调用流水"""
     try:
         async with AsyncSessionLocal() as session:
@@ -240,11 +257,14 @@ async def get_channel_audit_logs(node_name: str, limit: int = 30):
                 ]
             }
     except Exception as e:
-        return {"node_name": node_name, "count": 0, "items": [], "warning": f"DB连接未就绪: {e}"}
+        raise HTTPException(status_code=500, detail=f"【数据库异常】读取审计流水失败: {str(e)} (Fail-Fast)")
 
 @router.post("/llm/channels/{node_name}/reset")
-async def reset_channel_circuit_breaker(node_name: str):
-    """管理员手动重置指定模型节点的熔断状态至 CLOSED 健康"""
+async def reset_channel_circuit_breaker(
+    node_name: str,
+    user: UserContext = Depends(require_permission("system:admin"))
+):
+    """管理员手动重置指定模型节点的熔断状态至 CLOSED 健康 (需 system:admin 权限)"""
     tracker = llm_gateway.health_tracker
     tracker.reset_node(node_name)
     return {

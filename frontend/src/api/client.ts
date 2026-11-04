@@ -9,38 +9,47 @@ export const apiClient = axios.create({
   },
 });
 
-// 自动注入当前 RBAC 模拟凭据 (Bearer Token)，前置预判并按需静默续签
+// 自动注入当前内存态业务 JWT 凭据 (Bearer Token)，前置预判并按需静默续签
 apiClient.interceptors.request.use(async (config) => {
-  let token = localStorage.getItem('rag_auth_token');
-  if (token && isTokenExpired(token)) {
+  const authStore = useAuthStore();
+  let currentToken = authStore.token;
+
+  if (currentToken && isTokenExpired(currentToken)) {
     try {
-      const authStore = useAuthStore();
-      token = await authStore.refreshToken();
+      currentToken = await authStore.refreshToken();
     } catch (e) {
       console.warn('[API 请求拦截] 前置换签异常:', e);
     }
   }
 
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
+  if (currentToken) {
+    config.headers.Authorization = `Bearer ${currentToken}`;
   }
   return config;
 });
 
-// Fail-Fast: 拦截并抛出真实错误信息，若遇到 401 凭据失效则自动静默换票重试一次
+// Fail-Fast: 拦截并抛出真实错误信息；遇到 401 透明重试一次，遇到 403 明确标记无权限拒绝重试
 apiClient.interceptors.response.use(
   (response) => response.data,
   async (error) => {
     const originalRequest = error.config;
     const status = error.response?.status;
     const errorDetail = error.response?.data?.detail || error.message || '网络请求失败';
+    const authStore = useAuthStore();
+
+    // 遇到 403 权限不足：标记 isPermissionDenied，绝不重试与换票 (§2.4 规范)
+    if (status === 403) {
+      authStore.isPermissionDenied = true;
+      authStore.interceptAlert = errorDetail;
+      console.warn(`[API 权限拦截 403] 越权或缺乏权限: ${errorDetail}`);
+      return Promise.reject(new Error(errorDetail));
+    }
 
     // 遇到 401 且尚未重试过时，触发静默换票并透明重试一次
     if (status === 401 && originalRequest && !originalRequest._retry) {
       originalRequest._retry = true;
       try {
-        console.warn(`[API 鉴权拦截] 检测到 401 凭据失效 (${originalRequest.url})，执行静默换票重试...`);
-        const authStore = useAuthStore();
+        console.warn(`[API 鉴权拦截 401] 凭据失效 (${originalRequest.url})，执行静默换票重试...`);
         const newToken = await authStore.refreshToken();
         originalRequest.headers.Authorization = `Bearer ${newToken}`;
         return apiClient(originalRequest);

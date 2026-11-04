@@ -6,7 +6,7 @@
 """
 
 import logging
-from typing import List
+from typing import List, Tuple
 import httpx
 from rag_kb.core.config import settings
 from rag_kb.core.resilience import retry_on_transient
@@ -24,32 +24,36 @@ class EmbeddingService:
     """稠密语义特征向量生成服务 (默认对接 SiliconFlow BAAI/bge-m3 1024 维 API)"""
 
     def __init__(self):
-        self.api_key = settings.EMBEDDING_API_KEY
         self.base_url = settings.EMBEDDING_BASE_URL.rstrip("/")
         self.model_name = settings.EMBEDDING_MODEL
         self.dim = settings.EMBEDDING_DIM
 
-    def _validate_config(self):
-        if not self.api_key or not self.api_key.strip():
+    async def _resolve_credentials(self) -> Tuple[str, str]:
+        """解析向量模型调用凭据 (Phase-6 §7.2: 强制通过 Java 鉴权中心换取 10min 短期租约，严禁回退本地 .env)"""
+        try:
+            from rag_kb.core.model_credentials import get_credential
+            cred = await get_credential("siliconflow", scope="model:embedding")
+            return cred.api_key, cred.base_url.rstrip("/")
+        except Exception as e:
             raise RuntimeError(
-                "【向量模型错误】未配置 EMBEDDING_API_KEY！"
-                "根据企业级准则，严禁使用本地随机向量兜底，请在 .env 中正确配置 API 密钥。"
+                f"【向量模型凭据错误】未能从鉴权中心获取 Embedding 短期租约凭据: {e} (Fail-Fast)"
             )
 
     async def embed_texts(self, texts: List[str], batch_size: int = 16) -> List[List[float]]:
         """批量生成文本的 1024 维稠密特征向量"""
-        self._validate_config()
         if not texts:
             return []
+
+        api_key, base_url = await self._resolve_credentials()
 
         for idx, t in enumerate(texts):
             if not t or not t.strip():
                 raise ValueError(f"【向量计算错误】第 {idx} 条输入文本为空，严禁对空文本生成语义向量！")
 
         all_embeddings: List[List[float]] = []
-        endpoint = f"{self.base_url}/embeddings"
+        endpoint = f"{base_url}/embeddings"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
 

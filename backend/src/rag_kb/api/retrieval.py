@@ -14,7 +14,8 @@ from fastapi.responses import StreamingResponse
 
 from rag_kb.api.deps import (
     UserContext,
-    get_current_user_optional,
+    get_current_user,
+    require_permission,
     derive_secure_department_scope
 )
 
@@ -90,13 +91,13 @@ class ThinkingProcessBuilder:
 @router.post("/retrieval/search", response_model=ChatQueryResponse)
 async def search_endpoint(
     request: ChatQueryRequest,
-    user: Optional[UserContext] = Depends(get_current_user_optional)
+    user: UserContext = Depends(require_permission("kb:retrieve"))
 ):
     """纯检索接口 (阶段 1 ~ 阶段 6)：获取经过多阶段漏斗精选的切片与思考流"""
-    # 0. RBAC 鉴权与部门防越权拦截
-    effective_dept_scope = request.department_scope
-    if user:
-        effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
+    # 0. RBAC 鉴权与部门防越权拦截 (Phase-6: 服务端强制推导，绝不信任前端入参)
+    effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
+    if not effective_dept_scope:
+        raise HTTPException(status_code=403, detail="【数据隔离安全拦截】无法派生有效部门权限范围 (Fail-Closed)")
 
     # 前置安全熔断护栏：拦截涉黄、暴恐、涉枪涉爆违禁词与越狱注入
     is_safe, error_msg = validate_prompt_security(request.query)
@@ -205,7 +206,7 @@ async def search_endpoint(
 @router.post("/retrieval/chat")
 async def chat_endpoint(
     request: ChatQueryRequest,
-    user: Optional[UserContext] = Depends(get_current_user_optional)
+    user: UserContext = Depends(require_permission("kb:retrieve"))
 ):
     """
     阶段 1 ~ 阶段 8 全流程智能问答流式打字机接口 (POST SSE 协议)
@@ -213,10 +214,10 @@ async def chat_endpoint(
     - 阶段 7~8: 动态组装防幻觉 Prompt，调用云端大模型流式派发 event: message 打字机输出
     - 结束: 派发 event: done
     """
-    # 0. RBAC 鉴权与部门防越权拦截
-    effective_dept_scope = request.department_scope
-    if user:
-        effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
+    # 0. RBAC 鉴权与部门防越权拦截 (Phase-6: 服务端强制推导，绝不信任前端入参)
+    effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
+    if not effective_dept_scope:
+        raise HTTPException(status_code=403, detail="【数据隔离安全拦截】无法派生有效部门权限范围 (Fail-Closed)")
 
     history_dicts = [h.model_dump() for h in request.history] if request.history else []
     initial_state = get_default_state(
@@ -230,10 +231,18 @@ async def chat_endpoint(
         enable_hyde=request.enable_hyde
     )
 
-    # 记录用户消息至会话历史
+    # 记录用户消息至会话历史 (强制绑定当前员工 tenant_id 与 user_id，跨用户越权直接拦截)
     if request.conversation_id:
         try:
-            await chat_store.append_message(request.conversation_id, "user", request.query)
+            await chat_store.append_message(
+                request.conversation_id,
+                "user",
+                request.query,
+                tenant_id=user.tenant_id,
+                user_id=user.user_id
+            )
+        except PermissionError as pe:
+            raise HTTPException(status_code=403, detail=str(pe))
         except Exception as e:
             logger.warning(f"记录用户消息失败: {e}")
 
@@ -249,7 +258,9 @@ async def chat_endpoint(
                     await chat_store.append_message(
                         request.conversation_id,
                         "assistant",
-                        block_reply
+                        block_reply,
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id
                     )
                 except Exception as e:
                     logger.warning(f"记录合规拒绝消息失败: {e}")
@@ -326,7 +337,9 @@ async def chat_endpoint(
                         full_answer,
                         citations=citations,
                         reasoning_content=full_reasoning if full_reasoning else None,
-                        thinking_process=thinking_payload if thinking_payload else None
+                        thinking_process=thinking_payload if thinking_payload else None,
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id
                     )
                 except Exception as e:
                     logger.warning(f"记录助手消息失败: {e}")

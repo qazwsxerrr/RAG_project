@@ -115,19 +115,43 @@
         <div v-else class="flex-1"></div>
       </div>
 
-      <!-- 侧边栏底部：真实组件监控状态栏 (Fail-Fast: 动态探针) -->
-      <div class="border-t border-slate-100 p-3.5 space-y-1.5 text-[11px] text-slate-500 font-mono bg-slate-50/50">
-        <div class="flex items-center space-x-2">
-          <span class="w-2 h-2 rounded-full shrink-0" :class="systemStatus.dbStatus === 'online' ? 'bg-emerald-500' : 'bg-rose-500'"></span>
-          <span class="truncate">PostgreSQL 16 + pgvector</span>
+      <!-- 侧边栏底部：当前登录员工身份卡片 + 真实组件监控状态栏 -->
+      <div class="border-t border-slate-100 bg-slate-50/50">
+        <div v-if="authStore.currentUser" class="px-3.5 pt-3 pb-2.5 border-b border-slate-100 flex items-center justify-between gap-2">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-indigo-500 shrink-0"></span>
+              <span class="text-xs font-bold text-slate-800 truncate">{{ authStore.currentUser.username }}</span>
+              <span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 text-[10px] font-mono shrink-0">
+                {{ authStore.currentUser.roles?.[0] || 'employee' }}
+              </span>
+            </div>
+            <div class="text-[10px] text-slate-500 truncate mt-0.5 pl-3.5" :title="authStore.currentUser.dept_path">
+              {{ authStore.currentUser.dept_path === '/' ? '全域数据权限 (/)' : authStore.currentUser.dept_path }}
+            </div>
+          </div>
+          <button
+            @click="authStore.logout()"
+            class="px-2 py-1 rounded-md text-[11px] font-medium text-slate-600 hover:text-rose-600 hover:bg-rose-50 border border-slate-200/80 hover:border-rose-200 transition-colors shrink-0 cursor-pointer"
+            title="退出当前账号并切换 SSO 员工身份"
+          >
+            切换账号
+          </button>
         </div>
-        <div class="flex items-center space-x-2 text-slate-400">
-          <span class="w-2 h-2 rounded-full shrink-0" :class="systemStatus.modelName ? 'bg-emerald-500' : 'bg-amber-400'"></span>
-          <span class="truncate">{{ systemStatus.modelName || '大模型服务' }} · 在线就绪</span>
-        </div>
-        <div class="flex items-center space-x-2 text-slate-400">
-          <span class="w-2 h-2 rounded-full shrink-0" :class="systemStatus.ossStatus === 'online' ? 'bg-emerald-500' : 'bg-rose-500'"></span>
-          <span class="truncate">阿里云 OSS · {{ systemStatus.ossStatus === 'online' ? '正常挂载' : '未挂载' }}</span>
+
+        <div class="p-3.5 space-y-1.5 text-[11px] text-slate-500 font-mono">
+          <div class="flex items-center space-x-2">
+            <span class="w-2 h-2 rounded-full shrink-0" :class="systemStatus.dbStatus === 'online' ? 'bg-emerald-500' : 'bg-rose-500'"></span>
+            <span class="truncate">PostgreSQL 16 + pgvector</span>
+          </div>
+          <div class="flex items-center space-x-2 text-slate-400">
+            <span class="w-2 h-2 rounded-full shrink-0" :class="systemStatus.modelName ? 'bg-emerald-500' : 'bg-amber-400'"></span>
+            <span class="truncate">{{ systemStatus.modelName || '大模型服务' }} · 在线就绪</span>
+          </div>
+          <div class="flex items-center space-x-2 text-slate-400">
+            <span class="w-2 h-2 rounded-full shrink-0" :class="systemStatus.ossStatus === 'online' ? 'bg-emerald-500' : 'bg-rose-500'"></span>
+            <span class="truncate">阿里云 OSS · {{ systemStatus.ossStatus === 'online' ? '正常挂载' : '未挂载' }}</span>
+          </div>
         </div>
       </div>
 
@@ -154,12 +178,14 @@
 import { ref, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useChatStore } from './stores/chat';
+import { useAuthStore } from './stores/auth';
 import { systemApi } from './api/system';
 import SciFiBackground from './components/retrieval/SciFiBackground.vue';
 
 const route = useRoute();
 const router = useRouter();
 const chatStore = useChatStore();
+const authStore = useAuthStore();
 
 const showSettingsModal = ref(false);
 

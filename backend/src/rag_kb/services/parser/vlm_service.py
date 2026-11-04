@@ -20,10 +20,6 @@ class MultimodalVLMService:
         self._client = None
 
     @property
-    def api_key(self) -> str:
-        return settings.active_vlm_api_key
-
-    @property
     def base_url(self) -> str:
         return settings.active_vlm_base_url
 
@@ -32,16 +28,42 @@ class MultimodalVLMService:
         return settings.active_vlm_model
 
     def reset_client(self):
-        """重置客户端缓存，强制下次调用时使用最新配置与 API_KEY 初始化"""
+        """重置客户端缓存，强制下次调用时重新从鉴权中心换取租约"""
         self._client = None
 
-    def get_client(self) -> Optional[OpenAI]:
-        """延迟初始化 OpenAI 兼容客户端 (支持凭据变更自动感知)"""
-        current_api_key = self.api_key
-        current_base_url = self.base_url
+    async def get_client_async(self) -> OpenAI:
+        """延迟初始化 OpenAI 兼容客户端 (Phase-6 §7.2: 强制通过 Java 鉴权中心换取短期租约凭据)"""
+        try:
+            from rag_kb.core.model_credentials import get_credential
+            provider = "kedaya" if "kedaya" in self.base_url.lower() else "siliconflow"
+            cred = await get_credential(provider, scope="model:vlm")
+            current_api_key = cred.api_key
+            current_base_url = cred.base_url or self.base_url
+        except Exception as e:
+            raise RuntimeError(f"【多模态模型错误】未能从鉴权中心获取 VLM 租约凭据: {e} (Fail-Fast)")
 
         if self._client is not None:
-            # 校验缓存的 Client 是否与当前配置一致，若不一致自动失效重置
+            client_key = getattr(self._client, "api_key", None)
+            client_base_url = str(getattr(self._client, "base_url", "")).rstrip("/")
+            if client_key == current_api_key and client_base_url == current_base_url.rstrip("/"):
+                return self._client
+
+        self._client = OpenAI(api_key=current_api_key, base_url=current_base_url, timeout=45.0)
+        return self._client
+
+    def get_client(self) -> Optional[OpenAI]:
+        """延迟初始化 OpenAI 兼容客户端 (同步向鉴权中心换取短期租约凭据)"""
+        try:
+            from rag_kb.core.model_credentials import get_credential_sync
+            provider = "kedaya" if "kedaya" in self.base_url.lower() else "siliconflow"
+            cred = get_credential_sync(provider, scope="model:vlm")
+            current_api_key = cred.api_key
+            current_base_url = cred.base_url or self.base_url
+        except Exception as e:
+            logger.error(f"[MultimodalVLMService] 从鉴权中心换取租约异常: {e}")
+            raise RuntimeError(f"【多模态模型错误】未能从鉴权中心获取 VLM 租约凭据: {e} (Fail-Fast)")
+
+        if self._client is not None:
             client_key = getattr(self._client, "api_key", None)
             client_base_url = str(getattr(self._client, "base_url", "")).rstrip("/")
             if client_key != current_api_key or client_base_url != current_base_url.rstrip("/"):
@@ -50,14 +72,8 @@ class MultimodalVLMService:
         if self._client is not None:
             return self._client
 
-        if current_api_key and not current_api_key.startswith("your_") and "*" not in current_api_key:
-            try:
-                self._client = OpenAI(api_key=current_api_key, base_url=current_base_url, timeout=45.0)
-                return self._client
-            except Exception as e:
-                print(f"[MultimodalVLMService] 初始化模型客户端异常: {e}")
-                return None
-        return None
+        self._client = OpenAI(api_key=current_api_key, base_url=current_base_url, timeout=45.0)
+        return self._client
 
     def _call_chat_completion(
         self,
@@ -70,17 +86,17 @@ class MultimodalVLMService:
     ) -> str:
         """
         统一通过全局大模型网关 llm_gateway.chat_sync 执行多模态图文调用：
-        - 自动享受共享连接池与长连接保持；
-        - 遇到 401/403/404/400 立即 Fail-Fast，绝不盲目重试；
-        - 遇到网络抖动、超时、429 并发限流或 5xx 故障时自动执行 3 次指数退避重试；
-        - 彻底消除手写循环与不可恢复凭据错误的虚假循环等待。
+        - 凭据直接取自已向鉴权中心换取租约的 client 实例；
+        - 遇到 401/403/404/400 立即 Fail-Fast，绝不盲目重试。
         """
         try:
+            lease_api_key = getattr(client, "api_key", None) if client else None
+            lease_base_url = str(getattr(client, "base_url", "")).rstrip("/") if client and getattr(client, "base_url", None) else self.base_url
             content = llm_gateway.chat_sync(
                 messages=messages,
                 model=self.model,
-                base_url=self.base_url,
-                api_key=self.api_key,
+                base_url=lease_base_url,
+                api_key=lease_api_key,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 backend=backend

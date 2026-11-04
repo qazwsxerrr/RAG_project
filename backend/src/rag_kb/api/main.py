@@ -30,12 +30,12 @@ async def lifespan(app: FastAPI):
     from rag_kb.core.logging import setup_logging
     setup_logging()
 
-    # 2. 启动时保证数据库表与 pgvector 扩展已就绪
-    try:
-        await init_db()
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).warning(f"启动时 init_db 提示: {e}")
+    # 2. Phase-6 §3.3 铁律 6: 启动时强校验 JWT RS256 验签公钥或 JWKS 可达性，缺失立即拒绝启动
+    from rag_kb.api.deps import verify_jwt_setup_on_startup
+    verify_jwt_setup_on_startup()
+
+    # 3. 启动时保证数据库表与 pgvector 扩展已就绪 (Phase-6: 严格 Fail-Fast，异常坚决抛出中断)
+    await init_db()
     yield
 
 def create_app() -> FastAPI:
@@ -62,10 +62,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # 2. 静态中间产物切图挂载
-    parsed_dir = Path(settings.DATA_PARSED_DIR)
-    parsed_dir.mkdir(parents=True, exist_ok=True)
-    app.mount("/static/parsed", StaticFiles(directory=str(parsed_dir)), name="parsed")
+    # Phase-6 §1.5 & §6.2: 物理移除 /static/parsed 静态免鉴权目录直挂，杜绝绕过 API 鉴权泄露切图
 
     # 3. 注册 API 业务路由 (优先展示鉴权与检索核心路由)
     prefix = settings.API_V1_PREFIX
@@ -116,4 +113,4 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("rag_kb.api.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("rag_kb.api.main:app", host=settings.HOST, port=settings.PORT, reload=settings.DEBUG)

@@ -1,44 +1,42 @@
-"""src/rag_kb/api/departments.py —— 部门树与部门列表接口。
+"""src/rag_kb/api/departments.py —— 企业组织架构部门接口。
 
-支持前端下拉选择、部门树展示与动态打字匹配新增。
+Phase-6 严格规范：
+- 彻底物理删除内置硬编码 DEFAULT_DEPARTMENTS 模板部门与 except: pass 吞异常逻辑；
+- 仅以 PostgreSQL sys_departments 作为单一真实来源，Fail-Fast 抛出真实异常；
+- 挂载 kb:retrieve 鉴权依赖。
 """
 
 from typing import List
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from rag_kb.api.schemas import DepartmentItemSchema
+from rag_kb.api.deps import UserContext, require_permission
 from rag_kb.db.models import Department
 from rag_kb.db.session import get_db
 
 router = APIRouter(prefix="/documents/departments", tags=["部门管理"])
 
-# 初始常规模板部门
-DEFAULT_DEPARTMENTS = [
-    {"id": 1, "name": "技术部", "path": "/总公司/研发中心/技术部"},
-    {"id": 2, "name": "产品部", "path": "/总公司/研发中心/产品部"},
-    {"id": 3, "name": "运营部", "path": "/总公司/运营中心/运营部"},
-    {"id": 4, "name": "人事行政部", "path": "/总公司/职能中心/人事行政部"},
-    {"id": 5, "name": "财务部", "path": "/总公司/职能中心/财务部"},
-]
-
 @router.get("", response_model=List[DepartmentItemSchema])
-async def list_departments(db: AsyncSession = Depends(get_db)):
-    """获取所有可用部门列表（合并模板部门与数据库真实部门）"""
-    dept_map = {d["name"]: d for d in DEFAULT_DEPARTMENTS}
-
+async def list_departments(
+    db: AsyncSession = Depends(get_db),
+    user: UserContext = Depends(require_permission("kb:retrieve"))
+):
+    """获取所有可用企业真实部门列表（只读数据库单一真实源，严禁伪造兜底）"""
     try:
         stmt = select(Department).order_by(Department.created_at.asc())
         res = await db.execute(stmt)
         db_depts = res.scalars().all()
-        for idx, d in enumerate(db_depts, start=len(DEFAULT_DEPARTMENTS) + 1):
-            if d.name not in dept_map:
-                dept_map[d.name] = {
-                    "id": idx,
-                    "name": d.name,
-                    "path": d.path or f"/总公司/动态部门/{d.name}"
-                }
-    except Exception:
-        pass
-
-    return list(dept_map.values())
+        return [
+            DepartmentItemSchema(
+                id=idx,
+                name=d.name,
+                path=d.path
+            )
+            for idx, d in enumerate(db_depts, start=1)
+        ]
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"【数据库异常】读取企业真实部门列表失败: {str(e)} (Fail-Fast)"
+        )

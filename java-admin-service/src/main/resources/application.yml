@@ -1,0 +1,68 @@
+server:
+  port: ${SERVER_PORT:8080}
+  # Phase-6 §9: 部署在 nginx / Cloudflare 反向代理之后，必须按 X-Forwarded-* 推导 {baseUrl}，
+  # 否则 redirect_uri 会退化成 http://，与 IdP 注册值不一致导致 invalid_redirect_uri。
+  forward-headers-strategy: framework
+
+spring:
+  application:
+    name: java-admin-service
+  config:
+    import:
+      - "optional:file:.env.vault[.properties]"
+      - "optional:file:java-admin-service/.env.vault[.properties]"
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://121.41.118.56:5432/rag_enterprise}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres_password}
+    driver-class-name: org.postgresql.Driver
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+
+  security:
+    oauth2:
+      client:
+        registration:
+          corp-sso:
+            client-id: ${OIDC_CLIENT_ID:rag-admin-service}
+            client-secret: ${OIDC_CLIENT_SECRET:rag-admin-secret}
+            client-name: "企业统一身份认证中心"
+            provider: corp-idp
+            # 角色由 groups(/roles/{code}) 映射，不申请 Keycloak 的 roles scope，
+            # 避免其 roles 声明为嵌套 JSON 对象而非字符串数组 (见 §2.3)
+            scope: openid,profile,email
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+            authorization-grant-type: authorization_code
+            client-authentication-method: client_secret_basic
+        provider:
+          corp-idp:
+            # Dev IdP = Keycloak (realm: enterprise-rag)
+            # 本地宿主机/WSL默认走 localhost:8180，docker-compose 容器内通过环境变量覆盖为 keycloak:8080
+            authorization-uri: ${OIDC_AUTH_URI:http://localhost:8180/realms/enterprise-rag/protocol/openid-connect/auth}
+            token-uri: ${OIDC_TOKEN_URI:http://localhost:8180/realms/enterprise-rag/protocol/openid-connect/token}
+            user-info-uri: ${OIDC_USERINFO_URI:http://localhost:8180/realms/enterprise-rag/protocol/openid-connect/userinfo}
+            jwk-set-uri: ${OIDC_JWK_SET_URI:http://localhost:8180/realms/enterprise-rag/protocol/openid-connect/certs}
+            user-name-attribute: preferred_username
+
+# Phase-6 业务 JWT 与模型租约配置
+rag:
+  jwt:
+    issuer: "rag-admin"
+    audience: "rag-engine"
+    ttl-minutes: 30
+    private-key-path: ${JWT_PRIVATE_KEY_PATH:../keys/rsa_private.pem}
+    public-key-path: ${JWT_PUBLIC_KEY_PATH:../keys/rsa_public.pem}
+  internal:
+    service-id: ${MODEL_KEY_SERVICE_ID:rag-engine}
+    service-token: ${MODEL_KEY_SERVICE_SECRET:rag-engine-service-secret}
+  model-vault:
+    siliconflow:
+      base-url: ${SILICONFLOW_BASE_URL:https://api.siliconflow.cn/v1}
+      api-key: ${SILICONFLOW_API_KEY:}
+    kedaya:
+      base-url: ${KEDAYA_BASE_URL:https://kedaya.ai/v1}
+      api-key: ${KEDAYA_API_KEY:}

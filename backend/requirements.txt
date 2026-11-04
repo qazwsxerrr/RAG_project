@@ -17,6 +17,8 @@ alibabacloud-oss-v2>=0.1.0
 jieba>=0.42.1
 requests>=2.31.0
 colorlog>=6.8.0
+PyJWT>=2.8.0
+cryptography>=41.0.0
 
 # 测试与开发依赖
 pytest>=8.0.0
