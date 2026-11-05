@@ -1,102 +1,41 @@
 import re
-import time
 import base64
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import logging
-from openai import OpenAI
 from rag_kb.core.config import settings
 from rag_kb.core.llm import llm_gateway
 
 logger = logging.getLogger(__name__)
 
+
 class MultimodalVLMService:
     """
-    多模态视觉理解大模型服务 (支持 Grok 4.5 / OpenAI-compatible 视觉规范)
-    负责文档配图、流程图架构、表格切图的高精度语义解析与图文结构提取
+    多模态视觉理解与结构化语义提炼服务
+    负责文档配图、流程图架构、表格切图与代码块的高精度语义解析。
+    全程委托全局弹性网关 llm_gateway.chat_sync 执行，自动共享视觉模态候选池筛选、短期租约换票与毫秒级热切换 (Phase-7)。
     """
-
-    def __init__(self):
-        self._client = None
 
     @property
     def base_url(self) -> str:
-        return settings.active_vlm_base_url
+        return settings.active_llm_base_url
 
     @property
     def model(self) -> str:
-        return settings.active_vlm_model
+        return settings.active_llm_model
 
-    def reset_client(self):
-        """重置客户端缓存，强制下次调用时重新从鉴权中心换取租约"""
-        self._client = None
-
-    async def get_client_async(self) -> OpenAI:
-        """延迟初始化 OpenAI 兼容客户端 (Phase-6 §7.2: 强制通过 Java 鉴权中心换取短期租约凭据)"""
-        try:
-            from rag_kb.core.model_credentials import get_credential
-            provider = "kedaya" if "kedaya" in self.base_url.lower() else "siliconflow"
-            cred = await get_credential(provider, scope="model:vlm")
-            current_api_key = cred.api_key
-            current_base_url = cred.base_url or self.base_url
-        except Exception as e:
-            raise RuntimeError(f"【多模态模型错误】未能从鉴权中心获取 VLM 租约凭据: {e} (Fail-Fast)")
-
-        if self._client is not None:
-            client_key = getattr(self._client, "api_key", None)
-            client_base_url = str(getattr(self._client, "base_url", "")).rstrip("/")
-            if client_key == current_api_key and client_base_url == current_base_url.rstrip("/"):
-                return self._client
-
-        self._client = OpenAI(api_key=current_api_key, base_url=current_base_url, timeout=45.0)
-        return self._client
-
-    def get_client(self) -> Optional[OpenAI]:
-        """延迟初始化 OpenAI 兼容客户端 (同步向鉴权中心换取短期租约凭据)"""
-        try:
-            from rag_kb.core.model_credentials import get_credential_sync
-            provider = "kedaya" if "kedaya" in self.base_url.lower() else "siliconflow"
-            cred = get_credential_sync(provider, scope="model:vlm")
-            current_api_key = cred.api_key
-            current_base_url = cred.base_url or self.base_url
-        except Exception as e:
-            logger.error(f"[MultimodalVLMService] 从鉴权中心换取租约异常: {e}")
-            raise RuntimeError(f"【多模态模型错误】未能从鉴权中心获取 VLM 租约凭据: {e} (Fail-Fast)")
-
-        if self._client is not None:
-            client_key = getattr(self._client, "api_key", None)
-            client_base_url = str(getattr(self._client, "base_url", "")).rstrip("/")
-            if client_key != current_api_key or client_base_url != current_base_url.rstrip("/"):
-                self._client = None
-
-        if self._client is not None:
-            return self._client
-
-        self._client = OpenAI(api_key=current_api_key, base_url=current_base_url, timeout=45.0)
-        return self._client
-
-    def _call_chat_completion(
+    def _call_gateway(
         self,
-        client: Any,
         messages: List[Dict[str, Any]],
         max_tokens: int = 800,
         temperature: float = 0.1,
         action_name: str = "多模态视觉 API",
         backend: Optional[str] = None
     ) -> str:
-        """
-        统一通过全局大模型网关 llm_gateway.chat_sync 执行多模态图文调用：
-        - 凭据直接取自已向鉴权中心换取租约的 client 实例；
-        - 遇到 401/403/404/400 立即 Fail-Fast，绝不盲目重试。
-        """
+        """统一通过全局弹性大模型网关执行同步推理，遇到主节点故障自动切换至可用候选节点"""
         try:
-            lease_api_key = getattr(client, "api_key", None) if client else None
-            lease_base_url = str(getattr(client, "base_url", "")).rstrip("/") if client and getattr(client, "base_url", None) else self.base_url
             content = llm_gateway.chat_sync(
                 messages=messages,
-                model=self.model,
-                base_url=lease_base_url,
-                api_key=lease_api_key,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 backend=backend
@@ -108,15 +47,16 @@ class MultimodalVLMService:
             logger.error(f"【{action_name}执行异常】: {e}")
             raise
 
+    @staticmethod
+    def _strip_heading_hashes(text: str) -> str:
+        cleaned_lines = [re.sub(r'^(?:#{1,6}\s+)', '', line) for line in text.strip().splitlines()]
+        return "\n".join(cleaned_lines).strip()
 
     def describe_image(self, image_url_or_path: str, context: Dict[str, Any]) -> str:
-        """
-        结合所属文档名、标题章节与上下文，调用 模型 生成多模态图文摘要
-        """
+        """结合所属文档名、标题章节与上下文，调用多模态视觉节点生成图文摘要"""
         doc_name = context.get("doc_name", "技术文档")
         heading = context.get("heading", "正文小节")
         surrounding_text = context.get("surrounding_text", "")
-        element_type = context.get("element_type", "image")
 
         prompt = f"""请结合提供的图片及上下文，用一段连贯、客观的文字对图片进行核心语义解析。
 【所属文档】：{doc_name}
@@ -128,10 +68,6 @@ class MultimodalVLMService:
 2. 提炼图中的关键架构层级、具体实体/产品名称及流转逻辑。
 3. 语言紧凑精炼，关键技术术语保留原样。
 """
-        client = self.get_client()
-        if client is None:
-            raise RuntimeError("【多模态模型错误】: 未配置有效 API_KEY，无法调用视觉大模型！")
-
         formatted_img_url = self._format_image_payload(image_url_or_path)
         messages = [
             {
@@ -142,14 +78,11 @@ class MultimodalVLMService:
                 ],
             }
         ]
-        content = self._call_chat_completion(client, messages, max_tokens=800, temperature=0.1, action_name="多模态视觉 API")
-        cleaned_lines = [re.sub(r'^(?:#{1,6}\s+)', '', line) for line in content.strip().splitlines()]
-        return "\n".join(cleaned_lines).strip()
+        content = self._call_gateway(messages, max_tokens=800, temperature=0.1, action_name="多模态视觉 API")
+        return self._strip_heading_hashes(content)
 
     def describe_flowchart(self, image_url_or_path: str, context: Dict[str, Any]) -> str:
-        """
-        针对系统架构图、业务流程图、时序图等图像，调用多模态模型提取架构分层、核心组件与流转拓扑
-        """
+        """针对系统架构图、业务流程图、时序图等图像，提取架构分层、核心组件与流转拓扑"""
         doc_name = context.get("doc_name", "技术文档")
         heading = context.get("heading", "正文小节")
         surrounding_text = context.get("surrounding_text", "")
@@ -165,10 +98,6 @@ class MultimodalVLMService:
 - 简单图表用 1-2 句话概括其流转走向；复杂图表按层级说明关键模块，并按箭头流向陈述调用链路。
 - 纯文本直接陈述客观事实，语言紧凑精炼。
 """
-        client = self.get_client()
-        if client is None:
-            raise RuntimeError("【多模态模型错误】: 未配置有效 API_KEY，无法调用视觉大模型！")
-
         formatted_img_url = self._format_image_payload(image_url_or_path)
         messages = [
             {
@@ -179,14 +108,11 @@ class MultimodalVLMService:
                 ],
             }
         ]
-        content = self._call_chat_completion(client, messages, max_tokens=1200, temperature=0.1, action_name="多模态流程图 API")
-        cleaned_lines = [re.sub(r'^(?:#{1,6}\s+)', '', line) for line in content.strip().splitlines()]
-        return "\n".join(cleaned_lines).strip()
+        content = self._call_gateway(messages, max_tokens=1200, temperature=0.1, action_name="多模态流程图 API")
+        return self._strip_heading_hashes(content)
 
     def describe_table(self, table_content: str, context: Dict[str, Any], table_image_url: Optional[str] = None) -> str:
-        """
-        调用大语言模型对表格进行深度结构化语义解析与纯文本序列化
-        """
+        """调用大模型对表格进行深度结构化语义解析与纯文本序列化"""
         doc_name = context.get("doc_name", "技术文档")
         heading = context.get("heading", "正文小节")
         table_title = context.get("title", "") or heading
@@ -231,11 +157,7 @@ class MultimodalVLMService:
 
 是否有溯源：可引用来源文档；无
 """
-        client = self.get_client()
-        if client is None:
-            raise RuntimeError("【模型配置错误】: 未配置有效 API_KEY，无法调用大模型！")
-
-        content_payload = [{"type": "text", "text": prompt}]
+        content_payload: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
         if table_image_url:
             from rag_kb.core.config import WORKSPACE_ROOT as BASE_DIR
             is_remote = table_image_url.startswith("http://") or table_image_url.startswith("https://")
@@ -245,16 +167,12 @@ class MultimodalVLMService:
                 content_payload.append({"type": "image_url", "image_url": {"url": formatted_url}})
 
         messages = [{"role": "user", "content": content_payload}]
-        content = self._call_chat_completion(client, messages, max_tokens=800, temperature=0.1, action_name="表格描述 API")
-        return content.strip()
+        return self._call_gateway(messages, max_tokens=800, temperature=0.1, action_name="表格描述 API")
 
     def describe_code(self, code_content: str, language: str, context: Dict[str, Any]) -> str:
-        """
-        调用大语言模型对代码块进行深度语义理解与业务逻辑提取，生成适合知识库向量检索的专业语义描述
-        """
+        """调用大模型对代码块进行深度语义理解与业务逻辑提取"""
         doc_name = context.get("doc_name", "技术文档")
         heading = context.get("heading", "正文小节")
-        code_title = context.get("title", "") or f"{language} 代码块"
 
         prompt = f"""请对以下代码进行高信息密度的语义提炼，直接陈述其核心业务功能与关键操作：
 
@@ -271,19 +189,12 @@ class MultimodalVLMService:
 - 完整函数或复杂模块：直接陈述核心函数/类名、关键输入输出与核心执行逻辑。
 - 纯文本直接输出技术事实，保持语言紧凑精炼。
 """
-        client = self.get_client()
-        if client is None:
-            raise RuntimeError("【大模型错误】: 未配置有效 API_KEY，无法调用大语言模型！")
-
         messages = [{"role": "user", "content": prompt}]
-        content = self._call_chat_completion(client, messages, max_tokens=1500, temperature=0.1, action_name="代码块语义解析 API")
-        cleaned_lines = [re.sub(r'^(?:#{1,6}\s+)', '', line) for line in content.strip().splitlines()]
-        return "\n".join(cleaned_lines).strip()
+        content = self._call_gateway(messages, max_tokens=1500, temperature=0.1, action_name="代码块语义解析 API")
+        return self._strip_heading_hashes(content)
 
     def describe_flowchart_text(self, mermaid_code: str, context: Dict[str, Any]) -> str:
-        """
-        调用大语言模型对 Mermaid 文本流程图/架构图/时序图进行系统化语义解析
-        """
+        """调用大模型对 Mermaid 文本流程图/架构图/时序图进行系统化语义解析"""
         doc_name = context.get("doc_name", "技术文档")
         heading = context.get("heading", "正文小节")
         title = context.get("title", "系统流程图")
@@ -303,24 +214,14 @@ class MultimodalVLMService:
 - 复杂分层或多分支图表：按层级列出关键组件，并按调用顺序陈述主干流转链路（如 `模块A --(动作)--> 模块B`）。
 - 纯文本直接陈述流转事实，保持高信息密度与语言紧凑。
 """
-        client = self.get_client()
-        if client is None:
-            raise RuntimeError("【大模型错误】: 未配置有效 API_KEY，无法调用大语言模型！")
-
         messages = [{"role": "user", "content": prompt}]
-        content = self._call_chat_completion(client, messages, max_tokens=1500, temperature=0.1, action_name="流程图语义解析 API")
-        cleaned_lines = [re.sub(r'^(?:#{1,6}\s+)', '', line) for line in content.strip().splitlines()]
-        return "\n".join(cleaned_lines).strip()
+        content = self._call_gateway(messages, max_tokens=1500, temperature=0.1, action_name="流程图语义解析 API")
+        return self._strip_heading_hashes(content)
 
     def probe_model_connection(self) -> Dict[str, Any]:
-        """测试并验证模型 API 连通性与响应"""
-        client = self.get_client()
-        if client is None:
-            raise ValueError("【模型配置错误】: 未检测到有效的 API Key，请在 .env 中填写 API_KEY！")
-
-        # 发送简单的握手探测
+        """测试并验证网关候选池连通性与响应"""
         messages = [{"role": "user", "content": "请回复'API Connection OK'"}]
-        reply = self._call_chat_completion(client, messages, max_tokens=30, temperature=0.1, action_name="模型连通性探测")
+        reply = self._call_gateway(messages, max_tokens=30, temperature=0.1, action_name="模型连通性探测")
         return {
             "status": "success",
             "model": self.model,
@@ -331,7 +232,6 @@ class MultimodalVLMService:
     def _format_image_payload(self, image_url_or_path: str) -> str:
         """处理图片链接：支持云端 OSS HTTP(S) URL（私有桶自动临时授权签名）或本地 Base64 编码注入"""
         if image_url_or_path.startswith("http://") or image_url_or_path.startswith("https://"):
-            # 若为阿里云私有 OSS 链接且尚未携带签名参数，自动生成临时鉴权签名 URL（1 小时有效）
             if "aliyuncs.com" in image_url_or_path and "OSSAccessKeyId" not in image_url_or_path:
                 from rag_kb.utils.oss import oss_service
                 return oss_service.sign_url(image_url_or_path, expires=3600)
@@ -340,7 +240,6 @@ class MultimodalVLMService:
         if image_url_or_path.startswith("data:image"):
             return image_url_or_path
 
-        # 若为本地文件路径，支持绝对路径与相对路径查找
         from rag_kb.core.config import WORKSPACE_ROOT as BASE_DIR
         local_path = Path(image_url_or_path)
         if not local_path.exists():
@@ -358,15 +257,4 @@ class MultimodalVLMService:
         return image_url_or_path
 
 
-
 vlm_service = MultimodalVLMService()
-
-if __name__ == "__main__":
-    print(f"正在探测大模型/多模态接口连通性...")
-    print(f"Base URL: {vlm_service.base_url}")
-    print(f"Model: {vlm_service.model}")
-    try:
-        res = vlm_service.probe_model_connection()
-        print(f"✅ 模型连接成功: {res['response']}")
-    except Exception as err:
-        print(f"❌ 模型探测失败: {err}")

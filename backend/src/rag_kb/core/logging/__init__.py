@@ -14,7 +14,7 @@ from rag_kb.core.logging.context import (
     setup_logging,
 )
 from rag_kb.core.logging.middleware import TraceLoggingMiddleware
-from rag_kb.core.logging.audit import record_audit_log
+from rag_kb.core.logging.audit import record_audit_log, record_audit_log_sync, bind_main_event_loop
 
 __all__ = [
     "TraceContext",
@@ -29,4 +29,6 @@ __all__ = [
     "setup_logging",
     "TraceLoggingMiddleware",
     "record_audit_log",
+    "record_audit_log_sync",
+    "bind_main_event_loop",
 ]

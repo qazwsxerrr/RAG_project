@@ -21,12 +21,21 @@ class SSRFSecurityError(RuntimeError):
 # 企业级默认允许出网的根域名白名单
 DEFAULT_ALLOWED_DOMAINS: Set[str] = {
     "aliyuncs.com",
+    "aliyun.com",
     "mineru.net",
     "kedaya.ai",
     "siliconflow.cn",
     "siliconflow.com",
     "openai.com",
     "x.ai",
+    "deepseek.com",
+    "bigmodel.cn",
+    "volces.com",
+    "volcengine.com",
+    "weixin.qq.com",
+    "dingtalk.com",
+    "feishu.cn",
+    "larksuite.com",
     "openxlab.org.cn",
     "shlab.tech"
 }

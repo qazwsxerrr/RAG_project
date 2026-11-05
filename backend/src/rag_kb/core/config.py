@@ -6,18 +6,11 @@
 
 import os
 import json
-import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from pydantic import BaseModel, Field
-try:
-    from pydantic_settings import BaseSettings, SettingsConfigDict
-except ImportError:
-    from pydantic import BaseModel as BaseSettings  # type: ignore
-    SettingsConfigDict = dict  # type: ignore
-
-config_logger = logging.getLogger("rag_kb.config")
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 寻找 .env 文件路径（优先当前包根目录，次优先父级项目根目录）
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -151,14 +144,6 @@ class Settings(BaseSettings):
     def active_llm_model(self) -> str:
         return self.active_model_name
 
-    @property
-    def active_vlm_base_url(self) -> str:
-        return self.active_base_url
-
-    @property
-    def active_vlm_model(self) -> str:
-        return self.active_model_name
-
     # ==================== 向量模型配置 (Dense & Sparse，API Key 统一由 Java 鉴权中心托管) ====================
     EMBEDDING_BASE_URL: str = "https://api.siliconflow.cn/v1"
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
@@ -181,10 +166,16 @@ class Settings(BaseSettings):
 
     # ==================== Phase-7: 多模型热切换与智能监控预警配置 ====================
     LLM_FALLBACKS_JSON: Optional[str] = None
+    VLM_FALLBACKS_JSON: Optional[str] = None
     ALERT_WEBHOOK_URL: Optional[str] = None
     ALERT_ERROR_THRESHOLD: float = 5.0
     CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = 300
     SLIDING_WINDOW_SIZE: int = 100
+    SLIDING_WINDOW_SECONDS: int = 300
+    CIRCUIT_BREAKER_MIN_CALLS: int = 5
+    CIRCUIT_BREAKER_CONSECUTIVE_FAILURES: int = 3
+    LLM_TTFT_TIMEOUT_SECONDS: float = 12.0
+    LLM_NON_STREAM_TIMEOUT_SECONDS: float = 25.0
 
     @property
     def resilient_llm_config(self) -> "ResilientLLMConfig":
@@ -205,16 +196,38 @@ settings: Settings = get_settings()
 
 # ==================== Phase-7 模型节点配置与候选链数据模型 ====================
 
+def derive_provider_from_url(base_url: str, explicit_provider: Optional[str] = None) -> str:
+    """根据 base_url 与显式声明推导供应商厂商唯一标识 (Fail-Fast 规范)"""
+    if explicit_provider and explicit_provider.strip():
+        return explicit_provider.strip().lower()
+    url_lower = (base_url or "").lower().strip()
+    if "kedaya" in url_lower:
+        return "kedaya"
+    if "siliconflow" in url_lower:
+        return "siliconflow"
+    if "deepseek" in url_lower:
+        return "deepseek"
+    if "dashscope" in url_lower or "aliyun" in url_lower:
+        return "dashscope"
+    if "bigmodel" in url_lower or "zhipu" in url_lower:
+        return "zhipu"
+    if "openai" in url_lower:
+        return "openai"
+    if "volces" in url_lower or "volcengine" in url_lower:
+        return "volces"
+    raise ValueError(f"【供应商推导失败】未知服务域名 '{base_url}'，必须显式在配置中指定 'provider'！")
+
 class ModelNodeConfig(BaseModel):
     """单模型服务节点配置模型"""
     name: str                           # 节点唯一标识，如 "primary-default", "fallback-qwen"
     model: str                          # 实际模型名称
     base_url: str                       # 供应商接口 Base URL
     api_key: str = ""                   # API 密钥 (对外输出与日志中自动脱敏，支持运行时凭据注入)
-    provider: Optional[str] = None      # 供应商标识，如 "siliconflow", "kedaya"
+    provider: Optional[str] = None      # 供应商标识，如 "siliconflow", "kedaya", "deepseek", "dashscope", "zhipu", "openai"
     backend: str = "responses"          # "responses" 或 "chat_completions"
     weight: int = 100                   # 优先级权重 (越大优先级越高)
-    is_active: bool = True              # 是否启用
+    is_active: bool = True              # 是否启用 (False 则路由时剔除)
+    supports_vision: bool = False       # 是否支持多模态图像输入 (供 VLM 故障转移精确筛选)
 
     def masked_api_key(self) -> str:
         """敏感密钥脱敏展示"""
@@ -229,11 +242,38 @@ class ResilientLLMConfig(BaseModel):
     alert_webhook_url: Optional[str] = None          # 告警 Webhook 地址
     error_threshold_percentage: float = 5.0          # 报警错误率阈值 (5%)
     sliding_window_size: int = 100                  # SLA 统计滑动窗口大小
+    sliding_window_seconds: int = 300               # SLA 滑动时间窗口秒数 (默认 5 分钟)
+    circuit_breaker_min_calls: int = 5              # 触发熔断的最小调用样本数
+    circuit_breaker_consecutive_failures: int = 3   # 突发连续失败快速熔断阈值
     circuit_breaker_cooldown_seconds: int = 300     # 熔断冷却时间 (默认 5 分钟)
+    ttft_timeout_seconds: float = 12.0              # 流式首字超时时间
+    non_stream_timeout_seconds: float = 25.0        # 非流式超时时间
+
+def _parse_fallback_nodes_json(raw_json: Optional[str], env_name: str, default_vision: bool = False) -> List[ModelNodeConfig]:
+    """解析环境变量中的 JSON 候选池节点列表（格式非法直接 Fail-Fast 报错）"""
+    if not raw_json or not raw_json.strip():
+        return []
+    try:
+        items = json.loads(raw_json)
+        if not isinstance(items, list):
+            raise ValueError(f"{env_name} 必须是 JSON 数组")
+        nodes: List[ModelNodeConfig] = []
+        for item in items:
+            node_dict = dict(item)
+            if "provider" not in node_dict or not node_dict["provider"]:
+                node_dict["provider"] = derive_provider_from_url(str(node_dict.get("base_url", "")))
+            if default_vision and "supports_vision" not in node_dict:
+                node_dict["supports_vision"] = True
+            nodes.append(ModelNodeConfig(**node_dict))
+        return nodes
+    except Exception as e:
+        raise ValueError(f"【配置解析失败】解析 {env_name} 异常: {e}") from e
+
 
 def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
     """从当前 settings 与环境变量动态组装高可用模型链 (Phase-6 §7.5: 节点仅声明 provider，运行时通过租约注入凭据)"""
-    primary_provider = "kedaya" if "kedaya" in cfg.active_llm_base_url.lower() else "siliconflow"
+    primary_provider = derive_provider_from_url(cfg.active_llm_base_url)
+    primary_supports_vision = any(k in cfg.active_llm_model.lower() for k in ("vl", "grok", "vision", "4o"))
     primary = ModelNodeConfig(
         name="primary-default",
         model=cfg.active_llm_model,
@@ -241,44 +281,60 @@ def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
         api_key="",
         provider=primary_provider,
         backend=cfg.active_llm_api_backend,
-        weight=100
+        weight=100,
+        is_active=True,
+        supports_vision=primary_supports_vision
     )
 
-    fallbacks: List[ModelNodeConfig] = []
-    # 优先解析环境变量中的结构化候选池配置 (JSON 格式)
-    raw_fallbacks = cfg.LLM_FALLBACKS_JSON or ""
-    if raw_fallbacks.strip():
-        try:
-            items = json.loads(raw_fallbacks)
-            for item in items:
-                if "provider" not in item or not item["provider"]:
-                    b_url = str(item.get("base_url", "")).lower()
-                    item["provider"] = "kedaya" if "kedaya" in b_url else "siliconflow"
-                fallbacks.append(ModelNodeConfig(**item))
-        except Exception as e:
-            config_logger.warning(f"解析 LLM_FALLBACKS_JSON 失败: {e}")
+    fallbacks: List[ModelNodeConfig] = _parse_fallback_nodes_json(cfg.LLM_FALLBACKS_JSON, "LLM_FALLBACKS_JSON")
+    vlm_extra_fallbacks = _parse_fallback_nodes_json(cfg.VLM_FALLBACKS_JSON, "VLM_FALLBACKS_JSON", default_vision=True)
 
-    # 若未配置独立 JSON，节点声明 provider，凭据在运行时从鉴权中心租约注入 (Phase-6 §7.5)
+    # 若未配置独立 LLM_FALLBACKS_JSON，装配默认 SiliconFlow 高可用文本与视觉备选池
     if not fallbacks:
         sf_base_url = (cfg.RERANK_BASE_URL or cfg.EMBEDDING_BASE_URL or "https://api.siliconflow.cn/v1").strip()
-        fallbacks.append(ModelNodeConfig(
-            name="fallback-siliconflow-deepseek",
-            model="deepseek-ai/DeepSeek-V3",
-            base_url=sf_base_url,
-            api_key="",
-            provider="siliconflow",
-            backend="chat_completions",
-            weight=90
-        ))
-        fallbacks.append(ModelNodeConfig(
-            name="fallback-siliconflow-qwen",
-            model="Qwen/Qwen2.5-72B-Instruct",
-            base_url=sf_base_url,
-            api_key="",
-            provider="siliconflow",
-            backend="chat_completions",
-            weight=80
-        ))
+        sf_provider = derive_provider_from_url(sf_base_url)
+        fallbacks.extend([
+            ModelNodeConfig(
+                name="fallback-siliconflow-deepseek",
+                model="deepseek-ai/DeepSeek-V3",
+                base_url=sf_base_url,
+                provider=sf_provider,
+                backend="chat_completions",
+                weight=90,
+                is_active=True,
+                supports_vision=False
+            ),
+            ModelNodeConfig(
+                name="fallback-siliconflow-qwen",
+                model="Qwen/Qwen2.5-72B-Instruct",
+                base_url=sf_base_url,
+                provider=sf_provider,
+                backend="chat_completions",
+                weight=80,
+                is_active=True,
+                supports_vision=False
+            ),
+            ModelNodeConfig(
+                name="fallback-siliconflow-qwen-vl",
+                model="Qwen/Qwen2.5-VL-72B-Instruct",
+                base_url=sf_base_url,
+                provider=sf_provider,
+                backend="chat_completions",
+                weight=70,
+                is_active=True,
+                supports_vision=True
+            ),
+        ])
+
+    # 合并独立配置的 VLM_FALLBACKS_JSON 视觉备选节点（按节点 name 去重覆盖）
+    if vlm_extra_fallbacks:
+        existing_names = {n.name for n in fallbacks}
+        for v_node in vlm_extra_fallbacks:
+            if v_node.name in existing_names:
+                fallbacks = [v_node if n.name == v_node.name else n for n in fallbacks]
+            else:
+                fallbacks.append(v_node)
+                existing_names.add(v_node.name)
 
     # Phase-6 §9 风险缓解：启动断言备用模型池与主模型节点均具备合法 provider 声明
     for node in [primary] + fallbacks:
@@ -291,6 +347,11 @@ def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
         alert_webhook_url=cfg.ALERT_WEBHOOK_URL,
         error_threshold_percentage=cfg.ALERT_ERROR_THRESHOLD,
         sliding_window_size=cfg.SLIDING_WINDOW_SIZE,
-        circuit_breaker_cooldown_seconds=cfg.CIRCUIT_BREAKER_COOLDOWN_SECONDS
+        sliding_window_seconds=cfg.SLIDING_WINDOW_SECONDS,
+        circuit_breaker_min_calls=cfg.CIRCUIT_BREAKER_MIN_CALLS,
+        circuit_breaker_consecutive_failures=cfg.CIRCUIT_BREAKER_CONSECUTIVE_FAILURES,
+        circuit_breaker_cooldown_seconds=cfg.CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        ttft_timeout_seconds=cfg.LLM_TTFT_TIMEOUT_SECONDS,
+        non_stream_timeout_seconds=cfg.LLM_NON_STREAM_TIMEOUT_SECONDS
     )
 

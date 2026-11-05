@@ -5,11 +5,13 @@
 """
 
 import copy
+import time
 import logging
 from typing import Any, Dict, List, Tuple
 import httpx
-from rag_kb.core.config import settings
+from rag_kb.core.config import settings, derive_provider_from_url
 from rag_kb.core.resilience import retry_on_transient
+from rag_kb.core.logging.audit import record_audit_log
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +34,13 @@ class Reranker:
         """解析精排模型凭据 (Phase-6 §7.2: 强制通过 Java 鉴权中心换取 10min 短期租约，严禁回退本地 .env)"""
         try:
             from rag_kb.core.model_credentials import get_credential
-            cred = await get_credential("siliconflow", scope="model:rerank")
-            return cred.api_key, cred.base_url.rstrip("/")
+            provider = derive_provider_from_url(self.base_url)
+            cred = await get_credential(provider, scope="model:rerank")
+            return cred.api_key, (cred.base_url or self.base_url).rstrip("/")
         except Exception as e:
             raise RuntimeError(
                 f"【精排模型凭据错误】未能从鉴权中心获取 Rerank 短期租约凭据: {e} (Fail-Fast)"
-            )
+            ) from e
 
     async def rerank(
         self,
@@ -49,65 +52,88 @@ class Reranker:
         if not self.enabled or not chunks:
             return chunks[:top_n], []
 
-        api_key, base_url = await self._resolve_credentials()
+        t0 = time.perf_counter()
 
-        clean_query = query.strip()
-        documents = [c.get("content", "") for c in chunks]
-        endpoint = f"{base_url}/rerank"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": self.model_name,
-            "query": clean_query,
-            "documents": documents,
-            "top_n": min(top_n, len(chunks)),
-            "return_documents": False
-        }
+        try:
+            api_key, base_url = await self._resolve_credentials()
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                res = await _post_rerank_with_retry(client, endpoint, headers, payload)
-            except Exception as e:
-                logger.error(f"【Rerank 网络异常】请求失败: {e}")
-                raise RuntimeError(f"BGE Rerank API 连接失败: {e}") from e
+            clean_query = query.strip()
+            documents = [c.get("content", "") for c in chunks]
+            endpoint = f"{base_url}/rerank"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": self.model_name,
+                "query": clean_query,
+                "documents": documents,
+                "top_n": min(top_n, len(chunks)),
+                "return_documents": False
+            }
 
-            if res.status_code != 200:
-                raise RuntimeError(f"【Rerank 接口错误】HTTP {res.status_code}: {res.text}")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                try:
+                    res = await _post_rerank_with_retry(client, endpoint, headers, payload)
+                except Exception as e:
+                    logger.error(f"【Rerank 网络异常】请求失败: {e}")
+                    raise RuntimeError(f"BGE Rerank API 连接失败: {e}") from e
 
-            data = res.json()
-            if "results" not in data or not isinstance(data["results"], list):
-                raise RuntimeError(f"【Rerank 格式异常】响应缺少 'results' 字段: {data}")
+                if res.status_code != 200:
+                    raise RuntimeError(f"【Rerank 接口错误】HTTP {res.status_code}: {res.text}")
 
-            reranked_chunks: List[Dict[str, Any]] = []
-            selected_indices = set()
+                data = res.json()
+                if "results" not in data or not isinstance(data["results"], list):
+                    raise RuntimeError(f"【Rerank 格式异常】响应缺少 'results' 字段: {data}")
 
-            for item in data["results"]:
-                idx = item["index"]
-                score = float(item["relevance_score"])
-                selected_indices.add(idx)
+                reranked_chunks: List[Dict[str, Any]] = []
+                selected_indices = set()
 
-                c = copy.deepcopy(chunks[idx])
-                c["score"] = round(score, 6)
-                reranked_chunks.append(c)
+                for item in data["results"]:
+                    idx = item["index"]
+                    score = float(item["relevance_score"])
+                    selected_indices.add(idx)
 
-            # Remark 丢弃诊断机制
-            dropped_chunks: List[Dict[str, Any]] = []
-            for orig_idx, c in enumerate(chunks):
-                if orig_idx not in selected_indices:
-                    dropped_copy = copy.deepcopy(c)
-                    ranks = dropped_copy.get("channel_ranks", {})
-                    for ch, rank in ranks.items():
-                        if rank <= 3:
-                            dropped_copy["remark"] = f"{ch}_recall_drop_in_rerank"
-                            logger.warning(
-                                f"【Rerank 丢弃审计】切片 {dropped_copy['chunk_id']} ({dropped_copy.get('chunk_label', '')}) "
-                                f"在初始通道 '{ch}' 排名第 {rank}，但在 Rerank 交叉精排中跌出前 {top_n}！"
-                            )
-                    dropped_chunks.append(dropped_copy)
+                    c = copy.deepcopy(chunks[idx])
+                    c["score"] = round(score, 6)
+                    reranked_chunks.append(c)
 
-            return reranked_chunks, dropped_chunks
+                # Remark 丢弃诊断机制
+                dropped_chunks: List[Dict[str, Any]] = []
+                for orig_idx, c in enumerate(chunks):
+                    if orig_idx not in selected_indices:
+                        dropped_copy = copy.deepcopy(c)
+                        ranks = dropped_copy.get("channel_ranks", {})
+                        for ch, rank in ranks.items():
+                            if rank <= 3:
+                                dropped_copy["remark"] = f"{ch}_recall_drop_in_rerank"
+                                logger.warning(
+                                    f"【Rerank 丢弃审计】切片 {dropped_copy['chunk_id']} ({dropped_copy.get('chunk_label', '')}) "
+                                    f"在初始通道 '{ch}' 排名第 {rank}，但在 Rerank 交叉精排中跌出前 {top_n}！"
+                                )
+                        dropped_chunks.append(dropped_copy)
+
+                total_ms = int((time.perf_counter() - t0) * 1000)
+                await record_audit_log(
+                    action="RERANK_INFERENCE",
+                    resource_id="reranker-cross-encoder",
+                    duration_ms=total_ms,
+                    status="SUCCESS",
+                    details={"model": self.model_name, "docs_count": len(chunks)}
+                )
+                return reranked_chunks, dropped_chunks
+
+        except Exception as e:
+            total_ms = int((time.perf_counter() - t0) * 1000)
+            await record_audit_log(
+                action="RERANK_INFERENCE",
+                resource_id="reranker-cross-encoder",
+                duration_ms=total_ms,
+                status="FAILED",
+                error_msg=str(e),
+                details={"model": self.model_name, "docs_count": len(chunks)}
+            )
+            raise
 
 _reranker: Reranker = None
 

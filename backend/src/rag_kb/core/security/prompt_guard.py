@@ -16,6 +16,10 @@ from rag_kb.core.security.normalizer import normalize_text, clean_confusable_var
 
 logger = logging.getLogger(__name__)
 
+class PromptSecurityError(RuntimeError):
+    """Prompt 注入、越狱攻击或违规违禁前置安全拦截异常 (Fail-Fast，严禁切换模型)"""
+    pass
+
 INJECTION_PATTERNS = [
     # 英文提示词探测与越狱
     re.compile(r"(?i)\bignore\s+(all\s+)?(previous|prior|above|system)\s+(instructions|prompts?)\b"),
@@ -62,3 +66,10 @@ def validate_prompt_security(query: str) -> Tuple[bool, Optional[str]]:
             return False, "您的问题包含涉黄、暴恐或违法违禁等敏感内容，系统拒绝回答！"
 
     return True, None
+
+
+def assert_prompt_safe(query: str) -> None:
+    """强类型前置安全断言：若命中注入/越狱或违禁词，立即抛出 PromptSecurityError (严禁切换模型)"""
+    is_safe, err_reason = validate_prompt_security(query)
+    if not is_safe:
+        raise PromptSecurityError(err_reason or "检测到违规提示词注入或敏感内容")

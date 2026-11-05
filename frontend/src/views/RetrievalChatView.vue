@@ -16,22 +16,21 @@
 
       <!-- 右侧控制区：统一纯平铺下拉与分段控制器 -->
       <div class="flex items-center space-x-2 text-xs shrink-0 whitespace-nowrap overflow-x-auto py-1">
-        <!-- 当前登录员工身份与可见部门范围展示 (只读回显，支持真实 SSO 切换账号) -->
-        <div class="flex items-center gap-1.5 shrink-0 whitespace-nowrap bg-slate-100 px-2 py-1 rounded-md border border-slate-200/80">
-          <span class="text-slate-500 font-medium text-xs select-none">当前员工:</span>
+        <!-- 当前登录员工身份精简展示 (悬浮可查看完整部门路径，支持切换账号) -->
+        <div 
+          class="flex items-center gap-1.5 shrink-0 whitespace-nowrap bg-slate-100 px-2 py-1 rounded-md border border-slate-200/80"
+          :title="`当前员工: ${authStore.currentUser?.username || '已登录员工'} (${authStore.currentUser?.dept_path || '全域'})\n点击按钮可切换账号`"
+        >
+          <span class="text-slate-500 font-medium text-xs select-none">员工:</span>
           <span class="text-slate-800 font-semibold text-xs">
             {{ authStore.currentUser?.username || '已登录员工' }}
           </span>
-          <span class="text-slate-400 text-xs">|</span>
-          <span class="text-indigo-600 font-medium text-xs">
-            {{ authStore.currentUser?.dept_path === '/' ? '全域 (/)' : (authStore.currentUser?.dept_path || '全域') }}
-          </span>
           <button
             @click="authStore.logout()"
-            class="ml-1 px-1.5 py-0.5 rounded bg-white hover:bg-rose-50 text-slate-600 hover:text-rose-600 border border-slate-200/80 hover:border-rose-200 text-[11px] font-medium transition-colors cursor-pointer"
+            class="ml-0.5 px-1.5 py-0.5 rounded bg-white hover:bg-rose-50 text-slate-600 hover:text-rose-600 border border-slate-200/80 hover:border-rose-200 text-[11px] font-medium transition-colors cursor-pointer"
             title="退出当前员工会话并切换 SSO 账号"
           >
-            切换账号
+            切换
           </button>
         </div>
 
@@ -42,12 +41,12 @@
           <span class="text-slate-500 font-medium text-xs select-none">部门:</span>
           <select 
             v-model="selectedDeptPath"
-            class="h-7 px-2 bg-slate-100 hover:bg-slate-200/70 text-slate-800 font-medium text-xs rounded-md outline-none border border-slate-200/80 cursor-pointer transition-colors"
+            class="h-7 px-2 bg-slate-100 hover:bg-slate-200/70 text-slate-800 font-medium text-xs rounded-md outline-none border border-slate-200/80 cursor-pointer transition-colors max-w-[130px]"
             title="限定检索部门范围"
           >
-            <option value="">{{ authStore.currentUser?.dept_path === '/' ? '全部部门 (全域)' : '本部门默认范围' }}</option>
+            <option value="">{{ authStore.currentUser?.dept_path === '/' ? '全部部门' : '本部门默认' }}</option>
             <option v-for="d in departmentList" :key="d.id" :value="d.path">
-              {{ isDeptAllowed(d.path) ? d.name : `${d.name} (跨部门·受保护)` }}
+              {{ d.name }}
             </option>
           </select>
         </div>

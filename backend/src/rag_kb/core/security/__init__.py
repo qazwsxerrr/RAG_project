@@ -7,7 +7,9 @@ from rag_kb.core.security.aho_corasick import (
     DEFAULT_SENSITIVE_WORDS,
 )
 from rag_kb.core.security.prompt_guard import (
+    PromptSecurityError,
     validate_prompt_security,
+    assert_prompt_safe,
     INJECTION_PATTERNS,
 )
 from rag_kb.core.security.stream_moderation import (
@@ -29,7 +31,9 @@ __all__ = [
     "AhoCorasickAutomaton",
     "default_ac_automaton",
     "DEFAULT_SENSITIVE_WORDS",
+    "PromptSecurityError",
     "validate_prompt_security",
+    "assert_prompt_safe",
     "INJECTION_PATTERNS",
     "StreamModerator",
     "default_stream_moderator",

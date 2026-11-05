@@ -28,7 +28,6 @@ import java.util.*;
 public class AuthController {
 
     private static final Logger log = LoggerFactory.getLogger(AuthController.class);
-    private static final Set<String> ALLOWED_PROVIDERS = Set.of("siliconflow", "kedaya");
     private static final Set<String> ALLOWED_SCOPES = Set.of("model:llm", "model:embedding", "model:rerank", "model:vlm");
 
     private final UserMappingService userMappingService;
@@ -36,6 +35,9 @@ public class AuthController {
     private final JwtEncoder jwtEncoder;
     private final RSAKey rsaKey;
     private final Environment env;
+
+    @Value("${rag.model-vault.allowed-providers:kedaya,siliconflow,deepseek,dashscope,zhipu,openai,volces}")
+    private String allowedProvidersConfig;
 
     @Value("${rag.jwt.issuer:rag-admin}")
     private String jwtIssuer;
@@ -156,7 +158,13 @@ public class AuthController {
         }
 
         String provider = req != null && req.provider() != null ? req.provider().toLowerCase().trim() : "";
-        if (!ALLOWED_PROVIDERS.contains(provider)) {
+        Set<String> allowedProviders = Arrays.stream(
+                (allowedProvidersConfig != null ? allowedProvidersConfig : "kedaya,siliconflow,deepseek,dashscope,zhipu,openai,volces").split(","))
+                .map(String::trim)
+                .map(String::toLowerCase)
+                .filter(s -> !s.isEmpty())
+                .collect(java.util.stream.Collectors.toSet());
+        if (!allowedProviders.contains(provider)) {
             log.warn("[MODEL_KEY_AUDIT] status=DENIED reason=UNSUPPORTED_PROVIDER service_id={} provider={}", serviceId, provider);
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【安全拒绝】未知或未授权的模型供应商: " + provider);
         }

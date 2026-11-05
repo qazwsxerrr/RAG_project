@@ -47,6 +47,7 @@ export interface VendorGroup {
 
 export interface ChannelsStatusResponse {
   status: string;
+  range?: string;
   updated_at: string;
   overall_sla: number;
   overall_avg_ttft: number;
@@ -79,9 +80,9 @@ export const systemApi = {
     return apiClient.get('/health');
   },
 
-  /** 获取所有大模型渠道状态大盘数据 */
-  async getChannelsStatus(): Promise<ChannelsStatusResponse> {
-    return apiClient.get('/system/llm/channels');
+  /** 获取所有大模型渠道状态大盘数据 (支持时间窗口范围) */
+  async getChannelsStatus(range: '90m' | '24h' | '7d' | '30d' = '90m'): Promise<ChannelsStatusResponse> {
+    return apiClient.get('/system/llm/channels', { params: { range } });
   },
 
   /** 查询指定渠道的近 30 条真实审计流水 */

@@ -26,13 +26,13 @@
           </div>
         </div>
 
-        <!-- 角色与权重标签 (对齐参考图 "用户倍率 0.15x / 权重") -->
+        <!-- 角色与权重标签 -->
         <div class="flex items-center gap-1 shrink-0">
           <span 
             class="text-[9px] font-medium px-1.5 py-0.5 rounded"
-            :class="channel.role === 'PRIMARY' ? 'bg-blue-50 text-blue-600 border border-blue-200/60' : 'bg-slate-100 text-slate-600'"
+            :class="getRoleTagClass(channel.role)"
           >
-            {{ channel.role === 'PRIMARY' ? '主模型' : '备用' }}
+            {{ getRoleLabel(channel.role) }}
           </span>
           <span class="text-[9px] text-slate-400 font-mono">
             {{ channel.weight }}w
@@ -45,8 +45,8 @@
         <!-- 可用率 SLA% -->
         <div class="space-y-0.5">
           <div class="text-[10px] text-slate-400">可用率</div>
-          <div class="text-sm font-bold font-mono" :class="getSlaColorClass(channel.sla_percent)">
-            {{ channel.sla_percent }}%
+          <div class="text-sm font-bold font-mono" :class="getSlaColorClass(channel.sla_percent, channel.total_calls)">
+            {{ channel.total_calls === 0 ? '-' : `${channel.sla_percent}%` }}
           </div>
         </div>
 
@@ -97,17 +97,35 @@ defineEmits<{
   (e: 'select', channel: ModelChannelItem): void;
 }>();
 
+function getRoleLabel(role: string): string {
+  if (role === 'PRIMARY') return '主模型';
+  if (role === 'INFRA') return '检索基建';
+  return '备用';
+}
+
+function getRoleTagClass(role: string): string {
+  if (role === 'PRIMARY') return 'bg-blue-50 text-blue-600 border border-blue-200/60';
+  if (role === 'INFRA') return 'bg-purple-50 text-purple-600 border border-purple-200/60';
+  return 'bg-slate-100 text-slate-600';
+}
+
 function formatDisplayName(c: ModelChannelItem): string {
+  if (c.role === 'INFRA') {
+    return c.name;
+  }
   if (c.role === 'PRIMARY') {
     return `${c.name} (主节点)`;
   }
   if (c.name.includes('deepseek')) {
     return 'DeepSeek-V3 (备用)';
   }
+  if (c.name.includes('qwen-vl') || c.name.includes('vl')) {
+    return 'Qwen-VL-72B (视觉备用)';
+  }
   if (c.name.includes('qwen')) {
     return 'Qwen-2.5-72B (备用)';
   }
-  return c.name;
+  return `${c.name} (备用)`;
 }
 
 function getIconBgClass(c: ModelChannelItem): string {
@@ -117,7 +135,8 @@ function getIconBgClass(c: ModelChannelItem): string {
   return 'bg-slate-100';
 }
 
-function getSlaColorClass(sla: number): string {
+function getSlaColorClass(sla: number, totalCalls: number): string {
+  if (totalCalls === 0) return 'text-slate-400';
   if (sla >= 99.0) return 'text-emerald-600';
   if (sla >= 95.0) return 'text-teal-600';
   if (sla >= 85.0) return 'text-amber-500';

@@ -7,11 +7,9 @@
 4. 提供 /health 与 /api/v1/health 双端健康检查。
 """
 
-from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from rag_kb.core.config import settings
@@ -26,9 +24,10 @@ from rag_kb.api.system import router as system_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理器"""
-    # 1. 初始化全局企业级链路日志体系 (装配 TraceLogFilter 与标准 Formatter)
-    from rag_kb.core.logging import setup_logging
+    # 1. 初始化全局企业级链路日志体系并绑定主事件循环 (装配 TraceLogFilter 与跨线程安全审计)
+    from rag_kb.core.logging import setup_logging, bind_main_event_loop
     setup_logging()
+    bind_main_event_loop()
 
     # 2. Phase-6 §3.3 铁律 6: 启动时强校验 JWT RS256 验签公钥或 JWKS 可达性，缺失立即拒绝启动
     from rag_kb.api.deps import verify_jwt_setup_on_startup
@@ -36,6 +35,11 @@ async def lifespan(app: FastAPI):
 
     # 3. 启动时保证数据库表与 pgvector 扩展已就绪 (Phase-6: 严格 Fail-Fast，异常坚决抛出中断)
     await init_db()
+
+    # 4. Phase-7 §4.3: 启动时执行一次大模型熔断状态机冷启动历史对齐 (hydrate_once)
+    from rag_kb.api.system import hydrate_llm_health_tracker_from_db
+    await hydrate_llm_health_tracker_from_db()
+
     yield
 
 def create_app() -> FastAPI:

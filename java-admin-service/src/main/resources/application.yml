@@ -60,9 +60,22 @@ rag:
     service-id: ${MODEL_KEY_SERVICE_ID:rag-engine}
     service-token: ${MODEL_KEY_SERVICE_SECRET:rag-engine-service-secret}
   model-vault:
+    allowed-providers: ${RAG_MODEL_VAULT_ALLOWED_PROVIDERS:kedaya,siliconflow,deepseek,dashscope,zhipu,openai,volces}
     siliconflow:
       base-url: ${SILICONFLOW_BASE_URL:https://api.siliconflow.cn/v1}
       api-key: ${SILICONFLOW_API_KEY:}
     kedaya:
       base-url: ${KEDAYA_BASE_URL:https://kedaya.ai/v1}
       api-key: ${KEDAYA_API_KEY:}
+    deepseek:
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}
+      api-key: ${DEEPSEEK_API_KEY:}
+    dashscope:
+      base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}
+      api-key: ${DASHSCOPE_API_KEY:}
+    zhipu:
+      base-url: ${ZHIPU_BASE_URL:https://open.bigmodel.cn/api/paas/v4}
+      api-key: ${ZHIPU_API_KEY:}
+    openai:
+      base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+      api-key: ${OPENAI_API_KEY:}

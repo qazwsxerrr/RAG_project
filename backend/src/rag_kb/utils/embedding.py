@@ -5,11 +5,13 @@
 严格遵守 Fail-Fast 原则，API 异常或凭据缺失坚决报错，绝不使用随机向量伪造数据。
 """
 
+import time
 import logging
 from typing import List, Tuple
 import httpx
-from rag_kb.core.config import settings
+from rag_kb.core.config import settings, derive_provider_from_url
 from rag_kb.core.resilience import retry_on_transient
+from rag_kb.core.logging.audit import record_audit_log
 
 logger = logging.getLogger(__name__)
 
@@ -32,63 +34,87 @@ class EmbeddingService:
         """解析向量模型调用凭据 (Phase-6 §7.2: 强制通过 Java 鉴权中心换取 10min 短期租约，严禁回退本地 .env)"""
         try:
             from rag_kb.core.model_credentials import get_credential
-            cred = await get_credential("siliconflow", scope="model:embedding")
-            return cred.api_key, cred.base_url.rstrip("/")
+            provider = derive_provider_from_url(self.base_url)
+            cred = await get_credential(provider, scope="model:embedding")
+            return cred.api_key, (cred.base_url or self.base_url).rstrip("/")
         except Exception as e:
             raise RuntimeError(
                 f"【向量模型凭据错误】未能从鉴权中心获取 Embedding 短期租约凭据: {e} (Fail-Fast)"
-            )
+            ) from e
 
     async def embed_texts(self, texts: List[str], batch_size: int = 16) -> List[List[float]]:
         """批量生成文本的 1024 维稠密特征向量"""
         if not texts:
             return []
 
-        api_key, base_url = await self._resolve_credentials()
+        t0 = time.perf_counter()
 
-        for idx, t in enumerate(texts):
-            if not t or not t.strip():
-                raise ValueError(f"【向量计算错误】第 {idx} 条输入文本为空，严禁对空文本生成语义向量！")
+        try:
+            api_key, base_url = await self._resolve_credentials()
 
-        all_embeddings: List[List[float]] = []
-        endpoint = f"{base_url}/embeddings"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
+            for idx, t in enumerate(texts):
+                if not t or not t.strip():
+                    raise ValueError(f"【向量计算错误】第 {idx} 条输入文本为空，严禁对空文本生成语义向量！")
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i:i + batch_size]
-                payload = {
-                    "model": self.model_name,
-                    "input": batch,
-                    "encoding_format": "float"
-                }
+            all_embeddings: List[List[float]] = []
+            endpoint = f"{base_url}/embeddings"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
 
-                try:
-                    response = await _post_batch_with_retry(client, endpoint, headers, payload)
-                except Exception as e:
-                    logger.error(f"【向量 API 请求异常】批次 {i // batch_size + 1} 重试耗尽失败: {e}")
-                    raise RuntimeError(f"Embedding API 连接失败 (已重试 3 次): {e}") from e
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                for i in range(0, len(texts), batch_size):
+                    batch = texts[i:i + batch_size]
+                    payload = {
+                        "model": self.model_name,
+                        "input": batch,
+                        "encoding_format": "float"
+                    }
 
-                if response.status_code != 200:
-                    err_msg = f"【向量模型错误】HTTP {response.status_code}: {response.text}"
-                    logger.error(err_msg)
-                    raise RuntimeError(err_msg)
+                    try:
+                        response = await _post_batch_with_retry(client, endpoint, headers, payload)
+                    except Exception as e:
+                        logger.error(f"【向量 API 请求异常】批次 {i // batch_size + 1} 重试耗尽失败: {e}")
+                        raise RuntimeError(f"Embedding API 连接失败 (已重试 3 次): {e}") from e
 
-                data = response.json()
-                if "data" not in data or not isinstance(data["data"], list):
-                    raise RuntimeError(f"【向量格式错误】API 响应缺少 'data' 字段: {data}")
+                    if response.status_code != 200:
+                        err_msg = f"【向量模型错误】HTTP {response.status_code}: {response.text}"
+                        logger.error(err_msg)
+                        raise RuntimeError(err_msg)
 
-                batch_embeddings = [item["embedding"] for item in data["data"]]
-                for vec in batch_embeddings:
-                    if len(vec) != self.dim:
-                        raise RuntimeError(f"【向量维度异常】期望 {self.dim} 维向量，实际返回 {len(vec)} 维！")
+                    data = response.json()
+                    if "data" not in data or not isinstance(data["data"], list):
+                        raise RuntimeError(f"【向量格式错误】API 响应缺少 'data' 字段: {data}")
 
-                all_embeddings.extend(batch_embeddings)
+                    batch_embeddings = [item["embedding"] for item in data["data"]]
+                    for vec in batch_embeddings:
+                        if len(vec) != self.dim:
+                            raise RuntimeError(f"【向量维度异常】期望 {self.dim} 维向量，实际返回 {len(vec)} 维！")
 
-        return all_embeddings
+                    all_embeddings.extend(batch_embeddings)
+
+            total_ms = int((time.perf_counter() - t0) * 1000)
+            await record_audit_log(
+                action="EMBEDDING_INFERENCE",
+                resource_id="embedding-dense-bge",
+                duration_ms=total_ms,
+                status="SUCCESS",
+                details={"model": self.model_name, "batch_count": len(texts)}
+            )
+            return all_embeddings
+
+        except Exception as e:
+            total_ms = int((time.perf_counter() - t0) * 1000)
+            await record_audit_log(
+                action="EMBEDDING_INFERENCE",
+                resource_id="embedding-dense-bge",
+                duration_ms=total_ms,
+                status="FAILED",
+                error_msg=str(e),
+                details={"model": self.model_name, "batch_count": len(texts)}
+            )
+            raise
 
     async def embed_query(self, text: str) -> List[float]:
         """为单条查询生成 1024 维语义向量"""

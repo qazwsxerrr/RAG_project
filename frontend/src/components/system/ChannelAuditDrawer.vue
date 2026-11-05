@@ -20,7 +20,7 @@
               <span>{{ channel?.name }}</span>
               <span 
                 class="text-[10px] px-1.5 py-0.5 rounded font-mono font-normal"
-                :class="channel?.state === 'CLOSED' ? 'bg-emerald-50 text-emerald-600 border border-emerald-200/60' : 'bg-rose-50 text-rose-600 border border-rose-200/60'"
+                :class="getStateBadgeClass(channel?.state)"
               >
                 {{ channel?.state }}
               </span>
@@ -30,8 +30,9 @@
         </div>
 
         <div class="flex items-center gap-2">
-          <!-- 重置熔断按钮 -->
+          <!-- 重置熔断按钮 (仅具有 system:admin 或 * 权限的管理员可见) -->
           <button
+            v-if="canReset"
             @click="handleReset"
             :disabled="isResetting"
             class="text-xs px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 transition-colors flex items-center gap-1.5"
@@ -55,19 +56,27 @@
       <div class="grid grid-cols-4 gap-2 p-4 bg-slate-50 border-b border-slate-100 text-center font-mono">
         <div class="bg-white p-2 rounded-lg border border-slate-200/60">
           <div class="text-[10px] text-slate-400">可用率</div>
-          <div class="text-xs font-bold text-emerald-600">{{ channel?.sla_percent }}%</div>
+          <div class="text-xs font-bold text-emerald-600">
+            {{ channel?.total_calls === 0 ? '-' : `${channel?.sla_percent}%` }}
+          </div>
         </div>
         <div class="bg-white p-2 rounded-lg border border-slate-200/60">
           <div class="text-[10px] text-slate-400">首字延迟</div>
-          <div class="text-xs font-bold text-slate-700">{{ channel?.ttft_ms }}ms</div>
+          <div class="text-xs font-bold text-slate-700">
+            {{ channel?.ttft_ms ? `${channel.ttft_ms}ms` : '-' }}
+          </div>
         </div>
         <div class="bg-white p-2 rounded-lg border border-slate-200/60">
           <div class="text-[10px] text-slate-400">平均耗时</div>
-          <div class="text-xs font-bold text-slate-700">{{ channel?.avg_latency_ms }}ms</div>
+          <div class="text-xs font-bold text-slate-700">
+            {{ channel?.avg_latency_ms ? `${channel.avg_latency_ms}ms` : '-' }}
+          </div>
         </div>
         <div class="bg-white p-2 rounded-lg border border-slate-200/60">
           <div class="text-[10px] text-slate-400">P95 延迟</div>
-          <div class="text-xs font-bold text-slate-700">{{ channel?.p95_latency_ms }}ms</div>
+          <div class="text-xs font-bold text-slate-700">
+            {{ channel?.p95_latency_ms ? `${channel.p95_latency_ms}ms` : '-' }}
+          </div>
         </div>
       </div>
 
@@ -120,8 +129,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { ref, watch, computed } from 'vue';
 import { systemApi, type ModelChannelItem, type AuditLogItem } from '../../api/system';
+import { useAuthStore } from '../../stores/auth';
 
 const props = defineProps<{
   isOpen: boolean;
@@ -132,6 +142,9 @@ const emit = defineEmits<{
   (e: 'close'): void;
   (e: 'refresh'): void;
 }>();
+
+const authStore = useAuthStore();
+const canReset = computed(() => authStore.hasPermission('system:admin') || authStore.hasPermission('*'));
 
 const audits = ref<AuditLogItem[]>([]);
 const isLoading = ref(false);
@@ -146,6 +159,12 @@ watch(
   },
   { immediate: true }
 );
+
+function getStateBadgeClass(state?: string): string {
+  if (state === 'CLOSED') return 'bg-emerald-50 text-emerald-600 border border-emerald-200/60';
+  if (state === 'HALF_OPEN') return 'bg-amber-50 text-amber-600 border border-amber-200/60';
+  return 'bg-rose-50 text-rose-600 border border-rose-200/60';
+}
 
 async function fetchAudits(nodeName: string) {
   isLoading.value = true;
@@ -166,6 +185,9 @@ async function handleReset() {
     await systemApi.resetChannel(props.channel.name);
     emit('refresh');
     await fetchAudits(props.channel.name);
+  } catch (err: any) {
+    const msg = err?.response?.data?.detail || err?.message || '重置健康状态失败';
+    alert(msg);
   } finally {
     isResetting.value = false;
   }

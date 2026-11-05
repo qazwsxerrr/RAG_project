@@ -217,6 +217,12 @@ async def get_current_user(authorization: Optional[str] = Header(None, alias="Au
     if isinstance(perms, str):
         perms = [perms]
 
+    # Phase-7 §1.2: 将验签通过的真实员工与租户身份回写至全链路追踪上下文，确保审计日志严格穿透
+    from rag_kb.core.logging.context import get_trace_context
+    trace_ctx = get_trace_context()
+    trace_ctx.user_id = str(payload["sub"])
+    trace_ctx.tenant_id = str(payload["tenant_id"])
+
     return UserContext(
         user_id=str(payload["sub"]),
         tenant_id=str(payload["tenant_id"]),

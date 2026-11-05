@@ -88,7 +88,6 @@ async def prepare_node(
                 "生成自包含的独立检索句。仅输出改写后的一句话，严禁多余废话。"
             )
             user_prompt = f"【对话历史】：\n{conv_text}\n\n【最新提问】：\n{query}\n\n请输出独立检索查询："
-            endpoint = f"{settings.active_llm_base_url.rstrip('/')}/chat/completions"
             try:
                 rw = await llm_gateway.chat(
                     messages=[
