@@ -183,7 +183,10 @@ class BlueGreenUpdateService:
             doc.is_active = True
 
             if old_doc_id and old_doc_id != doc_id:
-                old_stmt = select(Document).where(Document.id == old_doc_id)
+                old_stmt = select(Document).where(
+                    Document.id == old_doc_id,
+                    Document.department_path == department_path
+                )
                 old_res = await session.execute(old_stmt)
                 old_doc = old_res.scalar_one_or_none()
                 if old_doc:

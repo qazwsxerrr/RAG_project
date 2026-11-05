@@ -61,8 +61,8 @@ class Settings(BaseSettings):
     # 跨服务 JWT 鉴权配置 (Phase-6: RS256 + 强校验，严禁本地对称签名密钥)
     JWT_ALGORITHM: str = "RS256"
     JWT_PUBLIC_KEY: Optional[str] = None
-    JWT_PUBLIC_KEY_PATH: Optional[str] = str(WORKSPACE_ROOT / "keys" / "rsa_public.pem")
-    JWT_JWKS_URL: Optional[str] = None
+    JWT_PUBLIC_KEY_PATH: Optional[str] = None
+    JWT_JWKS_URL: Optional[str] = "http://127.0.0.1:8080/.well-known/jwks.json"
     JWT_ISSUER: str = "rag-admin"
     JWT_AUDIENCE: str = "rag-engine"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30

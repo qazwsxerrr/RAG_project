@@ -69,23 +69,23 @@
           />
         </div>
 
-        <!-- 部门输入框 (支持已有下拉与直接打字新增，对应 Img 01) -->
+        <!-- 归属部门选择器 (受当前员工 RBAC 可见范围约束) -->
         <div class="space-y-1.5 relative">
           <label class="text-xs font-semibold text-slate-700 flex items-center justify-between">
-            <span>部门：</span>
-            <span class="text-[11px] text-blue-600 font-normal">没有的可以直接输入新增</span>
+            <span>归属部门：</span>
+            <span class="text-[11px] text-slate-500 font-normal">
+              {{ authStore.currentUser?.data_scope === 'ALL' ? '管理员可选择任意部门或公共库' : '仅限本部门或公共知识库' }}
+            </span>
           </label>
           <div class="relative">
-            <input 
+            <select
               v-model="form.department"
-              type="text" 
-              placeholder="选择部门，没有的可以直接输入新增" 
-              list="dept-list-options"
-              class="w-full text-xs p-3 rounded-xl border border-slate-200 bg-white text-slate-800 placeholder-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 outline-none transition-all shadow-sm"
-            />
-            <datalist id="dept-list-options">
-              <option v-for="dept in departmentList" :key="dept.id" :value="dept.name" />
-            </datalist>
+              class="w-full text-xs p-3 rounded-xl border border-slate-200 bg-white text-slate-800 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 outline-none transition-all shadow-sm cursor-pointer"
+            >
+              <option v-for="opt in allowedDeptOptions" :key="opt.path" :value="opt.path">
+                {{ opt.label }}
+              </option>
+            </select>
           </div>
         </div>
 
@@ -174,14 +174,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { ref, reactive, computed, watch, onMounted } from 'vue';
 import type { DepartmentItem } from '../../types';
 import { documentsApi } from '../../api/documents';
+import { useAuthStore } from '../../stores/auth';
 
 const emit = defineEmits<{
   (e: 'submitted', docId: string, fileName: string): void;
 }>();
 
+const authStore = useAuthStore();
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const selectedFile = ref<File | null>(null);
 const isDragging = ref(false);
@@ -189,13 +191,61 @@ const submitting = ref(false);
 const departmentList = ref<DepartmentItem[]>([]);
 const currentTagInput = ref('');
 
+const defaultDeptPath = computed(() => {
+  const dp = authStore.currentUser?.dept_path;
+  if (!dp || dp === '/') return '/public';
+  return dp;
+});
+
+const allowedDeptOptions = computed(() => {
+  const options: Array<{ path: string; label: string }> = [];
+  const seen = new Set<string>();
+  const addOpt = (path: string, label: string) => {
+    if (!path || path === '/' || seen.has(path)) return;
+    seen.add(path);
+    options.push({ path, label });
+  };
+
+  const user = authStore.currentUser;
+  const isAll = user?.data_scope === 'ALL' || user?.dept_path === '/';
+  const userDept = user?.dept_path && user.dept_path !== '/' ? user.dept_path : '';
+
+  if (userDept) {
+    const shortName = userDept.split('/').filter(Boolean).pop() || userDept;
+    addOpt(userDept, `${shortName} (${userDept})`);
+  }
+  addOpt('/public', '公共知识库 (/public)');
+
+  if (isAll) {
+    for (const d of departmentList.value) {
+      if (d.path && d.path !== '/') {
+        addOpt(d.path, `${d.name || '未命名部门'} (${d.path})`);
+      }
+    }
+  } else if (userDept) {
+    const prefix = userDept.replace(/\/+$/, '') + '/';
+    for (const d of departmentList.value) {
+      if (d.path && (d.path === userDept || d.path.startsWith(prefix))) {
+        addOpt(d.path, `${d.name} (${d.path})`);
+      }
+    }
+  }
+  return options;
+});
+
 const form = reactive({
   customFileName: '',
-  department: '技术部',
+  department: defaultDeptPath.value,
   category: '技术规范',
   tags: ['RAG', '知识库'] as string[],
   skipReview: false,
 });
+
+watch(defaultDeptPath, (val) => {
+  if (!form.department || !allowedDeptOptions.value.some((o) => o.path === form.department)) {
+    form.department = val;
+  }
+}, { immediate: true });
 
 const triggerFileInput = () => {
   fileInputRef.value?.click();
@@ -243,7 +293,7 @@ const formatFileSize = (bytes: number): string => {
 const resetForm = () => {
   selectedFile.value = null;
   form.customFileName = '';
-  form.department = '技术部';
+  form.department = defaultDeptPath.value;
   form.category = '技术规范';
   form.tags = ['RAG', '知识库'];
   form.skipReview = false;

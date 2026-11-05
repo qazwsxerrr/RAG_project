@@ -37,9 +37,10 @@ class DeduplicationService:
         file_name: str,
         markdown_text: str = "",
         h1: str = "",
-        h2: str = ""
+        h2: str = "",
+        department_path: Optional[str] = None
     ) -> Dict[str, Any]:
-        """执行标题向量防重检测"""
+        """执行标题向量防重检测（严格限定在同部门知识库内比对，杜绝跨部门标题探测与覆盖）"""
         if not h1 and not h2 and markdown_text:
             h1, h2 = self.extract_top_headings(markdown_text)
 
@@ -47,19 +48,25 @@ class DeduplicationService:
         title_vec = await embedding_service.embed_title(file_name, h1, h2)
         title_vec_str = f"[{','.join(str(x) for x in title_vec)}]"
 
-        # 2. 在 PostgreSQL 16 中通过 Cosine 距离执行 ANN 检索
-        query = text("""
+        # 2. 在 PostgreSQL 16 中通过 Cosine 距离执行同部门 ANN 检索
+        dept_filter = "AND department_path = :dept_path" if department_path else ""
+        query = text(f"""
             SELECT id, title, file_hash, version, overall_status,
                    1 - (title_embedding <=> CAST(:vec AS vector)) AS similarity
             FROM rag_documents
             WHERE title_embedding IS NOT NULL
               AND id != CAST(:doc_id AS uuid)
+              {dept_filter}
               AND overall_status IN ('active', 'indexing', 'parsed_ready_for_chunking', 'awaiting_review')
             ORDER BY title_embedding <=> CAST(:vec AS vector)
             LIMIT 1;
         """)
 
-        result = await session.execute(query, {"vec": title_vec_str, "doc_id": doc_id})
+        params: Dict[str, Any] = {"vec": title_vec_str, "doc_id": doc_id}
+        if department_path:
+            params["dept_path"] = department_path
+
+        result = await session.execute(query, params)
         row = result.fetchone()
 
         if row and row.similarity is not None:

@@ -319,10 +319,16 @@ def derive_secure_department_scope(
             return ["/"]
         return clean_req
 
-    for req_path in requested_scope:
-        if not req_path or not req_path.strip():
-            continue
-        clean_path = req_path.strip()
+    clean_requested = [p.strip() for p in requested_scope if p and p.strip()]
+    if not clean_requested:
+        if not allowed_prefixes:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="【越权拦截】用户可用部门前缀为空，拒绝检索 (Fail-Closed)"
+            )
+        return allowed_prefixes
+
+    for clean_path in clean_requested:
         matched = any(is_path_under_prefix(clean_path, prefix) for prefix in allowed_prefixes)
         if not matched:
             raise HTTPException(
@@ -330,4 +336,4 @@ def derive_secure_department_scope(
                 detail=f"【越权访问拦截】您无权访问或检索非授权部门目录: {clean_path} (BOLA Blocked)"
             )
 
-    return requested_scope
+    return clean_requested

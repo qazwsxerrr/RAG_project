@@ -111,11 +111,17 @@ export const useAuthStore = defineStore('auth', () => {
     }
   };
 
+  const hasPermission = (perm: string): boolean => {
+    const perms = currentUser.value?.perms || [];
+    return perms.includes('*') || perms.includes(perm);
+  };
+
   return {
     token,
     currentUser,
     interceptAlert,
     isPermissionDenied,
+    hasPermission,
     refreshToken,
     initAuth,
     logout,

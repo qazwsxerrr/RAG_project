@@ -60,18 +60,26 @@ class StoreNode(BaseNode):
             })
 
         async with AsyncSessionLocal() as session:
-            # 1. 匹配或依据 Token 真实部门路径建档 (严禁伪造“动态部门”)
-            is_path = department_name.startswith("/")
+            # 1. 匹配或依据已校验的真实部门路径建档 (严禁伪造“动态部门”或产生空部门名)
+            raw_dept = (department_name or "").strip()
+            if not raw_dept or raw_dept == "/":
+                raw_dept = "/public"
+
+            is_path = raw_dept.startswith("/")
             if is_path:
-                dept_stmt = select(Department).where(Department.path == department_name)
+                dept_stmt = select(Department).where(Department.path == raw_dept)
             else:
-                dept_stmt = select(Department).where(Department.name == department_name)
+                dept_stmt = select(Department).where(Department.name == raw_dept)
             dept_res = await session.execute(dept_stmt)
             dept_obj = dept_res.scalar_one_or_none()
 
             if not dept_obj:
-                dept_pure_name = department_name.strip("/").split("/")[-1] if is_path else department_name
-                exact_path = department_name if is_path else f"/总公司/{department_name}"
+                if raw_dept == "/public":
+                    dept_pure_name = "公共知识库"
+                    exact_path = "/public"
+                else:
+                    dept_pure_name = raw_dept.strip("/").split("/")[-1] if is_path else raw_dept
+                    exact_path = raw_dept if is_path else f"/总公司/{raw_dept}"
                 dept_obj = Department(
                     id=uuid.uuid4(),
                     name=dept_pure_name,
@@ -83,12 +91,13 @@ class StoreNode(BaseNode):
             department_id = dept_obj.id
             department_path = dept_obj.path
 
-            # 2. 标题向量防重检测
+            # 2. 标题向量防重检测（严格限定在当前部门路径内）
             dedup_res = await dedup_service.check_duplicate(
                 session=session,
                 doc_id=doc_id,
                 file_name=file_name,
-                markdown_text=enhanced_md_content
+                markdown_text=enhanced_md_content,
+                department_path=department_path
             )
             state["dedup_res"] = dedup_res
             title_embedding = dedup_res.get("title_embedding")

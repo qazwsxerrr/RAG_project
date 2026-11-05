@@ -58,6 +58,7 @@
           </router-link>
 
           <router-link 
+            v-if="authStore.hasPermission('doc:upload')"
             to="/documents/new" 
             class="flex items-center space-x-2.5 px-2.5 py-2 rounded-lg text-xs transition-colors"
             :class="route.path.startsWith('/documents/new') ? 'bg-blue-50 text-blue-600 font-semibold' : 'text-slate-600 hover:bg-slate-100/70 hover:text-slate-900'"

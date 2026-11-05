@@ -249,90 +249,96 @@ public class AuthAndContractTest {
 
     @Test
     void test06_generateCrossLanguageJwtFixturesForPython() throws Exception {
-        // 由 Java NimbusJwtEncoder 真实签发 Token Fixture 供 Python pytest 消费 (§8.2 用例 10)
-        OidcUser devOidc = buildOidcUser(
-                "user_dev_01",
-                "张工",
-                "/总公司/研发中心/技术部",
-                null,
-                List.of("developer")
-        );
-        Map<String, Object> devTokenResp = authController.exchangeToken(devOidc);
-        String developerToken = (String) devTokenResp.get("access_token");
+        // 由 Java NimbusJwtEncoder 真实签发跨语言契约 Token Fixture 供 Python pytest 离线消费 (§8.2 用例 10)
+        // 生产配置保持 30min 不变；测试 Fixture 设为长期有效以避免静态文件超过 30min 后误报过期 (过期拦截由下方 expired_token 专项验证)
+        ReflectionTestUtils.setField(authController, "jwtTtlMinutes", 5256000);
+        try {
+            OidcUser devOidc = buildOidcUser(
+                    "user_dev_01",
+                    "张工",
+                    "/总公司/研发中心/技术部",
+                    null,
+                    List.of("developer")
+            );
+            Map<String, Object> devTokenResp = authController.exchangeToken(devOidc);
+            String developerToken = (String) devTokenResp.get("access_token");
 
-        OidcUser accOidc = buildOidcUser(
-                "user_acc_01",
-                "王会计",
-                "/总公司/财务部",
-                null,
-                List.of("accountant")
-        );
-        String accountantToken = (String) authController.exchangeToken(accOidc).get("access_token");
+            OidcUser accOidc = buildOidcUser(
+                    "user_acc_01",
+                    "王会计",
+                    "/总公司/财务部",
+                    null,
+                    List.of("accountant")
+            );
+            String accountantToken = (String) authController.exchangeToken(accOidc).get("access_token");
 
-        OidcUser adminOidc = buildOidcUser(
-                "user_admin_01",
-                "系统管理员",
-                "/总公司",
-                null,
-                List.of("admin")
-        );
-        String adminToken = (String) authController.exchangeToken(adminOidc).get("access_token");
+            OidcUser adminOidc = buildOidcUser(
+                    "user_admin_01",
+                    "系统管理员",
+                    "/总公司",
+                    null,
+                    List.of("admin")
+            );
+            String adminToken = (String) authController.exchangeToken(adminOidc).get("access_token");
 
-        // 构造 To C 测试令牌与过期令牌 (同样由 Java NimbusJwtEncoder 签发)
-        JwsHeader header = JwsHeader.with(() -> "RS256").keyId(rsaKey.getKeyID()).type("JWT").build();
-        Instant now = Instant.now();
+            // 构造 To C 测试令牌与过期令牌 (同样由 Java NimbusJwtEncoder 签发)
+            JwsHeader header = JwsHeader.with(() -> "RS256").keyId(rsaKey.getKeyID()).type("JWT").build();
+            Instant now = Instant.now();
 
-        JwtClaimsSet toCClaims = JwtClaimsSet.builder()
-                .issuer("rag-admin")
-                .audience(List.of("rag-engine"))
-                .subject("c_user_999")
-                .claim("username", "外部C端访客")
-                .claim("tenant_id", "default_tenant")
-                .claim("roles", List.of("c_user"))
-                .claim("perms", List.of("kb:retrieve"))
-                .claim("dept_path", "/public")
-                .claim("data_scope", "DEPT_TREE")
-                .claim("is_to_c", true)
-                .claim("cv", 1)
-                .claim("typ", "access")
-                .issuedAt(now)
-                .expiresAt(now.plus(30, ChronoUnit.MINUTES))
-                .build();
-        String toCToken = jwtEncoder.encode(JwtEncoderParameters.from(header, toCClaims)).getTokenValue();
+            JwtClaimsSet toCClaims = JwtClaimsSet.builder()
+                    .issuer("rag-admin")
+                    .audience(List.of("rag-engine"))
+                    .subject("c_user_999")
+                    .claim("username", "外部C端访客")
+                    .claim("tenant_id", "default_tenant")
+                    .claim("roles", List.of("c_user"))
+                    .claim("perms", List.of("kb:retrieve"))
+                    .claim("dept_path", "/public")
+                    .claim("data_scope", "DEPT_TREE")
+                    .claim("is_to_c", true)
+                    .claim("cv", 1)
+                    .claim("typ", "access")
+                    .issuedAt(now)
+                    .expiresAt(now.plus(3650, ChronoUnit.DAYS))
+                    .build();
+            String toCToken = jwtEncoder.encode(JwtEncoderParameters.from(header, toCClaims)).getTokenValue();
 
-        JwtClaimsSet expiredClaims = JwtClaimsSet.builder()
-                .issuer("rag-admin")
-                .audience(List.of("rag-engine"))
-                .subject("user_expired_01")
-                .claim("username", "过期员工")
-                .claim("tenant_id", "default_tenant")
-                .claim("roles", List.of("developer"))
-                .claim("perms", List.of("kb:retrieve"))
-                .claim("dept_path", "/总公司/研发中心/技术部")
-                .claim("data_scope", "DEPT_TREE")
-                .claim("is_to_c", false)
-                .claim("cv", 1)
-                .claim("typ", "access")
-                .issuedAt(now.minus(120, ChronoUnit.MINUTES))
-                .expiresAt(now.minus(60, ChronoUnit.MINUTES))
-                .build();
-        String expiredToken = jwtEncoder.encode(JwtEncoderParameters.from(header, expiredClaims)).getTokenValue();
+            JwtClaimsSet expiredClaims = JwtClaimsSet.builder()
+                    .issuer("rag-admin")
+                    .audience(List.of("rag-engine"))
+                    .subject("user_expired_01")
+                    .claim("username", "过期员工")
+                    .claim("tenant_id", "default_tenant")
+                    .claim("roles", List.of("developer"))
+                    .claim("perms", List.of("kb:retrieve"))
+                    .claim("dept_path", "/总公司/研发中心/技术部")
+                    .claim("data_scope", "DEPT_TREE")
+                    .claim("is_to_c", false)
+                    .claim("cv", 1)
+                    .claim("typ", "access")
+                    .issuedAt(now.minus(120, ChronoUnit.MINUTES))
+                    .expiresAt(now.minus(60, ChronoUnit.MINUTES))
+                    .build();
+            String expiredToken = jwtEncoder.encode(JwtEncoderParameters.from(header, expiredClaims)).getTokenValue();
 
-        Path fixtureDir = Paths.get("../backend/tests/fixtures").toAbsolutePath().normalize();
-        Files.createDirectories(fixtureDir);
-        Path fixtureFile = fixtureDir.resolve("java_issued_tokens.json");
+            Path fixtureDir = Paths.get("../backend/tests/fixtures").toAbsolutePath().normalize();
+            Files.createDirectories(fixtureDir);
+            Path fixtureFile = fixtureDir.resolve("java_issued_tokens.json");
 
-        String json = "{\n" +
-                "  \"issuer\": \"rag-admin\",\n" +
-                "  \"audience\": \"rag-engine\",\n" +
-                "  \"kid\": \"" + rsaKey.getKeyID() + "\",\n" +
-                "  \"developer_token\": \"" + developerToken + "\",\n" +
-                "  \"accountant_token\": \"" + accountantToken + "\",\n" +
-                "  \"admin_token\": \"" + adminToken + "\",\n" +
-                "  \"to_c_token\": \"" + toCToken + "\",\n" +
-                "  \"expired_token\": \"" + expiredToken + "\"\n" +
-                "}\n";
-        Files.writeString(fixtureFile, json, StandardCharsets.UTF_8);
-        assertTrue(Files.exists(fixtureFile));
+            String json = "{\n" +
+                    "  \"issuer\": \"rag-admin\",\n" +
+                    "  \"audience\": \"rag-engine\",\n" +
+                    "  \"kid\": \"" + rsaKey.getKeyID() + "\",\n" +
+                    "  \"developer_token\": \"" + developerToken + "\",\n" +
+                    "  \"accountant_token\": \"" + accountantToken + "\",\n" +
+                    "  \"admin_token\": \"" + adminToken + "\",\n" +
+                    "  \"to_c_token\": \"" + toCToken + "\",\n" +
+                    "  \"expired_token\": \"" + expiredToken + "\"\n" +
+                    "}\n";
+            Files.writeString(fixtureFile, json, StandardCharsets.UTF_8);
+            assertTrue(Files.exists(fixtureFile));
+        } finally {
+            ReflectionTestUtils.setField(authController, "jwtTtlMinutes", 30);
+        }
     }
 }

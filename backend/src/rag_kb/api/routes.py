@@ -74,17 +74,19 @@ def _sse_business_payload(event: dict) -> str:
 @router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
+    department: Optional[str] = Form(None),
     category: str = Form("技术规范"),
     tags: str = Form("[]"),
     custom_file_name: Optional[str] = Form(None),
     skip_review: bool = Form(False),
+    db: AsyncSession = Depends(get_db),
     user: UserContext = Depends(require_permission("doc:upload"))
 ):
     """
     文档上传受理接口 (Phase-6 RBAC 严格管控)
     - 强制校验 doc:upload 权限点
-    - 部门路径不再允许从 Form 伪造，强制取自当前登录员工真实 Token 中的 dept_path
-    - 快速返回响应
+    - 未传部门时默认使用当前员工所属部门（全域管理员 `/` 默认落 `/public`）
+    - 传入部门时强制校验属于员工授权范围（普通员工仅可传本部门树或 `/public`，越权传他部门直接 403）
     """
     actual_file_name = custom_file_name.strip() if custom_file_name else file.filename
     ext = Path(actual_file_name).suffix.lower()
@@ -102,6 +104,34 @@ async def upload_document(
     except Exception:
         parsed_tags = [t.strip() for t in tags.split(",") if t.strip()]
 
+    # 解析并严格校验目标归属部门路径 (防止跨部门伪造与根路径 "/" 空部门名脏数据)
+    default_dept = "/public" if user.dept_path == "/" else user.dept_path
+    raw_dept = department.strip() if (department and department.strip()) else default_dept
+    if raw_dept == "/":
+        raw_dept = "/public"
+
+    if not raw_dept.startswith("/"):
+        dept_res = await db.execute(select(Department).where(Department.name == raw_dept))
+        matched_dept = dept_res.scalar_one_or_none()
+        if matched_dept:
+            department_path = matched_dept.path
+        elif user.data_scope == "ALL":
+            department_path = f"/总公司/{raw_dept}"
+        else:
+            base_dept = user.dept_path.rstrip("/")
+            if base_dept.endswith("/" + raw_dept) or base_dept == "/" + raw_dept:
+                department_path = base_dept
+            else:
+                department_path = f"{base_dept}/{raw_dept}"
+    else:
+        department_path = "/" + raw_dept.strip("/")
+
+    if not any(is_path_under_prefix(department_path, prefix) for prefix in user.allowed_department_prefixes):
+        raise HTTPException(
+            status_code=403,
+            detail=f"【越权访问拦截】您无权将文档上传至非授权部门目录: {department_path} (BOLA Blocked)"
+        )
+
     doc_id = str(uuid.uuid4())
     file_bytes = await file.read()
     file_size = len(file_bytes)
@@ -111,9 +141,6 @@ async def upload_document(
     temp_file_path = temp_dir / f"{doc_id}_{actual_file_name}"
     with open(temp_file_path, "wb") as f:
         f.write(file_bytes)
-
-    # 部门强制派生自当前登录用户真实 Token (dept_path)，杜绝前端伪造
-    department_path = user.dept_path
 
     # 构造并注册初始状态
     initial_state = get_default_state(
@@ -218,7 +245,12 @@ async def list_documents(
 
     for d in db_docs:
         seen_ids.add(str(d.id))
-        dept_name = d.department_path.split("/")[-1] if d.department_path else "技术部"
+        if d.department_path in ("/public", "/"):
+            dept_name = "公共知识库"
+        elif d.department_path:
+            dept_name = d.department_path.strip("/").split("/")[-1] or "公共知识库"
+        else:
+            dept_name = "技术部"
         results.append(DocumentItemSchema(
             doc_id=str(d.id),
             file_name=d.title,

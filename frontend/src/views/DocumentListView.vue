@@ -54,6 +54,7 @@
         </button>
 
         <router-link 
+          v-if="authStore.hasPermission('doc:upload')"
           to="/documents/new" 
           class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 shadow-xs"
         >
@@ -72,6 +73,7 @@
     <!-- 文档表格 -->
     <DocumentTable 
       :documents="filteredDocuments"
+      :canDelete="authStore.hasPermission('doc:delete')"
       @viewChunks="openChunksModal"
       @viewProgress="goToProgress"
       @deleteDoc="handleDeleteDoc"
@@ -91,6 +93,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useDocumentStore } from '../stores/document';
+import { useAuthStore } from '../stores/auth';
 import type { DocumentItem } from '../types';
 import DocumentFilters from '../components/documents/DocumentFilters.vue';
 import DocumentTable from '../components/documents/DocumentTable.vue';
@@ -98,6 +101,7 @@ import DocumentChunksModal from '../components/documents/DocumentChunksModal.vue
 
 const router = useRouter();
 const documentStore = useDocumentStore();
+const authStore = useAuthStore();
 
 const activeFilters = ref({
   keyword: '',
