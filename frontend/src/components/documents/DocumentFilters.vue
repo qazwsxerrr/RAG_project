@@ -46,6 +46,7 @@
         class="text-xs py-1 pl-1 pr-2 bg-transparent text-slate-600 hover:text-slate-900 outline-none cursor-pointer border-0 font-medium"
       >
         <option value="">全部状态</option>
+        <option value="queued">队列排队中</option>
         <option value="completed">入库完成</option>
         <option value="running">入库处理中</option>
         <option value="pending_review">待人工审核</option>

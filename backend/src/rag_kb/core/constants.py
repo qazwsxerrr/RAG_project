@@ -8,6 +8,7 @@ from enum import Enum
 from typing import List
 
 class IngestStatus(str, Enum):
+    QUEUED = "queued"
     PENDING = "pending"
     INGEST = "ingest"
     MINERU = "mineru"

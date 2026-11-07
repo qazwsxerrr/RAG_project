@@ -17,13 +17,36 @@
           {{ currentFileName || (currentDocId ? '文档流水线流转详情' : '提交文档入库') }}
         </h2>
 
-        <!-- 状态胶囊徽标 -->
+        <!-- 状态胶囊徽标 (动态联动当前最新执行状态) -->
         <span 
           v-if="currentDocId" 
-          class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200/70"
+          class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium transition-all"
+          :class="[
+            currentStatus === 'queued' ? 'bg-amber-50 text-amber-700 border border-amber-200/70' :
+            currentStatus === 'pending_review' ? 'bg-purple-50 text-purple-700 border border-purple-200/70' :
+            currentStatus === 'completed' || currentStatus === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/70' :
+            currentStatus === 'failed' ? 'bg-rose-50 text-rose-700 border border-rose-200/70' :
+            'bg-blue-50 text-blue-700 border border-blue-200/70'
+          ]"
         >
-          <span class="w-1.5 h-1.5 rounded-full bg-blue-600 animate-pulse"></span>
-          <span>流转中</span>
+          <span 
+            class="w-1.5 h-1.5 rounded-full"
+            :class="[
+              currentStatus === 'queued' ? 'bg-amber-500 animate-pulse' :
+              currentStatus === 'pending_review' ? 'bg-purple-500 animate-ping' :
+              currentStatus === 'completed' || currentStatus === 'active' ? 'bg-emerald-600' :
+              currentStatus === 'failed' ? 'bg-rose-600' :
+              'bg-blue-600 animate-pulse'
+            ]"
+          ></span>
+          <span>
+            {{ 
+              currentStatus === 'queued' ? '排队中' :
+              currentStatus === 'pending_review' ? '待审核' :
+              currentStatus === 'completed' || currentStatus === 'active' ? '已完成' :
+              currentStatus === 'failed' ? '异常' : '流转中'
+            }}
+          </span>
         </span>
 
         <!-- 文档 ID 胶囊卡片 -->
@@ -85,6 +108,7 @@
         :docId="currentDocId"
         :fileName="currentFileName"
         :autoConnect="true"
+        @statusChange="handleStatusChange"
         @reviewRequired="handleReviewRequired"
         @duplicateWarning="handleDuplicateWarning"
         @completed="handleCompleted"
@@ -128,8 +152,13 @@ const pipelineStepsRef = ref<any>(null);
 
 const currentDocId = ref<string>('');
 const currentFileName = ref<string>('');
+const currentStatus = ref<string>('running');
 const showFormAgain = ref<boolean>(false);
 const copied = ref<boolean>(false);
+
+const handleStatusChange = (status: string) => {
+  currentStatus.value = status;
+};
 
 // 审核模态框状态
 const reviewModalVisible = ref(false);
@@ -152,6 +181,7 @@ const copyDocId = () => {
 const handleSubmitted = (docId: string, fileName: string) => {
   currentDocId.value = docId;
   currentFileName.value = fileName;
+  currentStatus.value = 'queued';
   showFormAgain.value = false;
 };
 
@@ -185,10 +215,12 @@ const handleDuplicateResolved = (action: string) => {
 };
 
 const handleCompleted = () => {
+  currentStatus.value = 'completed';
   console.log('[入库完成] docId:', currentDocId.value);
 };
 
 const handleFailed = (err: string) => {
+  currentStatus.value = 'failed';
   console.warn('[流水线执行异常] docId:', currentDocId.value, err);
 };
 

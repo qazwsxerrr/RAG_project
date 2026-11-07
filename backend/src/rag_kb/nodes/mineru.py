@@ -14,6 +14,7 @@ from rag_kb.core.constants import IngestStatus
 from rag_kb.graph.state import IngestState
 from rag_kb.nodes.base import BaseNode
 from rag_kb.services.parser.mineru_adapter import mineru_adapter
+from rag_kb.utils.oss import oss_service
 
 class MineruNode(BaseNode):
     """节点 2: MinerU 解析"""
@@ -33,15 +34,22 @@ class MineruNode(BaseNode):
         file_bytes = state.get("file_bytes")
         raw_oss_url = state.get("raw_oss_url")
 
-        # 保证本地存在物理文件供解析引擎读取
+        # 保证本地存在物理文件供解析引擎读取（若临时文件已被清理或跨重启恢复，支持直接从真实阿里云 OSS 流式拉回）
         if not temp_file_path or not Path(temp_file_path).exists():
-            if not file_bytes:
-                raise ValueError(f"【MinerU 错误】未提供有效的文件路径或二进制内容 (doc_id={doc_id})")
             target_dir = Path(settings.DATA_PARSED_DIR) / doc_id
             target_dir.mkdir(parents=True, exist_ok=True)
             local_path = target_dir / file_name
-            with open(local_path, "wb") as f:
-                f.write(file_bytes)
+            if file_bytes:
+                with open(local_path, "wb") as f:
+                    f.write(file_bytes)
+                state["file_bytes"] = None
+            elif raw_oss_url and str(raw_oss_url).strip():
+                stream_gen, _, _ = await asyncio.to_thread(oss_service.get_object_stream, str(raw_oss_url).strip())
+                with open(local_path, "wb") as f:
+                    for chunk in stream_gen:
+                        f.write(chunk)
+            else:
+                raise ValueError(f"【MinerU 错误】未提供有效的文件路径、二进制内容或 OSS 原文链接 (doc_id={doc_id})")
             temp_file_path = str(local_path)
             state["temp_file_path"] = temp_file_path
 

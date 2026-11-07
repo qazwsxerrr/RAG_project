@@ -37,6 +37,21 @@ apiClient.interceptors.response.use(
     const errorDetail = error.response?.data?.detail || error.message || '网络请求失败';
     const authStore = useAuthStore();
 
+    // 遇到 429 高并发限流或并发护栏拦截：透传真实 Retry-After 冷却提示并弹顶栏提醒
+    if (status === 429) {
+      const retryAfter = error.response?.headers?.['retry-after'];
+      const msg = retryAfter && !String(errorDetail).includes('秒后重试')
+        ? `${errorDetail}（建议等待 ${retryAfter} 秒后重试）`
+        : errorDetail;
+      authStore.interceptAlert = msg;
+      setTimeout(() => {
+        if (authStore.interceptAlert === msg) {
+          authStore.interceptAlert = '';
+        }
+      }, 4500);
+      return Promise.reject(new Error(msg));
+    }
+
     // 遇到 403 权限不足：标记 isPermissionDenied，绝不重试与换票 (§2.4 规范)
     if (status === 403) {
       authStore.isPermissionDenied = true;

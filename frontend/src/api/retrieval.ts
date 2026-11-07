@@ -85,6 +85,23 @@ export const retrievalApi = {
         }
       }
 
+      if (response.status === 429) {
+        let errorMsg = '请求过于频繁，请稍后重试';
+        try {
+          const errJson = await response.json();
+          errorMsg = errJson.detail || errorMsg;
+        } catch {
+          // ignore
+        }
+        authStore.interceptAlert = errorMsg;
+        setTimeout(() => {
+          if (authStore.interceptAlert === errorMsg) {
+            authStore.interceptAlert = '';
+          }
+        }, 4500);
+        throw new Error(errorMsg);
+      }
+
       if (response.status === 403) {
         let errorMsg = '您无权访问所选部门或执行该检索操作';
         try {

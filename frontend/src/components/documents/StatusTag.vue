@@ -21,6 +21,13 @@ const tagStyle = computed(() => {
       dot: 'bg-emerald-500',
     };
   }
+  if (s === 'queued' || s === 'pending') {
+    return {
+      text: '队列排队中',
+      textColor: 'text-indigo-600',
+      dot: 'bg-indigo-500 animate-pulse',
+    };
+  }
   if (s === 'running' || s === 'process' || s === 'ingested') {
     return {
       text: '处理中',

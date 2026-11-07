@@ -49,6 +49,8 @@ class BaseNode:
         req_id = get_request_id()
 
         self.logger.info(f"[{req_id}] ▶ [节点 {self.step_index}/11: {self.name}] 开始执行 (doc_id={state.get('doc_id')})...")
+        if 0 <= idx < len(state.get("steps", [])):
+            state["steps"][idx]["error"] = None
         t0 = time.perf_counter()
 
         try:
@@ -58,6 +60,7 @@ class BaseNode:
             if 0 <= idx < len(result_state.get("steps", [])):
                 result_state["steps"][idx]["status"] = "completed"
                 result_state["steps"][idx]["duration_ms"] = duration_ms
+                result_state["steps"][idx]["error"] = None
 
             if writer and callable(writer):
                 writer({

@@ -9,9 +9,15 @@ import time
 import json
 import logging
 from typing import AsyncGenerator, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
 
+from rag_kb.core.config import settings
+from rag_kb.core.rate_limit import (
+    enforce_user_rate_limit,
+    acquire_chat_stream_slot,
+    release_chat_stream_slot,
+)
 from rag_kb.api.deps import (
     UserContext,
     get_current_user,
@@ -90,10 +96,20 @@ class ThinkingProcessBuilder:
 
 @router.post("/retrieval/search", response_model=ChatQueryResponse)
 async def search_endpoint(
+    http_request: Request,
     request: ChatQueryRequest,
     user: UserContext = Depends(require_permission("kb:retrieve"))
 ):
     """纯检索接口 (阶段 1 ~ 阶段 6)：获取经过多阶段漏斗精选的切片与思考流"""
+    # Phase-8: Redis Lua 原子滑动窗口频率限流
+    await enforce_user_rate_limit(
+        request=http_request,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        scope="retrieval_search",
+        limit=settings.RATE_LIMIT_RETRIEVAL_PER_MINUTE,
+    )
+
     # 0. RBAC 鉴权与部门防越权拦截 (Phase-6: 服务端强制推导，绝不信任前端入参)
     effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
     if not effective_dept_scope:
@@ -205,82 +221,105 @@ async def search_endpoint(
 
 @router.post("/retrieval/chat")
 async def chat_endpoint(
+    http_request: Request,
     request: ChatQueryRequest,
     user: UserContext = Depends(require_permission("kb:retrieve"))
 ):
     """
     阶段 1 ~ 阶段 8 全流程智能问答流式打字机接口 (POST SSE 协议)
+    - Phase-8: Redis Lua 频率限流 + 单用户并发流护栏
     - 阶段 1~6: 执行 LangGraph 检索图，实时派发 event: thinking 思考流与 event: citations
     - 阶段 7~8: 动态组装防幻觉 Prompt，调用云端大模型流式派发 event: message 打字机输出
     - 结束: 派发 event: done
     """
+    # Phase-8: Redis Lua 原子滑动窗口频率限制
+    await enforce_user_rate_limit(
+        request=http_request,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        scope="retrieval_chat",
+        limit=settings.RATE_LIMIT_RETRIEVAL_PER_MINUTE,
+    )
+
     # 0. RBAC 鉴权与部门防越权拦截 (Phase-6: 服务端强制推导，绝不信任前端入参)
     effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
     if not effective_dept_scope:
         raise HTTPException(status_code=403, detail="【数据隔离安全拦截】无法派生有效部门权限范围 (Fail-Closed)")
 
-    history_dicts = [h.model_dump() for h in request.history] if request.history else []
-    initial_state = get_default_state(
-        query=request.query,
-        conversation_id=request.conversation_id,
-        history=history_dicts,
-        department_scope=effective_dept_scope,
-        category_scope=request.category_scope,
-        tags_scope=request.tags_scope,
-        scene_type=request.scene_type,
-        enable_hyde=request.enable_hyde
-    )
+    # Phase-8: 单用户活跃流式问答并发护栏（防止连续狂点并发拉爆大模型与数据库连接池）
+    active_stream_slot = await acquire_chat_stream_slot(tenant_id=user.tenant_id, user_id=user.user_id)
 
-    # 记录用户消息至会话历史 (强制绑定当前员工 tenant_id 与 user_id，跨用户越权直接拦截)
-    if request.conversation_id:
-        try:
-            await chat_store.append_message(
-                request.conversation_id,
-                "user",
-                request.query,
-                tenant_id=user.tenant_id,
-                user_id=user.user_id
-            )
-        except PermissionError as pe:
-            raise HTTPException(status_code=403, detail=str(pe))
-        except Exception as e:
-            logger.warning(f"记录用户消息失败: {e}")
-
-    # 前置安全熔断护栏：拦截涉黄、暴恐、涉枪涉爆违禁词与越狱注入
-    is_safe, error_msg = validate_prompt_security(request.query)
-    if not is_safe:
-        async def blocked_stream() -> AsyncGenerator[str, None]:
-            block_reply = f"【安全合规拦截】{error_msg}"
-            yield format_sse("message", {"content": block_reply})
-            yield format_sse("done", {"total_overall_ms": 1, "total_retrieve_ms": 0})
-            if request.conversation_id:
-                try:
-                    await chat_store.append_message(
-                        request.conversation_id,
-                        "assistant",
-                        block_reply,
-                        tenant_id=user.tenant_id,
-                        user_id=user.user_id
-                    )
-                except Exception as e:
-                    logger.warning(f"记录合规拒绝消息失败: {e}")
-            await record_audit_log(
-                action="RETRIEVAL_CHAT_BLOCKED",
-                resource_id=request.conversation_id,
-                status="BLOCKED",
-                error_msg=error_msg,
-                details={"query": request.query}
-            )
-
-        return StreamingResponse(
-            blocked_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
+    try:
+        history_dicts = [h.model_dump() for h in request.history] if request.history else []
+        initial_state = get_default_state(
+            query=request.query,
+            conversation_id=request.conversation_id,
+            history=history_dicts,
+            department_scope=effective_dept_scope,
+            category_scope=request.category_scope,
+            tags_scope=request.tags_scope,
+            scene_type=request.scene_type,
+            enable_hyde=request.enable_hyde
         )
+
+        # 记录用户消息至会话历史 (强制绑定当前员工 tenant_id 与 user_id，跨用户越权直接拦截)
+        if request.conversation_id:
+            try:
+                await chat_store.append_message(
+                    request.conversation_id,
+                    "user",
+                    request.query,
+                    tenant_id=user.tenant_id,
+                    user_id=user.user_id
+                )
+            except PermissionError as pe:
+                await release_chat_stream_slot(user.tenant_id, user.user_id, active_stream_slot)
+                raise HTTPException(status_code=403, detail=str(pe))
+            except Exception as e:
+                logger.warning(f"记录用户消息失败: {e}")
+
+        # 前置安全熔断护栏：拦截涉黄、暴恐、涉枪涉爆违禁词与越狱注入
+        is_safe, error_msg = validate_prompt_security(request.query)
+        if not is_safe:
+            async def blocked_stream() -> AsyncGenerator[str, None]:
+                try:
+                    block_reply = f"【安全合规拦截】{error_msg}"
+                    yield format_sse("message", {"content": block_reply})
+                    yield format_sse("done", {"total_overall_ms": 1, "total_retrieve_ms": 0})
+                    if request.conversation_id:
+                        try:
+                            await chat_store.append_message(
+                                request.conversation_id,
+                                "assistant",
+                                block_reply,
+                                tenant_id=user.tenant_id,
+                                user_id=user.user_id
+                            )
+                        except Exception as e:
+                            logger.warning(f"记录合规拒绝消息失败: {e}")
+                    await record_audit_log(
+                        action="RETRIEVAL_CHAT_BLOCKED",
+                        resource_id=request.conversation_id,
+                        status="BLOCKED",
+                        error_msg=error_msg,
+                        details={"query": request.query}
+                    )
+                finally:
+                    await release_chat_stream_slot(user.tenant_id, user.user_id, active_stream_slot)
+
+            return StreamingResponse(
+                blocked_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+    except Exception:
+        # 若在进入 StreamingResponse 生成器前发生任何非合规拦截异常，立即释放已占用的并发槽位
+        await release_chat_stream_slot(user.tenant_id, user.user_id, active_stream_slot)
+        raise
 
     async def chat_event_stream() -> AsyncGenerator[str, None]:
         t0 = time.perf_counter()
@@ -373,6 +412,8 @@ async def chat_endpoint(
                 details={"query": request.query}
             )
             yield format_sse("error", {"error": str(err)})
+        finally:
+            await release_chat_stream_slot(user.tenant_id, user.user_id, active_stream_slot)
 
     return StreamingResponse(
         chat_event_stream(),

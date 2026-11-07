@@ -16,11 +16,12 @@
 
 import uuid
 import json
+import hashlib
 import asyncio
 import logging
 from pathlib import Path
 from typing import List, Optional, AsyncGenerator, Dict, Any
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Header, Query, Depends
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Header, Query, Depends, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +56,12 @@ from rag_kb.api.schemas import (
 )
 from rag_kb.api.sse import pipeline_manager, format_sse
 from rag_kb.core.logging.audit import record_audit_log
+from rag_kb.core.rate_limit import (
+    enforce_user_rate_limit,
+    upload_dedup_lock,
+)
+from rag_kb.graph.edges import can_safely_jump_to_step
+from rag_kb.services.pipeline.ingest_queue import ingest_queue_service, cleanup_doc_temp_files
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +76,78 @@ def _sse_business_payload(event: dict) -> str:
         return json.dumps(payload, default=str, ensure_ascii=False)
     return json.dumps(event, default=str, ensure_ascii=False)
 
-# ==================== 1. 文档上传与受理 ====================
+async def _resolve_or_create_department(db: AsyncSession, department_path: str) -> Department:
+    """根据已校验的合法部门路径查找或建档 Department 记录，保障 rag_documents 外键完整"""
+    clean_path = "/" + department_path.strip("/") if department_path != "/" else "/public"
+    res = await db.execute(select(Department).where(Department.path == clean_path))
+    dept_obj = res.scalar_one_or_none()
+    if dept_obj:
+        return dept_obj
 
-@router.post("/upload", response_model=DocumentUploadResponse)
+    pure_name = "公共知识库" if clean_path == "/public" else clean_path.strip("/").split("/")[-1]
+    res_by_name = await db.execute(select(Department).where(Department.name == pure_name))
+    existing_by_name = res_by_name.scalar_one_or_none()
+    if existing_by_name:
+        return existing_by_name
+
+    dept_obj = Department(
+        id=uuid.uuid4(),
+        name=pure_name,
+        path=clean_path,
+    )
+    db.add(dept_obj)
+    await db.flush()
+    return dept_obj
+
+
+async def _stream_read_upload_with_limit(
+    upload_file: UploadFile,
+    dest_path: Path,
+    max_size_bytes: int,
+) -> tuple[int, str]:
+    """流式分块读取上传文件并同步计算 SHA-256，超出单文件上限立即 413 熔断，杜绝超大文件撑爆内存"""
+    sha = hashlib.sha256()
+    total_bytes = 0
+    chunk_size = 1024 * 1024  # 1MB 分块
+
+    try:
+        with open(dest_path, "wb") as out_f:
+            while True:
+                chunk = await upload_file.read(chunk_size)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > max_size_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        detail=f"文件体积超出允许上限（最大 {settings.MAX_UPLOAD_SIZE_MB}MB），请拆分后重新上传",
+                    )
+                sha.update(chunk)
+                out_f.write(chunk)
+    except Exception:
+        if dest_path.exists():
+            try:
+                dest_path.unlink()
+            except OSError:
+                pass
+        raise
+
+    if total_bytes == 0:
+        if dest_path.exists():
+            try:
+                dest_path.unlink()
+            except OSError:
+                pass
+        raise HTTPException(status_code=400, detail="不允许上传 0 字节的空文件")
+
+    return total_bytes, sha.hexdigest()
+
+
+# ==================== 1. 文档上传与受理 (Phase-8 先存后返 202 + Redis 队列异步削峰) ====================
+
+@router.post("/upload", response_model=DocumentUploadResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
     department: Optional[str] = Form(None),
     category: str = Form("技术规范"),
@@ -83,11 +158,22 @@ async def upload_document(
     user: UserContext = Depends(require_permission("doc:upload"))
 ):
     """
-    文档上传受理接口 (Phase-6 RBAC 严格管控)
-    - 强制校验 doc:upload 权限点
-    - 未传部门时默认使用当前员工所属部门（全域管理员 `/` 默认落 `/public`）
-    - 传入部门时强制校验属于员工授权范围（普通员工仅可传本部门树或 `/public`，越权传他部门直接 403）
+    企业级高并发异步文档上传受理接口 (Phase-6 RBAC + Phase-8 Redis 限流与队列削峰)：
+    1. Redis Lua 原子滑动窗口频率限流（超限返回 429 + Retry-After）；
+    2. 严格校验 doc:upload 权限点与目标归属部门范围（BOLA 防越权）；
+    3. 流式分块落盘校验体积与 SHA-256 + Redis 分布式防抖幂等锁；
+    4. 真实上传阿里云 OSS 原件，写入 rag_documents(overall_status='queued', is_active=False)；
+    5. XADD 投递至 Redis Streams 消费队列，立即响应 HTTP 202 Accepted 成功受理提示。
     """
+    # 0. Redis 高并发上传频率限制
+    await enforce_user_rate_limit(
+        request=request,
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+        scope="doc_upload",
+        limit=settings.RATE_LIMIT_UPLOAD_PER_MINUTE,
+    )
+
     actual_file_name = custom_file_name.strip() if custom_file_name else file.filename
     ext = Path(actual_file_name).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -133,49 +219,94 @@ async def upload_document(
         )
 
     doc_id = str(uuid.uuid4())
-    file_bytes = await file.read()
-    file_size = len(file_bytes)
-
     temp_dir = Path(settings.DATA_PARSED_DIR) / "tmp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_file_path = temp_dir / f"{doc_id}_{actual_file_name}"
-    with open(temp_file_path, "wb") as f:
-        f.write(file_bytes)
 
-    # 构造并注册初始状态
-    initial_state = get_default_state(
-        doc_id=doc_id,
-        file_name=actual_file_name,
-        file_bytes=file_bytes,
-        temp_file_path=str(temp_file_path),
-        department=department_path,
-        category=category,
-        tags=parsed_tags,
-        skip_review=skip_review
-    )
-    pipeline_manager.register_pipeline(doc_id, initial_state)
+    max_bytes = max(1, int(settings.MAX_UPLOAD_SIZE_MB)) * 1024 * 1024
+    file_size, file_hash = await _stream_read_upload_with_limit(file, temp_file_path, max_bytes)
 
-    # 后台异步启动 LangGraph 流式执行
-    async def _safe_run_pipeline():
-        config = {"configurable": {"thread_id": doc_id}}
-        graph = get_ingest_graph()
+    # Redis 分布式短时幂等锁：拦截前端连点重复提交同一文件
+    try:
+        async with upload_dedup_lock(department_path=department_path, file_sha256=file_hash):
+            clean_dept_key = department_path.strip("/").replace("/", "_") or "public"
+            target_oss_key = f"rag_storage/raw/{clean_dept_key}/{file_hash[:8]}_{actual_file_name}"
+
+            try:
+                # 1. 真实上传至阿里云 OSS（按需读取文件后立即由局部作用域释放，不驻留 State）
+                def _upload_local_to_oss() -> str:
+                    uploaded_key = oss_service.upload_file(str(temp_file_path), target_oss_key)
+                    if str(uploaded_key).startswith("http"):
+                        return str(uploaded_key)
+                    clean_ep = oss_service.endpoint.replace("https://", "").replace("http://", "").rstrip("/")
+                    return f"https://{oss_service.bucket_name}.{clean_ep}/{str(uploaded_key).lstrip('/')}"
+
+                real_oss_url = await asyncio.to_thread(_upload_local_to_oss)
+
+                # 2. 构造无二进制内存占用的轻量状态并写入数据库初始排队态 (overall_status='queued', is_active=False)
+                initial_state = get_default_state(
+                    doc_id=doc_id,
+                    file_name=actual_file_name,
+                    file_bytes=None,
+                    temp_file_path=str(temp_file_path),
+                    department=department_path,
+                    category=category,
+                    tags=parsed_tags,
+                    skip_review=skip_review,
+                )
+                initial_state["raw_oss_url"] = real_oss_url
+                initial_state["file_hash"] = file_hash
+                initial_state["overall_status"] = IngestStatus.QUEUED.value
+
+                dept_obj = await _resolve_or_create_department(db, department_path)
+                queued_doc = Document(
+                    id=uuid.UUID(doc_id),
+                    title=actual_file_name,
+                    file_hash=file_hash,
+                    raw_oss_url=real_oss_url,
+                    department_id=dept_obj.id,
+                    department_path=department_path,
+                    category=category,
+                    tags=parsed_tags,
+                    overall_status=IngestStatus.QUEUED.value,
+                    current_step_index=1,
+                    pipeline_steps=initial_state["steps"],
+                    version=1,
+                    is_active=False,
+                )
+                db.add(queued_doc)
+                await db.flush()
+
+                # 3. 推入真实 Redis Streams 异步消费队列（削峰填谷）
+                stream_msg_id = await ingest_queue_service.enqueue_ingest_task(
+                    doc_id=doc_id,
+                    file_name=actual_file_name,
+                    raw_oss_url=real_oss_url,
+                    file_hash=file_hash,
+                    department=department_path,
+                    category=category,
+                    tags=parsed_tags,
+                    skip_review=skip_review,
+                    temp_file_path=str(temp_file_path),
+                )
+
+                await db.commit()
+                pipeline_manager.register_pipeline(doc_id, initial_state)
+            except Exception:
+                raise
+    except Exception:
+        # 捕获所有上传阶段异常（包括 HTTPException 与未预期的 OSS/DB 异常），彻底清理临时文件与半成品状态
+        if temp_file_path.exists():
+            try:
+                temp_file_path.unlink()
+            except OSError:
+                pass
+        pipeline_manager.remove_pipeline(doc_id)
         try:
-            async for custom_chunk in graph.astream(initial_state, config=config, stream_mode="custom"):
-                evt_name = custom_chunk.get("event", "message")
-                await pipeline_manager.broadcast(doc_id, evt_name, custom_chunk)
-        except Exception as err:
-            logger.error(f"流水线异步任务失败 [doc_id={doc_id}]: {err}", exc_info=True)
-            await pipeline_manager.broadcast(doc_id, "pipeline_failed", {
-                "doc_id": doc_id,
-                "error": str(err)
-            })
-
-    asyncio.create_task(_safe_run_pipeline())
-
-    file_hash = oss_service.calculate_sha256(file_bytes)
-    clean_endpoint = oss_service.endpoint.replace("https://", "").replace("http://", "").rstrip("/")
-    clean_dept_key = department_path.strip("/").replace("/", "_")
-    real_oss_url = f"https://{oss_service.bucket_name}.{clean_endpoint}/rag_storage/raw/{clean_dept_key}/{file_hash[:8]}_{actual_file_name}"
+            await db.rollback()
+        except Exception:
+            pass
+        raise
 
     await record_audit_log(
         action="DOCUMENT_UPLOAD",
@@ -186,19 +317,22 @@ async def upload_document(
             "file_size": file_size,
             "file_hash": file_hash,
             "department": department_path,
-            "category": category
+            "category": category,
+            "stream_msg_id": stream_msg_id,
         }
     )
 
     return DocumentUploadResponse(
         doc_id=doc_id,
+        task_id=stream_msg_id,
         file_name=actual_file_name,
         file_size=file_size,
         file_hash=file_hash,
         department=department_path,
         category=category,
         tags=parsed_tags,
-        status="ingested",
+        status=IngestStatus.QUEUED.value,
+        message="文档已成功存入云端并加入后台异步解析队列，可实时查看进度；若解析异常可一键重试。",
         oss_url=real_oss_url
     )
 
@@ -305,8 +439,11 @@ async def delete_document(
     await db.execute(delete(Document).where(Document.id == doc_uuid))
     await db.commit()
 
+    mem_temp_path = None
     if doc_id in pipeline_manager._active_states:
+        mem_temp_path = pipeline_manager._active_states[doc_id].get("temp_file_path")
         del pipeline_manager._active_states[doc_id]
+    cleanup_doc_temp_files(doc_id, mem_temp_path)
 
     await record_audit_log(
         action="DOCUMENT_DELETE",
@@ -419,15 +556,28 @@ async def get_pipeline_status(
         raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id}")
     assert_doc_visible(user, doc)
 
-    steps = [
-        PipelineStepStatus(
-            step_index=i + 1,
-            name=name,
-            status="completed" if doc.overall_status == "active" else "waiting",
-            duration_ms=0
-        )
-        for i, name in enumerate(STEP_NAMES)
-    ]
+    if doc.pipeline_steps and isinstance(doc.pipeline_steps, list) and len(doc.pipeline_steps) == len(STEP_NAMES):
+        steps = [
+            PipelineStepStatus(
+                step_index=s.get("step_index", i + 1),
+                name=s.get("name", STEP_NAMES[i]),
+                status=s.get("status", "waiting"),
+                duration_ms=int(s.get("duration_ms") or 0),
+                error=s.get("error"),
+                detail=s.get("detail"),
+            )
+            for i, s in enumerate(doc.pipeline_steps)
+        ]
+    else:
+        steps = [
+            PipelineStepStatus(
+                step_index=i + 1,
+                name=name,
+                status="completed" if doc.overall_status == "active" else "waiting",
+                duration_ms=0
+            )
+            for i, name in enumerate(STEP_NAMES)
+        ]
 
     review_stmt = select(DocumentReviewItem).where(DocumentReviewItem.document_id == doc_uuid)
     review_res = await db.execute(review_stmt)
@@ -453,14 +603,15 @@ async def get_pipeline_status(
         for r in db_reviews
     ]
 
+    eff_step_idx = 11 if doc.overall_status == "active" else max(1, min(len(STEP_NAMES), int(doc.current_step_index or 1)))
     return PipelineSnapshotResponse(
         doc_id=doc_id,
         file_name=doc.title,
         overall_status="completed" if doc.overall_status == "active" else doc.overall_status,
-        current_step_index=11,
-        current_step_name=STEP_NAMES[10],
+        current_step_index=eff_step_idx,
+        current_step_name=STEP_NAMES[eff_step_idx - 1],
         steps=steps,
-        requires_review=False,
+        requires_review=(doc.overall_status == IngestStatus.REVIEW.value and len(pending_review_items) > 0),
         pending_reviews=pending_review_items
     )
 
@@ -595,27 +746,11 @@ async def submit_pipeline_review(
                 rev["remark"] = up.remark
                 rev["status"] = "modified" if up.user_description != rev.get("vlm_description") else "approved"
 
-    # 后台异步注入 Command(resume=...) 唤醒流水线并继续接收推流
-    async def _safe_resume():
-        config = {"configurable": {"thread_id": doc_id}}
-        graph = get_ingest_graph()
-        try:
-            await pipeline_manager.broadcast(doc_id, "pipeline_resumed", {
-                "doc_id": doc_id,
-                "message": "人工审核已确认，流水线继续执行下一步"
-            })
-            resume_payload = [item.model_dump() for item in request.items]
-            async for custom_chunk in graph.astream(Command(resume=resume_payload), config=config, stream_mode="custom"):
-                evt_name = custom_chunk.get("event", "message")
-                await pipeline_manager.broadcast(doc_id, evt_name, custom_chunk)
-        except Exception as err:
-            logger.error(f"流水线唤醒后执行失败 [doc_id={doc_id}]: {err}", exc_info=True)
-            await pipeline_manager.broadcast(doc_id, "pipeline_failed", {
-                "doc_id": doc_id,
-                "error": str(err)
-            })
-
-    asyncio.create_task(_safe_resume())
+    # 后台受队列并发信号量保护注入 Command(resume=...) 唤醒流水线并完整同步 DB 终态
+    resume_payload = [item.model_dump() for item in request.items]
+    ingest_queue_service.schedule_background_resume(
+        ingest_queue_service.resume_after_review(doc_id, resume_payload)
+    )
 
     await pipeline_manager.broadcast(doc_id, "review_completed", {
         "doc_id": doc_id,
@@ -748,22 +883,50 @@ import pypdfium2 as pdfium
 from urllib.parse import quote
 
 _PDF_DOCUMENT_CACHE: Dict[str, bytes] = {}
+_PDF_RENDER_SEM: Optional[asyncio.Semaphore] = None
+
+
+def _get_pdf_render_sem() -> asyncio.Semaphore:
+    global _PDF_RENDER_SEM
+    if _PDF_RENDER_SEM is None:
+        _PDF_RENDER_SEM = asyncio.Semaphore(max(1, int(settings.PDF_RENDER_CONCURRENCY)))
+    return _PDF_RENDER_SEM
+
 
 async def _fetch_pdf_bytes(raw_oss_url: str) -> bytes:
-    """从 OSS 内存拉取 PDF 二进制并做 LRU 内存缓存"""
+    """从 OSS 异步线程拉取 PDF 二进制并做受控 LRU 缓存"""
     if raw_oss_url in _PDF_DOCUMENT_CACHE:
         return _PDF_DOCUMENT_CACHE[raw_oss_url]
 
-    stream_gen, _, _ = oss_service.get_object_stream(raw_oss_url)
-    chunks = []
-    for chunk in stream_gen:
-        chunks.append(chunk)
-    pdf_bytes = b"".join(chunks)
+    def _download_sync() -> bytes:
+        stream_gen, _, _ = oss_service.get_object_stream(raw_oss_url)
+        return b"".join(stream_gen)
 
-    if len(_PDF_DOCUMENT_CACHE) > 10:
+    pdf_bytes = await asyncio.to_thread(_download_sync)
+
+    if len(_PDF_DOCUMENT_CACHE) >= 8:
         _PDF_DOCUMENT_CACHE.pop(next(iter(_PDF_DOCUMENT_CACHE)))
     _PDF_DOCUMENT_CACHE[raw_oss_url] = pdf_bytes
     return pdf_bytes
+
+
+def _render_pdf_page_sync(pdf_bytes: bytes, page_num: int, scale: float) -> tuple[bytes, int]:
+    """在独立工作线程执行 CPU 密集型 pypdfium2 渲染，严禁阻塞 FastAPI 主事件循环"""
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    try:
+        total_pages = len(pdf)
+        if page_num < 1 or page_num > total_pages:
+            raise IndexError(f"页码超出范围: 1 - {total_pages}")
+        page = pdf[page_num - 1]
+        pil_img = page.render(scale=scale).to_pil().convert("RGB")
+        buf = io.BytesIO()
+        pil_img.save(buf, format="PNG", optimize=True)
+        return buf.getvalue(), total_pages
+    finally:
+        try:
+            pdf.close()
+        except Exception:
+            pass
 
 @router.get("/{doc_id}/preview")
 async def preview_document(
@@ -833,30 +996,20 @@ async def get_document_page_image(
         raise HTTPException(status_code=400, detail="单页超高精渲染仅支持 PDF 文档")
 
     pdf_bytes = await _fetch_pdf_bytes(doc.raw_oss_url)
-    try:
-        pdf = pdfium.PdfDocument(pdf_bytes)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"加载 PDF 文档失败: {e}")
-
-    total_pages = len(pdf)
-    if page_num < 1 or page_num > total_pages:
-        raise HTTPException(status_code=404, detail=f"页码超出范围: 1 - {total_pages}")
-
-    try:
-        page = pdf[page_num - 1]
-        pil_img = page.render(scale=scale).to_pil().convert("RGB")
-        buf = io.BytesIO()
-        pil_img.save(buf, format="PNG", optimize=True)
-        buf.seek(0)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"渲染 PDF 单页失败: {e}")
+    async with _get_pdf_render_sem():
+        try:
+            png_bytes, total_pages = await asyncio.to_thread(_render_pdf_page_sync, pdf_bytes, page_num, scale)
+        except IndexError as idx_err:
+            raise HTTPException(status_code=404, detail=str(idx_err))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"渲染 PDF 单页失败: {e}")
 
     headers = {
         "Cache-Control": "public, max-age=86400",
         "X-Total-Pages": str(total_pages),
         "X-Current-Page": str(page_num)
     }
-    return StreamingResponse(buf, media_type="image/png", headers=headers)
+    return StreamingResponse(io.BytesIO(png_bytes), media_type="image/png", headers=headers)
 
 # ==================== 7. 防重冲突与重试 ====================
 
@@ -892,26 +1045,23 @@ async def resolve_duplicate(
         state["force_overwrite"] = False
         state["skip_review"] = True
     elif request.action == "cancel":
-        state["overall_status"] = IngestStatus.FAILED.value
+        state["overall_status"] = "cancelled"
+        doc = await db.get(Document, doc_uuid)
+        if doc:
+            doc.overall_status = "cancelled"
+            doc.is_active = False
+            await db.commit()
+        cleanup_doc_temp_files(doc_id, state.get("temp_file_path"))
         await pipeline_manager.broadcast(doc_id, "pipeline_cancelled", {
             "doc_id": doc_id,
             "message": "用户取消重复文档入库"
         })
         return DuplicateResolveResponse(doc_id=doc_id, status="cancelled", message="已取消入库")
 
-    # 唤醒继续入库
-    config = {"configurable": {"thread_id": doc_id}}
-    graph = get_ingest_graph()
-
-    async def _resume_store():
-        try:
-            async for custom_chunk in graph.astream(state, config=config, stream_mode="custom"):
-                evt_name = custom_chunk.get("event", "message")
-                await pipeline_manager.broadcast(doc_id, evt_name, custom_chunk)
-        except Exception as e:
-            logger.error(f"防重恢复执行失败 [doc_id={doc_id}]: {e}", exc_info=True)
-
-    asyncio.create_task(_resume_store())
+    # 受队列并发信号量保护唤醒继续完成第 11 步入库并同步 DB 终态
+    ingest_queue_service.schedule_background_resume(
+        ingest_queue_service.resume_after_duplicate_decision(doc_id, state)
+    )
     return DuplicateResolveResponse(
         doc_id=doc_id,
         status="resumed",
@@ -925,61 +1075,107 @@ async def retry_pipeline(
     db: AsyncSession = Depends(get_db),
     user: UserContext = Depends(require_permission("doc:upload"))
 ):
-    """流水线断点重试 (Phase-6: 校验权限与 assert_doc_visible)"""
+    """流水线失败引导重试 (Phase-6 权限校验 + Phase-8 重新推入 Redis Streams 消费队列受控执行)"""
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="无效的文档 UUID 格式")
 
+    doc = await db.get(Document, doc_uuid)
     state = pipeline_manager.get_state(doc_id)
     if state:
         mem_dept = state.get("department", "")
         if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
             raise HTTPException(status_code=403, detail="【越权拦截】无权重试非本部门文档 (BOLA Blocked)")
     else:
-        doc = await db.get(Document, doc_uuid)
         if doc:
             assert_doc_visible(user, doc)
+            persisted_skip_review = bool(
+                doc.pipeline_steps
+                and isinstance(doc.pipeline_steps, list)
+                and isinstance(doc.pipeline_steps[0], dict)
+                and doc.pipeline_steps[0].get("skip_review", False)
+            )
             state = get_default_state(
                 doc_id=doc_id,
                 file_name=doc.title,
                 department=doc.department_path,
                 category=doc.category,
-                tags=doc.tags or []
+                tags=doc.tags or [],
+                skip_review=persisted_skip_review,
             )
             state["raw_oss_url"] = doc.raw_oss_url
+            state["file_hash"] = doc.file_hash
             state["enhanced_md_oss_url"] = doc.enhanced_md_oss_url
             pipeline_manager.register_state(doc_id, state)
         else:
             raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id} 的历史现场")
 
-    state["overall_status"] = IngestStatus.INGEST.value
+    requested_step = max(1, min(11, int(request.from_step))) if (request and request.from_step) else 1
+    effective_from_step = (
+        requested_step
+        if (requested_step > 1 and can_safely_jump_to_step(state, requested_step))
+        else 1
+    )
+
+    state["overall_status"] = IngestStatus.QUEUED.value
+    state["current_step_index"] = effective_from_step
     state["error"] = None
     state["failed_step"] = None
+    for s in state.get("steps", []):
+        s_idx = s.get("step_index", 0)
+        if s_idx >= effective_from_step or s.get("status") == "failed":
+            s["status"] = "waiting"
+            s["error"] = None
+            s["duration_ms"] = 0
 
-    config = {"configurable": {"thread_id": doc_id}}
-    graph = get_ingest_graph()
+    if doc:
+        doc.overall_status = IngestStatus.QUEUED.value
+        doc.current_step_index = effective_from_step
+        doc.pipeline_steps = state.get("steps", [])
+        await db.commit()
 
-    async def _safe_retry():
-        try:
-            async for custom_chunk in graph.astream(state, config=config, stream_mode="custom"):
-                evt_name = custom_chunk.get("event", "message")
-                await pipeline_manager.broadcast(doc_id, evt_name, custom_chunk)
-        except Exception as e:
-            logger.error(f"流水线重试异常 [doc_id={doc_id}]: {e}", exc_info=True)
+    stream_msg_id = await ingest_queue_service.enqueue_ingest_task(
+        doc_id=doc_id,
+        file_name=state.get("file_name") or (doc.title if doc else "document.pdf"),
+        raw_oss_url=state.get("raw_oss_url") or (doc.raw_oss_url if doc else ""),
+        file_hash=state.get("file_hash") or (doc.file_hash if doc else ""),
+        department=state.get("department") or (doc.department_path if doc else "/public"),
+        category=state.get("category") or (doc.category if doc else "技术规范"),
+        tags=state.get("tags") or (doc.tags if doc else []),
+        skip_review=bool(state.get("skip_review", False)),
+        temp_file_path=state.get("temp_file_path"),
+        from_step=effective_from_step,
+    )
 
-    asyncio.create_task(_safe_retry())
+    retry_hint = (
+        f"已加入 Redis 异步队列，将直接从第 {effective_from_step} 节点断点续跑"
+        if effective_from_step > 1
+        else "已加入 Redis 异步队列，将从第 1 节点完整重新解析"
+    )
+    await pipeline_manager.broadcast(doc_id, "pipeline_queued", {
+        "doc_id": doc_id,
+        "stream_msg_id": stream_msg_id,
+        "from_step": effective_from_step,
+        "message": retry_hint,
+    })
 
     await record_audit_log(
         action="DOCUMENT_RETRY",
         resource_id=doc_id,
         status="SUCCESS",
-        details={"from_step": request.from_step if request else 1, "operator": user.username}
+        details={
+            "requested_from_step": requested_step,
+            "effective_from_step": effective_from_step,
+            "operator": user.username,
+            "stream_msg_id": stream_msg_id,
+        }
     )
 
     return {
         "doc_id": doc_id,
-        "status": "retrying",
-        "from_step": request.from_step if request else 1,
-        "message": "流水线已开始重试执行"
+        "task_id": stream_msg_id,
+        "status": "queued",
+        "from_step": effective_from_step,
+        "message": retry_hint,
     }

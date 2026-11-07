@@ -14,10 +14,13 @@ from rag_kb.core.config import settings
 from rag_kb.db.base import Base
 from rag_kb.db.models import Department
 
-# 真实连接 PostgreSQL 16 数据库
+# 真实连接 PostgreSQL 16 数据库（高并发连接池扩容：适配 4 路并行召回与异步入库消费）
 engine = create_async_engine(
     settings.async_database_url,
     echo=False,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_timeout=settings.DB_POOL_TIMEOUT,
     pool_pre_ping=True,
     pool_recycle=300,
 )

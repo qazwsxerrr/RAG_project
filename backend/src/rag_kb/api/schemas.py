@@ -99,6 +99,7 @@ class PipelineStepStatus(BaseModel):
     status: str = "waiting" # waiting | running | completed | failed | pending_review
     duration_ms: int = 0
     error: Optional[str] = None
+    detail: Optional[str] = None
 
 class ReviewItem(BaseModel):
     """人机审核项"""
@@ -154,7 +155,9 @@ class DocumentUploadResponse(BaseModel):
     department: str = Field(..., description="归属部门")
     category: str = Field(..., description="文档分类")
     tags: List[str] = Field(default_factory=list, description="标签胶囊列表")
-    status: str = Field(default="ingested", description="当前入库状态")
+    status: str = Field(default="queued", description="当前入库状态 (queued/ingested/running)")
+    task_id: Optional[str] = Field(default=None, description="异步队列追踪任务ID")
+    message: Optional[str] = Field(default=None, description="先存后返成功受理提示")
     oss_url: str = Field(..., description="OSS 原文件访问地址")
 
 class DocumentItemSchema(BaseModel):

@@ -494,10 +494,17 @@ const emit = defineEmits<{
   (e: 'duplicateWarning', matchedDocId?: string): void;
   (e: 'completed', docId: string): void;
   (e: 'failed', error: string): void;
+  (e: 'statusChange', status: string): void;
 }>();
 
 const steps = ref<PipelineStep[]>(JSON.parse(JSON.stringify(DEFAULT_PIPELINE_STEPS)));
 const overallStatus = ref<string>('wait');
+
+watch(overallStatus, (newVal) => {
+  if (newVal) {
+    emit('statusChange', newVal);
+  }
+}, { immediate: true });
 const currentStepIndex = ref<number>(1);
 const isReconnecting = ref<boolean>(false);
 const errorMessage = ref<string>('');
@@ -700,14 +707,20 @@ const handleRetryCurrentStep = async () => {
   try {
     isRetrying.value = true;
     errorMessage.value = '';
-    const targetStep = currentStepIndex.value || 9;
-    setStepStatus(targetStep, 'process', `正在执行第 ${targetStep} 节点：断点续跑中...`);
-    for (let i = targetStep + 1; i <= 11; i++) {
+    const targetStep = currentStepIndex.value || 1;
+    const retryRes = await documentsApi.retryPipeline(props.docId, targetStep);
+    const actualFromStep = retryRes?.from_step || 1;
+
+    currentStepIndex.value = actualFromStep;
+    for (let i = actualFromStep; i <= 11; i++) {
       setStepStatus(i, 'wait', '');
     }
-    overallStatus.value = 'running';
-    addLog('System', 'bg-blue-100 text-blue-700', `发起断点续跑重试：从 Step ${targetStep} 开始`);
-    await documentsApi.retryPipeline(props.docId, targetStep);
+    overallStatus.value = retryRes?.status === 'queued' ? 'queued' : 'running';
+    addLog(
+      'Queue',
+      'bg-indigo-100 text-indigo-700',
+      retryRes?.message || `已重新投递 Redis 消费队列，准备从 Step ${actualFromStep} 续跑`
+    );
     connectSSE();
   } catch (err: any) {
     console.error('重试请求失败:', err);
@@ -725,11 +738,13 @@ const handleRetryCurrentStep = async () => {
 const currentStatusText = computed(() => {
   switch (overallStatus.value) {
     case 'wait': return '待启动';
+    case 'queued':
+    case 'pending': return 'Redis 队列排队中...';
     case 'running': return `节点 ${currentStepIndex.value} 处理中...`;
     case 'pending_review': return '第 7 步表格人工审核挂起';
     case 'duplicate_warning': return '重复文档预警待决策';
     case 'completed': return '入库完成';
-    case 'failed': return '流水线执行异常';
+    case 'failed': return String(errorMessage.value).includes('FORMAT_INVALID') ? '格式质检未通过（需重整提交）' : '流水线执行异常';
     case 'cancelled': return '已取消入库';
     default: return overallStatus.value;
   }
@@ -738,6 +753,8 @@ const currentStatusText = computed(() => {
 const statusBadgeClass = computed(() => {
   switch (overallStatus.value) {
     case 'completed': return 'bg-emerald-50 text-emerald-700 border-emerald-200/80';
+    case 'queued':
+    case 'pending': return 'bg-indigo-50 text-indigo-700 border-indigo-200/80 animate-pulse';
     case 'pending_review': return 'bg-amber-50 text-amber-800 border-amber-200/80 animate-pulse';
     case 'duplicate_warning': return 'bg-orange-50 text-orange-800 border-orange-200/80 animate-pulse';
     case 'running': return 'bg-blue-50 text-blue-700 border-blue-200/80';
@@ -749,6 +766,8 @@ const statusBadgeClass = computed(() => {
 const overallStatusDotClass = computed(() => {
   switch (overallStatus.value) {
     case 'completed': return 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]';
+    case 'queued':
+    case 'pending': return 'bg-indigo-500 animate-pulse shadow-[0_0_6px_rgba(99,102,241,0.5)]';
     case 'running': return 'bg-blue-500 animate-pulse shadow-[0_0_6px_rgba(59,130,246,0.5)]';
     case 'pending_review': return 'bg-amber-500 animate-ping';
     case 'duplicate_warning': return 'bg-orange-500 animate-ping';
@@ -860,6 +879,10 @@ const connectSSE = () => {
             eventSource = null;
           }
         }
+      } else if (eventName === 'pipeline_queued') {
+        overallStatus.value = 'queued';
+        errorMessage.value = '';
+        addLog('Queue', 'bg-indigo-100 text-indigo-700', data.message || '文档已加入 Redis 异步消费队列排队等待执行...');
       } else if (eventName === 'step_started') {
         const idx = data.step_index ?? data.step;
         currentStepIndex.value = idx;
@@ -876,8 +899,11 @@ const connectSSE = () => {
           const st = normalizeStatus(data.status || 'running');
           if (st === 'process') {
             errorMessage.value = '';
+            if (overallStatus.value === 'queued' || overallStatus.value === 'wait' || overallStatus.value === 'pending') {
+              overallStatus.value = 'running';
+            }
           }
-          setStepStatus(idx, st, data.detail);
+          setStepStatus(idx, st, data.error || data.detail);
           if (st === 'finish') {
             for (let i = 1; i <= idx; i++) {
               setStepStatus(i, 'finish');

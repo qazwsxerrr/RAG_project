@@ -14,6 +14,7 @@ from rag_kb.core.config import settings
 from rag_kb.core.constants import IngestStatus
 from rag_kb.graph.state import IngestState
 from rag_kb.nodes.base import BaseNode
+from rag_kb.services.pipeline.cleaning_service import cleaning_service
 
 class LoaderNode(BaseNode):
     """节点 3: MD加载与图元对齐"""
@@ -50,14 +51,32 @@ class LoaderNode(BaseNode):
                     content_list = json.load(f)
 
         state["content_list"] = content_list
+
+        # Phase-8: 异构文档双轨分级清洗与专业文档准入质检（通用文档自动格式化清洗，专业文档残缺直接拦截拒绝越权代改）
+        clean_report = cleaning_service.inspect_and_clean(
+            markdown_text=md_content,
+            content_list=content_list,
+            category=state.get("category", "技术规范"),
+            tags=state.get("tags", []),
+            file_name=state.get("file_name", ""),
+        )
+        cleaned_md = clean_report.cleaned_markdown
+        state["md_content"] = cleaned_md
+
+        # 将清洗后的标准化 Markdown 回写至工作区 full.md，确保下游 TableNode / SplitterNode 读取一致结果
+        if cleaned_md != md_content:
+            with open(full_md_path, "w", encoding="utf-8") as f:
+                f.write(cleaned_md)
+
         state["overall_status"] = IngestStatus.LOADER.value
 
+        mode_label = "专业严谨文档结构预检通过" if clean_report.is_strict_professional else "通用文档自动格式化清洗完成"
         if writer and callable(writer):
             writer({
                 "event": "step_progress",
                 "step": 3,
                 "status": "completed",
-                "detail": f"成功加载 Markdown 结构，共 {len(content_list)} 个几何图元"
+                "detail": f"加载 {len(content_list)} 个图元 · {mode_label}"
             })
 
         return state

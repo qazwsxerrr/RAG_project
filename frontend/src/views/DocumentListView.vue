@@ -6,7 +6,7 @@
         <div class="px-4 first:pl-0">
           <div class="text-[11px] text-slate-400 font-medium">收录文档总数</div>
           <div class="mt-1 flex items-baseline gap-1.5">
-            <span class="text-xl font-bold text-slate-900 font-mono">{{ documentStore.documents.length }}</span>
+            <span class="text-xl font-bold text-slate-900 font-mono">{{ completedDocCount }}</span>
             <span class="text-[11px] text-slate-500">篇 (已入库)</span>
           </div>
         </div>
@@ -131,6 +131,13 @@ const categoryOptions = computed(() => {
   return Array.from(cats);
 });
 
+const completedDocCount = computed(() => {
+  return documentStore.documents.filter((d: DocumentItem) => {
+    const s = (d.status || '').toLowerCase();
+    return s === 'active' || s === 'completed';
+  }).length;
+});
+
 const departmentCount = computed(() => {
   return departmentOptions.value.length || 0;
 });
@@ -154,8 +161,9 @@ const filteredDocuments = computed(() => {
       return false;
     }
     if (activeFilters.value.status) {
-      const s = doc.status.toLowerCase();
+      const s = (doc.status || '').toLowerCase();
       const target = activeFilters.value.status.toLowerCase();
+      if (target === 'queued' && s !== 'queued') return false;
       if (target === 'completed' && !(s === 'completed' || s === 'active')) return false;
       if (target === 'running' && !(s === 'running' || s === 'process')) return false;
       if (target === 'pending_review' && s !== 'pending_review') return false;

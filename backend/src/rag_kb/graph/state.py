@@ -60,6 +60,9 @@ class IngestState(TypedDict):
     # 异常中断与诊断
     error: Optional[str]
     failed_step: Optional[int]
+    resume_from_step: Optional[int]
+    force_overwrite: Optional[bool]
+    dedup_res: Optional[Dict[str, Any]]
 
 def get_default_state(
     file_name: str,
@@ -84,6 +87,8 @@ def get_default_state(
         }
         for i, name in enumerate(STEP_NAMES)
     ]
+    if steps_initial:
+        steps_initial[0]["skip_review"] = bool(skip_review)
 
     state: IngestState = {
         "doc_id": actual_doc_id,
@@ -125,6 +130,9 @@ def get_default_state(
         "tsv_strings": [],
 
         "error": None,
-        "failed_step": None
+        "failed_step": None,
+        "resume_from_step": None,
+        "force_overwrite": False,
+        "dedup_res": {},
     }
     return state

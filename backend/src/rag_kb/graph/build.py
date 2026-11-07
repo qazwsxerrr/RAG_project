@@ -31,6 +31,7 @@ from rag_kb.graph.edges import (
     NODE_SPLITTER,
     NODE_EMBEDDER,
     NODE_STORE,
+    route_from_start,
     route_after_ingest,
     route_after_mineru,
     route_after_loader,
@@ -95,8 +96,8 @@ def create_ingest_graph_builder() -> StateGraph:
     builder.add_node(NODE_EMBEDDER, node_embedder)
     builder.add_node(NODE_STORE, node_store)
 
-    # 2. 连接拓扑条件边
-    builder.add_edge(START, NODE_INGEST)
+    # 2. 连接拓扑条件边（START 支持按 resume_from_step 安全断点续跑跳转）
+    builder.add_conditional_edges(START, route_from_start)
     builder.add_conditional_edges(NODE_INGEST, route_after_ingest)
     builder.add_conditional_edges(NODE_MINERU, route_after_mineru)
     builder.add_conditional_edges(NODE_LOADER, route_after_loader)

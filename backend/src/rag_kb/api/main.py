@@ -36,11 +36,21 @@ async def lifespan(app: FastAPI):
     # 3. 启动时保证数据库表与 pgvector 扩展已就绪 (Phase-6: 严格 Fail-Fast，异常坚决抛出中断)
     await init_db()
 
-    # 4. Phase-7 §4.3: 启动时执行一次大模型熔断状态机冷启动历史对齐 (hydrate_once)
+    # 4. Phase-8: 严格校验真实 Redis 服务在线并启动 Redis Streams 异步文档入库消费队列
+    from rag_kb.core.redis_client import verify_redis_on_startup, close_redis_clients
+    from rag_kb.services.pipeline.ingest_queue import ingest_queue_service
+    await verify_redis_on_startup()
+    await ingest_queue_service.start_worker()
+
+    # 5. Phase-7 §4.3: 启动时执行一次大模型熔断状态机冷启动历史对齐 (hydrate_once)
     from rag_kb.api.system import hydrate_llm_health_tracker_from_db
     await hydrate_llm_health_tracker_from_db()
 
-    yield
+    try:
+        yield
+    finally:
+        await ingest_queue_service.stop_worker()
+        await close_redis_clients()
 
 def create_app() -> FastAPI:
     """FastAPI 工厂方法"""
@@ -90,14 +100,22 @@ def create_app() -> FastAPI:
         except Exception as e:
             db_status = f"error: {str(e)}"
 
+        redis_status = "offline"
+        try:
+            from rag_kb.core.redis_client import check_redis_health
+            redis_status = await check_redis_health()
+        except Exception as e:
+            redis_status = f"error: {str(e)}"
+
         oss_configured = bool(settings.OSS_ACCESS_KEY_ID and settings.OSS_ENDPOINT and settings.OSS_BUCKET_NAME)
 
         return {
-            "status": "ok" if db_status == "online" else "degraded",
+            "status": "ok" if (db_status == "online" and redis_status == "online") else "degraded",
             "app_name": "rag_kb_enterprise",
             "version": "2.0.0",
             "engine": "LangGraph 1.2+",
             "db_status": db_status,
+            "redis_status": redis_status,
             "oss_status": "online" if oss_configured else "unconfigured",
             "model_name": settings.active_model_name,
             "embedding_model": settings.EMBEDDING_MODEL

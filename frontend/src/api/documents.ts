@@ -69,6 +69,7 @@ export const documentsApi = {
 
     const knownEvents = [
       'initial_state',
+      'pipeline_queued',
       'step_started',
       'step_progress',
       'step_completed',

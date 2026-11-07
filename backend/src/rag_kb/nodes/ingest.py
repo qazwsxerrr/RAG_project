@@ -30,12 +30,19 @@ class IngestNode(BaseNode):
         file_bytes = state.get("file_bytes")
         file_name = state.get("file_name", "document.pdf")
         temp_file_path = state.get("temp_file_path")
+        existing_oss_url = state.get("raw_oss_url")
+        existing_hash = state.get("file_hash")
+
+        # Phase-8 “先存后返 202” 快速直通：若上传接入网关已提前完成 OSS 直传与 SHA-256 校验，此处直接复用，避免二次重复上传与内存膨胀
+        if existing_oss_url and str(existing_oss_url).strip() and existing_hash:
+            state["overall_status"] = IngestStatus.INGEST.value
+            state["file_bytes"] = None
+            return state
 
         # 优先从内存 bytes 获取，若为空则从临时文件路径读取
         if not file_bytes and temp_file_path and Path(temp_file_path).exists():
             with open(temp_file_path, "rb") as f:
                 file_bytes = f.read()
-            state["file_bytes"] = file_bytes
 
         if not file_bytes:
             raise ValueError(f"【接入错误】未获取到文件二进制内容: {file_name}")
@@ -54,6 +61,7 @@ class IngestNode(BaseNode):
             target_oss_key
         )
         state["raw_oss_url"] = raw_oss_url
+        state["file_bytes"] = None
         state["overall_status"] = IngestStatus.INGEST.value
 
         return state

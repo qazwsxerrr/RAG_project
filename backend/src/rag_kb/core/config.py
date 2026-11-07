@@ -82,6 +82,26 @@ class Settings(BaseSettings):
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "rag_enterprise"
     DATABASE_URL: Optional[str] = None
+    DB_POOL_SIZE: int = 20
+    DB_MAX_OVERFLOW: int = 30
+    DB_POOL_TIMEOUT: int = 30
+
+    # ==================== Phase-8: Redis 高并发限流与异步削峰队列配置 ====================
+    REDIS_URL: str = "redis://127.0.0.1:6379/0"
+    INGEST_STREAM_KEY: str = "rag:stream:doc_ingest"
+    INGEST_CONSUMER_GROUP: str = "rag_ingest_workers"
+    INGEST_WORKER_CONCURRENCY: int = 3
+    INGEST_MAX_AUTO_RETRIES: int = 1
+    INGEST_PEL_IDLE_MS: int = 900_000
+    MAX_UPLOAD_SIZE_MB: int = 100
+    UPLOAD_DEDUP_LOCK_TTL_SECONDS: int = 15
+    RATE_LIMIT_RETRIEVAL_PER_MINUTE: int = 30
+    RATE_LIMIT_UPLOAD_PER_MINUTE: int = 20
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+    MAX_CONCURRENT_CHAT_STREAMS_PER_USER: int = 3
+    ACTIVE_CHAT_STREAM_TTL_SECONDS: int = 180
+    PIPELINE_MEMORY_HISTORY_LIMIT: int = 200
+    PDF_RENDER_CONCURRENCY: int = 4
 
     @property
     def async_database_url(self) -> str:
