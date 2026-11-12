@@ -1,9 +1,4 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import DocumentListView from '../views/DocumentListView.vue';
-import DocumentUploadView from '../views/DocumentUploadView.vue';
-import RetrievalChatView from '../views/RetrievalChatView.vue';
-import ChannelStatusView from '../views/ChannelStatusView.vue';
-import AuthCallbackView from '../views/AuthCallbackView.vue';
 import { useAuthStore } from '../stores/auth';
 
 const routes = [
@@ -14,32 +9,32 @@ const routes = [
   {
     path: '/documents',
     name: 'DocumentList',
-    component: DocumentListView,
-    meta: { title: '文档知识库资产' },
+    component: () => import('../views/DocumentListView.vue'),
+    meta: { title: '文档列表' },
   },
   {
     path: '/documents/new',
     name: 'DocumentUpload',
-    component: DocumentUploadView,
+    component: () => import('../views/DocumentUploadView.vue'),
     meta: { title: '提交文档入库' },
   },
   {
     path: '/retrieval',
     name: 'RetrievalChat',
-    component: RetrievalChatView,
-    meta: { title: '智能问答检索' },
+    component: () => import('../views/RetrievalChatView.vue'),
+    meta: { title: '智能问答' },
   },
   {
     path: '/channels',
     name: 'ChannelStatus',
-    component: ChannelStatusView,
-    meta: { title: '大模型渠道状态与SLA监控' },
+    component: () => import('../views/ChannelStatusView.vue'),
+    meta: { title: '渠道状态' },
   },
   {
     path: '/auth/callback',
     name: 'AuthCallback',
-    component: AuthCallbackView,
-    meta: { title: '企业身份认证', public: true },
+    component: () => import('../views/AuthCallbackView.vue'),
+    meta: { title: '登录验证', public: true },
   },
   {
     path: '/chat',
@@ -54,7 +49,7 @@ export const router = createRouter({
 
 router.beforeEach(async (to, from, next) => {
   if (to.meta.title) {
-    document.title = `${to.meta.title} - 企业级多模态 RAG 智能知识工作台`;
+    document.title = `${to.meta.title} - 企业知识库`;
   }
 
   // 免守卫白名单端点 (OIDC 回调等)
@@ -66,15 +61,21 @@ router.beforeEach(async (to, from, next) => {
   if (!authStore.token) {
     try {
       await authStore.initAuth();
-      if (authStore.token) {
-        return next();
+      if (!authStore.token) {
+        sessionStorage.setItem('rag_auth_redirect', to.fullPath);
+        window.location.href = '/oauth2/authorization/corp-sso';
+        return;
       }
     } catch {
-      // 内存无票且换票失败，跳转企业 SSO
+      sessionStorage.setItem('rag_auth_redirect', to.fullPath);
+      window.location.href = '/oauth2/authorization/corp-sso';
+      return;
     }
-    sessionStorage.setItem('rag_auth_redirect', to.fullPath);
-    window.location.href = '/oauth2/authorization/corp-sso';
-    return;
+  }
+
+  // 新建文档上传页需具备 doc:upload 权限；仅查看已有文档进度 (?doc_id=...) 则放行交由对象权限校验
+  if (to.path === '/documents/new' && !to.query.doc_id && !authStore.hasPermission('doc:upload')) {
+    return next('/documents');
   }
 
   next();

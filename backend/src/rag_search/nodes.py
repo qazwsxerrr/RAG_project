@@ -299,7 +299,7 @@ async def hyde_node(
     summary_text = (
         f"专家假想技术文档二次召回 Top-{len(chunks)}"
         if chunks
-        else f"假想问答超时熔断保护，跳过本路"
+        else "假想问答超时熔断保护，跳过本路"
     )
     _emit_thinking(
         writer,
@@ -434,12 +434,14 @@ async def mmr_node(
         doc_id = str(c["document_id"])
         chunk_id = str(c["chunk_id"])
         asset_url = c.get("asset_url")
+        doc_title = c.get("document_title", "") or ""
+        is_pdf = doc_title.lower().endswith(".pdf")
 
         cit = {
             "citation_id": idx + 1,
             "chunk_id": chunk_id,
             "document_id": doc_id,
-            "document_title": c.get("document_title", ""),
+            "document_title": doc_title,
             "chunk_label": c.get("chunk_label", ""),
             "page_idx": c.get("page_idx", 0),
             "display_page": target_page,
@@ -448,8 +450,9 @@ async def mmr_node(
             "asset_url": asset_url,
             "raw_oss_url": c.get("raw_oss_url"),
             "preview_url": f"/api/v1/documents/{doc_id}/preview",
-            "page_render_url": f"/api/v1/documents/{doc_id}/pages/{target_page}",
+            "page_render_url": f"/api/v1/documents/{doc_id}/pages/{target_page}" if is_pdf else None,
             "asset_proxy_url": f"/api/v1/documents/chunks/{chunk_id}/asset" if asset_url else None,
+            "is_pdf": is_pdf,
             "score": c.get("score", 0.0)
         }
         citations.append(cit)

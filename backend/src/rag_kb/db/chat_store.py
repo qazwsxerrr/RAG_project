@@ -171,7 +171,7 @@ async def append_message(
         # 归属权校验 (BOLA 防御：严格校验 tenant_id 与 user_id 必须完全一致)
         if sess is not None:
             if sess.tenant_id != tenant_id or (user_id and sess.user_id != user_id):
-                raise PermissionError("【越权访问拦截】您无权向其他员工的会话追加消息 (BOLA Blocked)")
+                raise PermissionError("【越权访问拦截】您无权向其他员工的会话追加消息")
 
         # 统计当前会话中已经存在的 user 消息数量（客观事实）
         count_stmt = select(func.count(ChatMessage.id)).where(

@@ -215,7 +215,7 @@ async def upload_document(
     if not any(is_path_under_prefix(department_path, prefix) for prefix in user.allowed_department_prefixes):
         raise HTTPException(
             status_code=403,
-            detail=f"【越权访问拦截】您无权将文档上传至非授权部门目录: {department_path} (BOLA Blocked)"
+            detail=f"【越权访问拦截】您当前无权将文档上传至该部门目录: {department_path}"
         )
 
     doc_id = str(uuid.uuid4())
@@ -511,7 +511,7 @@ async def get_pipeline_status(
         mem_state = pipeline_manager.get_state(doc_id) or {}
         mem_dept = mem_state.get("department", "")
         if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权拦截】无权查看非本部门文档快照 (BOLA Blocked)")
+            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权查看其他部门的文档处理进度")
 
         if snapshot.pending_reviews or snapshot.overall_status != "completed":
             return snapshot
@@ -540,6 +540,8 @@ async def get_pipeline_status(
                     )
                     for r in db_reviews
                 ]
+                if len(snapshot.steps) >= 7 and snapshot.steps[6].status == "skipped":
+                    snapshot.steps[6].detail = "已跳过人工审核"
         except Exception:
             pass
         return snapshot
@@ -556,32 +558,42 @@ async def get_pipeline_status(
         raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id}")
     assert_doc_visible(user, doc)
 
-    if doc.pipeline_steps and isinstance(doc.pipeline_steps, list) and len(doc.pipeline_steps) == len(STEP_NAMES):
-        steps = [
-            PipelineStepStatus(
-                step_index=s.get("step_index", i + 1),
-                name=s.get("name", STEP_NAMES[i]),
-                status=s.get("status", "waiting"),
-                duration_ms=int(s.get("duration_ms") or 0),
-                error=s.get("error"),
-                detail=s.get("detail"),
-            )
-            for i, s in enumerate(doc.pipeline_steps)
-        ]
-    else:
-        steps = [
-            PipelineStepStatus(
-                step_index=i + 1,
-                name=name,
-                status="completed" if doc.overall_status == "active" else "waiting",
-                duration_ms=0
-            )
-            for i, name in enumerate(STEP_NAMES)
-        ]
-
     review_stmt = select(DocumentReviewItem).where(DocumentReviewItem.document_id == doc_uuid)
     review_res = await db.execute(review_stmt)
     db_reviews = review_res.scalars().all()
+    was_human_reviewed = any(r.status in ("approved", "modified") for r in db_reviews)
+    skipped_detail_text = "已跳过人工审核" if len(db_reviews) > 0 else "无图表项，无需审核"
+
+    if doc.pipeline_steps and isinstance(doc.pipeline_steps, list) and len(doc.pipeline_steps) == len(STEP_NAMES):
+        steps = []
+        for i, s in enumerate(doc.pipeline_steps):
+            raw_st = s.get("status", "waiting")
+            detail_val = s.get("detail")
+            if i == 6 and doc.overall_status == "active" and raw_st == "waiting" and not was_human_reviewed:
+                raw_st = "skipped"
+                detail_val = skipped_detail_text
+            steps.append(PipelineStepStatus(
+                step_index=s.get("step_index", i + 1),
+                name=s.get("name", STEP_NAMES[i]),
+                status=raw_st,
+                duration_ms=int(s.get("duration_ms") or 0),
+                error=s.get("error"),
+                detail=detail_val,
+            ))
+    else:
+        steps = []
+        for i, name in enumerate(STEP_NAMES):
+            if doc.overall_status == "active":
+                st_val = "skipped" if (i == 6 and not was_human_reviewed) else "completed"
+            else:
+                st_val = "waiting"
+            steps.append(PipelineStepStatus(
+                step_index=i + 1,
+                name=name,
+                status=st_val,
+                duration_ms=0,
+                detail=skipped_detail_text if st_val == "skipped" else None,
+            ))
 
     pending_review_items = [
         ReviewItem(
@@ -636,7 +648,7 @@ async def stream_pipeline_events(
     if state:
         mem_dept = state.get("department", "")
         if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权拦截】无权监听非本部门文档流 (BOLA Blocked)")
+            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权监听其他部门的文档进度流")
     else:
         try:
             doc_uuid = uuid.UUID(doc_id)
@@ -724,7 +736,7 @@ async def submit_pipeline_review(
     if state:
         mem_dept = state.get("department", "")
         if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权拦截】无权审核非本部门文档 (BOLA Blocked)")
+            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权审核其他部门的文档")
     else:
         doc = await db.get(Document, doc_uuid)
         if doc:
@@ -793,7 +805,7 @@ async def get_review_item_asset(
     if state:
         mem_dept = state.get("department", "")
         if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权拦截】无权查看非本部门图元资产 (BOLA Blocked)")
+            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权查看其他部门的文档图表")
     else:
         doc = await db.get(Document, doc_uuid)
         if doc:
@@ -879,6 +891,9 @@ async def get_document_chunk_asset_alias(
 # ==================== 6.1 原文预览与单页高清渲染 ====================
 
 import io
+import struct
+import zlib
+import numpy as np
 import pypdfium2 as pdfium
 from urllib.parse import quote
 
@@ -910,6 +925,30 @@ async def _fetch_pdf_bytes(raw_oss_url: str) -> bytes:
     return pdf_bytes
 
 
+def _encode_numpy_to_png(arr: np.ndarray) -> bytes:
+    """将 pypdfium2 渲染出的 RGB/RGBA uint8 矩阵无损编码为标准 PNG 字节流（零外部 PIL 依赖）"""
+    if arr.ndim != 3 or arr.shape[2] not in (3, 4):
+        raise ValueError(f"不支持的像素通道维度: {arr.shape}")
+    height, width, channels = arr.shape
+    color_type = 2 if channels == 3 else 6
+    scanlines = np.concatenate(
+        [np.zeros((height, 1), dtype=np.uint8), arr.reshape(height, width * channels)],
+        axis=1,
+    ).tobytes()
+
+    def _png_chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", zlib.compress(scanlines, level=6))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
 def _render_pdf_page_sync(pdf_bytes: bytes, page_num: int, scale: float) -> tuple[bytes, int]:
     """在独立工作线程执行 CPU 密集型 pypdfium2 渲染，严禁阻塞 FastAPI 主事件循环"""
     pdf = pdfium.PdfDocument(pdf_bytes)
@@ -918,10 +957,8 @@ def _render_pdf_page_sync(pdf_bytes: bytes, page_num: int, scale: float) -> tupl
         if page_num < 1 or page_num > total_pages:
             raise IndexError(f"页码超出范围: 1 - {total_pages}")
         page = pdf[page_num - 1]
-        pil_img = page.render(scale=scale).to_pil().convert("RGB")
-        buf = io.BytesIO()
-        pil_img.save(buf, format="PNG", optimize=True)
-        return buf.getvalue(), total_pages
+        rgb_array = page.render(scale=scale, rev_byteorder=True).to_numpy()
+        return _encode_numpy_to_png(rgb_array), total_pages
     finally:
         try:
             pdf.close()
@@ -993,7 +1030,7 @@ async def get_document_page_image(
     assert_doc_visible(user, doc)
 
     if not doc.title.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="单页超高精渲染仅支持 PDF 文档")
+        raise HTTPException(status_code=400, detail="单页图片预览仅支持 PDF 格式文档")
 
     pdf_bytes = await _fetch_pdf_bytes(doc.raw_oss_url)
     async with _get_pdf_render_sem():
@@ -1007,7 +1044,8 @@ async def get_document_page_image(
     headers = {
         "Cache-Control": "public, max-age=86400",
         "X-Total-Pages": str(total_pages),
-        "X-Current-Page": str(page_num)
+        "X-Current-Page": str(page_num),
+        "Access-Control-Expose-Headers": "X-Total-Pages, X-Current-Page",
     }
     return StreamingResponse(io.BytesIO(png_bytes), media_type="image/png", headers=headers)
 
@@ -1030,7 +1068,7 @@ async def resolve_duplicate(
     if state:
         mem_dept = state.get("department", "")
         if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权拦截】无权操作非本部门文档 (BOLA Blocked)")
+            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权操作其他部门的文档")
     else:
         doc = await db.get(Document, doc_uuid)
         if doc:
@@ -1086,7 +1124,7 @@ async def retry_pipeline(
     if state:
         mem_dept = state.get("department", "")
         if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权拦截】无权重试非本部门文档 (BOLA Blocked)")
+            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权重试其他部门的文档")
     else:
         if doc:
             assert_doc_visible(user, doc)
@@ -1149,9 +1187,9 @@ async def retry_pipeline(
     )
 
     retry_hint = (
-        f"已加入 Redis 异步队列，将直接从第 {effective_from_step} 节点断点续跑"
+        f"已重新提交处理，将从第 {effective_from_step} 步继续执行"
         if effective_from_step > 1
-        else "已加入 Redis 异步队列，将从第 1 节点完整重新解析"
+        else "已重新提交处理，将从第 1 步重新解析"
     )
     await pipeline_manager.broadcast(doc_id, "pipeline_queued", {
         "doc_id": doc_id,

@@ -23,7 +23,7 @@ class EnrichNode(BaseNode):
     """节点 5: 图片多模态语义描述 (VLM)"""
 
     def __init__(self):
-        super().__init__(step_index=5, name="多模态配图增强")
+        super().__init__(step_index=5, name="图片描述")
 
     async def process(
         self,
@@ -43,7 +43,7 @@ class EnrichNode(BaseNode):
                 "event": "step_progress",
                 "step": 5,
                 "status": "running",
-                "detail": f"正在并发调用 VLM 分析 {len(image_elements)} 张配图语义..."
+                "detail": f"正在生成 {len(image_elements)} 张配图的内容说明..."
             })
 
         async def _process_image(idx: int, img_el: Dict[str, Any]):
@@ -88,7 +88,7 @@ class EnrichNode(BaseNode):
                 "event": "step_progress",
                 "step": 5,
                 "status": "completed",
-                "detail": f"完成 {len(image_elements)} 张配图多模态描述"
+                "detail": f"已完成 {len(image_elements)} 张配图说明生成"
             })
 
         return state

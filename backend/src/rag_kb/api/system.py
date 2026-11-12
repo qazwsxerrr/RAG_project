@@ -34,16 +34,31 @@ _RANGE_DELTAS = {
     "30d": timedelta(days=30),
 }
 
-_VENDOR_TITLES = {
-    "KEDAYA": "KEDAYA (GROK 旗舰主节点)",
-    "SILICONFLOW": "SILICONFLOW (高可用容灾备选池)",
-    "DEEPSEEK": "DEEPSEEK (官方高可用候选池)",
-    "DASHSCOPE": "DASHSCOPE (阿里云百炼服务池)",
-    "ZHIPU": "ZHIPU (智谱清言大模型池)",
-    "OPENAI": "OPENAI (官方模型候选池)",
-    "VOLCES": "VOLCES (火山引擎服务池)",
-    "INFRA": "EMBEDDING & RERANK (混合检索算力支持)",
+_PROVIDER_LABELS = {
+    "SILICONFLOW": "SiliconFlow",
+    "DEEPSEEK": "DeepSeek",
+    "DASHSCOPE": "通义百炼",
+    "ZHIPU": "智谱",
+    "OPENAI": "OpenAI",
+    "VOLCES": "火山引擎",
 }
+
+
+def _build_dynamic_vendor_title(vendor_id: str, group_channels: List[Dict[str, Any]]) -> str:
+    """根据分组下真实节点的角色与配置模型动态生成分组标题，杜绝写死特定模型或主备身份"""
+    provider_label = _PROVIDER_LABELS.get(vendor_id, vendor_id)
+    roles = {c.get("role") for c in group_channels}
+    models = [c.get("model", "") for c in group_channels if c.get("model")]
+
+    if roles == {"PRIMARY"} and len(models) == 1:
+        return f"{provider_label} · 主用模型服务 ({models[0]})"
+    if "PRIMARY" in roles and "FALLBACK" in roles:
+        return f"{provider_label} · 主备模型服务"
+    if "PRIMARY" in roles:
+        return f"{provider_label} · 主用模型服务"
+    if "FALLBACK" in roles:
+        return f"{provider_label} · 备用模型服务"
+    return f"{provider_label} 模型服务"
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -282,21 +297,21 @@ async def get_llm_channels_status(
         if p not in providers_found:
             providers_found.append(p)
 
-    vendor_groups = [
-        {
+    vendor_groups = []
+    for p in providers_found:
+        p_channels = [c for c in channel_list if c["provider"].upper() == p]
+        vendor_groups.append({
             "vendor_id": p,
-            "vendor_name": _VENDOR_TITLES.get(p, f"{p} (模型服务池)"),
-            "channels": [c for c in channel_list if c["provider"].upper() == p],
-        }
-        for p in providers_found
-    ]
+            "vendor_name": _build_dynamic_vendor_title(p, p_channels),
+            "channels": p_channels,
+        })
     vendor_groups.append({
         "vendor_id": "INFRA",
-        "vendor_name": _VENDOR_TITLES["INFRA"],
+        "vendor_name": "向量与排序服务",
         "channels": infra_channels,
     })
 
-    overall_sla = round((total_cluster_success / total_cluster_calls * 100.0), 1) if total_cluster_calls > 0 else 100.0
+    overall_sla = round((total_cluster_success / total_cluster_calls * 100.0), 1) if total_cluster_calls > 0 else None
     overall_ttft = int(sum(all_cluster_ttfts) / len(all_cluster_ttfts)) if all_cluster_ttfts else 0
 
     return {

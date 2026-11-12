@@ -17,10 +17,10 @@ from rag_kb.services.parser.mineru_adapter import mineru_adapter
 from rag_kb.utils.oss import oss_service
 
 class MineruNode(BaseNode):
-    """节点 2: MinerU 解析"""
+    """节点 2: 版面解析"""
 
     def __init__(self):
-        super().__init__(step_index=2, name="MinerU解析")
+        super().__init__(step_index=2, name="版面解析")
 
     async def process(
         self,
@@ -58,7 +58,7 @@ class MineruNode(BaseNode):
                 "event": "step_progress",
                 "step": 2,
                 "status": "running",
-                "detail": "正在调用 MinerU 解析引擎进行高精版面分析..."
+                "detail": "正在解析文档版面结构、表格与配图..."
             })
 
         # 异步线程执行解析

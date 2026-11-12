@@ -1,7 +1,7 @@
 <template>
   <div class="flex flex-col items-center justify-center min-h-[60vh] gap-3 text-slate-600">
-    <div class="w-8 h-8 border-3 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
-    <p class="text-sm font-medium">正在完成企业身份核验与安全换票...</p>
+    <div class="w-8 h-8 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"></div>
+    <p class="text-sm font-medium">正在登录，请稍候...</p>
   </div>
 </template>
 

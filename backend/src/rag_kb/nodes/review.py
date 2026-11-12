@@ -98,7 +98,9 @@ class ReviewNode(BaseNode):
             writer({
                 "event": "review_completed",
                 "doc_id": doc_id,
-                "reviewed_items_count": len(pending_reviews)
+                "reviewed_items_count": len(pending_reviews),
+                "items": pending_reviews,
+                "pending_reviews": pending_reviews,
             })
 
         state["overall_status"] = IngestStatus.REVIEW.value

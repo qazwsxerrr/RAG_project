@@ -49,7 +49,7 @@ export interface ChannelsStatusResponse {
   status: string;
   range?: string;
   updated_at: string;
-  overall_sla: number;
+  overall_sla: number | null;
   overall_avg_ttft: number;
   total_channels: number;
   groups: VendorGroup[];

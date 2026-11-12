@@ -19,7 +19,7 @@
         <tbody class="divide-y divide-slate-100 font-normal">
           <tr v-if="documents.length === 0">
             <td colspan="7" class="py-12 text-center text-slate-400">
-              暂未收录符合条件的文档资产
+              暂无符合条件的文档
             </td>
           </tr>
 
@@ -37,12 +37,9 @@
                 <div class="min-w-0 flex-1">
                   <div 
                     class="font-medium text-slate-900 group-hover:text-blue-600 transition-colors truncate"
-                    :title="doc.file_name"
+                    :title="`${doc.file_name}\nID: ${doc.doc_id}`"
                   >
                     {{ doc.file_name }}
-                  </div>
-                  <div class="text-[10px] text-slate-400 font-mono mt-0.5 truncate max-w-[220px]" :title="'ID: ' + doc.doc_id">
-                    ID: {{ doc.doc_id }}
                   </div>
                 </div>
               </div>
@@ -84,25 +81,33 @@
             <!-- 操作 (单行靠右) -->
             <td class="py-3.5 px-4 whitespace-nowrap text-right">
               <div class="flex items-center justify-end space-x-1">
+                <button
+                  @click="$emit('previewDoc', doc)"
+                  class="text-slate-600 hover:text-blue-600 px-2 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors cursor-pointer"
+                  title="在新标签页打开原文档"
+                >
+                  预览
+                </button>
+                <span class="text-slate-200">|</span>
                 <button 
                   @click="$emit('viewChunks', doc)"
-                  class="text-slate-600 hover:text-blue-600 px-2 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors"
+                  class="text-slate-600 hover:text-blue-600 px-2 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors cursor-pointer"
                 >
                   切片详情
                 </button>
                 <span class="text-slate-200">|</span>
                 <button 
                   @click="$emit('viewProgress', doc)"
-                  class="text-slate-600 hover:text-slate-900 px-2 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors"
+                  class="text-slate-600 hover:text-slate-900 px-2 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors cursor-pointer"
                 >
-                  流水线
+                  处理进度
                 </button>
                 <template v-if="canDelete">
                   <span class="text-slate-200">|</span>
                   <button 
                     @click="$emit('deleteDoc', doc)"
-                    class="text-slate-400 hover:text-rose-600 p-1.5 rounded-md transition-colors"
-                    title="删除此文档及所有切片"
+                    class="text-slate-400 hover:text-rose-600 p-1.5 rounded-md transition-colors cursor-pointer"
+                    title="删除文档"
                   >
                     <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                   </button>
@@ -128,6 +133,7 @@ withDefaults(defineProps<{
 });
 
 defineEmits<{
+  (e: 'previewDoc', doc: DocumentItem): void;
   (e: 'viewChunks', doc: DocumentItem): void;
   (e: 'viewProgress', doc: DocumentItem): void;
   (e: 'deleteDoc', doc: DocumentItem): void;

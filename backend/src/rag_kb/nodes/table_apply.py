@@ -27,7 +27,7 @@ class TableApplyNode(BaseNode):
     """节点 8: 表格与描述回填 Markdown (生成 full.enhanced.md)"""
 
     def __init__(self):
-        super().__init__(step_index=8, name="表格与描述回填")
+        super().__init__(step_index=8, name="表格回填")
 
     async def process(
         self,
@@ -46,7 +46,7 @@ class TableApplyNode(BaseNode):
                 "event": "step_progress",
                 "step": 8,
                 "status": "running",
-                "detail": "正在回填多模态增强版 Markdown 与图文元数据..."
+                "detail": "正在合并图表说明与文档正文..."
             })
 
         # 获取原始 Markdown 文本
@@ -299,7 +299,7 @@ class TableApplyNode(BaseNode):
                 "event": "step_progress",
                 "step": 8,
                 "status": "completed",
-                "detail": "成功生成增强版 Markdown 并归档上云至阿里云 OSS"
+                "detail": "已完成图文内容合并与归档保存"
             })
 
         return state

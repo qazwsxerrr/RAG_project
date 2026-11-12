@@ -1,12 +1,12 @@
 <template>
   <div class="document-upload-view h-full overflow-y-auto py-6 px-4 sm:px-8 max-w-7xl mx-auto space-y-5 animate-in fade-in duration-300">
-    <!-- 顶部状态栏与操作导航 (对齐参考图顶栏结构) -->
+    <!-- 顶部状态栏与操作导航 -->
     <div class="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-slate-200/80">
       <div class="flex items-center space-x-3">
         <!-- 返回文档大盘按钮 -->
         <router-link 
           to="/documents"
-          class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200/80 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium transition-all shadow-2xs cursor-pointer"
+          class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200/80 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium transition-all shadow-sm cursor-pointer"
         >
           <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
           <span>返回</span>
@@ -14,7 +14,7 @@
 
         <!-- 当前文件标题 -->
         <h2 class="text-sm sm:text-base font-bold text-slate-900 tracking-tight truncate max-w-xs sm:max-w-md">
-          {{ currentFileName || (currentDocId ? '文档流水线流转详情' : '提交文档入库') }}
+          {{ currentFileName || (currentDocId ? '文档处理进度' : '提交文档入库') }}
         </h2>
 
         <!-- 状态胶囊徽标 (动态联动当前最新执行状态) -->
@@ -24,8 +24,10 @@
           :class="[
             currentStatus === 'queued' ? 'bg-amber-50 text-amber-700 border border-amber-200/70' :
             currentStatus === 'pending_review' ? 'bg-purple-50 text-purple-700 border border-purple-200/70' :
+            currentStatus === 'duplicate_warning' ? 'bg-orange-50 text-orange-700 border border-orange-200/70' :
             currentStatus === 'completed' || currentStatus === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200/70' :
             currentStatus === 'failed' ? 'bg-rose-50 text-rose-700 border border-rose-200/70' :
+            currentStatus === 'cancelled' ? 'bg-slate-100 text-slate-600 border border-slate-200' :
             'bg-blue-50 text-blue-700 border border-blue-200/70'
           ]"
         >
@@ -34,8 +36,10 @@
             :class="[
               currentStatus === 'queued' ? 'bg-amber-500 animate-pulse' :
               currentStatus === 'pending_review' ? 'bg-purple-500 animate-ping' :
+              currentStatus === 'duplicate_warning' ? 'bg-orange-500 animate-pulse' :
               currentStatus === 'completed' || currentStatus === 'active' ? 'bg-emerald-600' :
               currentStatus === 'failed' ? 'bg-rose-600' :
+              currentStatus === 'cancelled' ? 'bg-slate-400' :
               'bg-blue-600 animate-pulse'
             ]"
           ></span>
@@ -43,8 +47,10 @@
             {{ 
               currentStatus === 'queued' ? '排队中' :
               currentStatus === 'pending_review' ? '待审核' :
+              currentStatus === 'duplicate_warning' ? '待处理重复' :
               currentStatus === 'completed' || currentStatus === 'active' ? '已完成' :
-              currentStatus === 'failed' ? '异常' : '流转中'
+              currentStatus === 'failed' ? '异常' :
+              currentStatus === 'cancelled' ? '已取消' : '处理中'
             }}
           </span>
         </span>
@@ -70,9 +76,9 @@
       <!-- 右侧快速操作按钮组 -->
       <div class="flex items-center space-x-2">
         <button 
-          v-if="currentDocId && !showFormAgain"
+          v-if="currentDocId && !showFormAgain && authStore.hasPermission('doc:upload')"
           @click="showFormAgain = true"
-          class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-medium shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+          class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-medium shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
         >
           <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           <span>录入新文件</span>
@@ -81,25 +87,33 @@
         <button 
           v-if="showFormAgain && currentDocId"
           @click="showFormAgain = false"
-          class="px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-200/80 text-slate-700 rounded-xl text-xs font-medium shadow-2xs flex items-center gap-1.5 transition-colors cursor-pointer"
+          class="px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-200/80 text-slate-700 rounded-xl text-xs font-medium shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
         >
-          <span>查看流转看板 &rarr;</span>
+          <span>查看处理进度 &rarr;</span>
         </button>
-
-        <router-link 
-          to="/documents"
-          class="px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-200/80 text-slate-600 hover:text-slate-900 rounded-xl text-xs font-medium shadow-2xs transition-colors"
-        >
-          文档列表
-        </router-link>
       </div>
     </div>
 
-    <!-- 上传表单卡片 (当未选择文档或用户点击录入新文件时显示) -->
+    <!-- 上传表单卡片 (仅具备 doc:upload 权限时渲染) -->
     <DocumentForm 
-      v-if="!currentDocId || showFormAgain"
+      v-if="(!currentDocId || showFormAgain) && authStore.hasPermission('doc:upload')"
       @submitted="handleSubmitted" 
     />
+
+    <!-- 无上传权限且未指定 doc_id 时的安全兜底提示 -->
+    <div
+      v-else-if="!currentDocId && !authStore.hasPermission('doc:upload')"
+      class="bg-white border border-slate-200 rounded-2xl p-10 text-center space-y-3 max-w-lg mx-auto"
+    >
+      <div class="text-sm font-bold text-slate-800">暂无文档上传权限</div>
+      <p class="text-xs text-slate-500">当前账号仅支持查阅与检索知识文档，如需上传新文档请联系管理员开通权限。</p>
+      <router-link
+        to="/documents"
+        class="inline-flex items-center gap-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-xl transition-colors"
+      >
+        返回文档列表
+      </router-link>
+    </div>
 
     <!-- 关键流转节点监控看板与实时控制台 -->
     <div v-if="currentDocId && !showFormAgain" class="space-y-5">
@@ -109,6 +123,7 @@
         :fileName="currentFileName"
         :autoConnect="true"
         @statusChange="handleStatusChange"
+        @fileNameChange="handleFileNameChange"
         @reviewRequired="handleReviewRequired"
         @duplicateWarning="handleDuplicateWarning"
         @completed="handleCompleted"
@@ -138,16 +153,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
-import { useRoute } from 'vue-router';
+import { ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import DocumentForm from '../components/documents/DocumentForm.vue';
 import PipelineSteps from '../components/documents/PipelineSteps.vue';
 import ReviewDialog from '../components/documents/ReviewDialog.vue';
 import DuplicateDialog from '../components/documents/DuplicateDialog.vue';
 import type { ReviewItem } from '../types';
 import { documentsApi } from '../api/documents';
+import { useAuthStore } from '../stores/auth';
 
 const route = useRoute();
+const router = useRouter();
+const authStore = useAuthStore();
 const pipelineStepsRef = ref<any>(null);
 
 const currentDocId = ref<string>('');
@@ -158,6 +176,12 @@ const copied = ref<boolean>(false);
 
 const handleStatusChange = (status: string) => {
   currentStatus.value = status;
+};
+
+const handleFileNameChange = (fileName: string) => {
+  if (fileName) {
+    currentFileName.value = fileName;
+  }
 };
 
 // 审核模态框状态
@@ -183,6 +207,7 @@ const handleSubmitted = (docId: string, fileName: string) => {
   currentFileName.value = fileName;
   currentStatus.value = 'queued';
   showFormAgain.value = false;
+  router.replace({ path: '/documents/new', query: { doc_id: docId } });
 };
 
 const handleReviewRequired = (items: ReviewItem[], initialIndex: number = 0) => {
@@ -209,7 +234,9 @@ const handleDuplicateWarning = (oldId?: string) => {
 
 const handleDuplicateResolved = (action: string) => {
   duplicateModalVisible.value = false;
-  if (action !== 'cancel') {
+  if (action === 'cancel') {
+    currentStatus.value = 'cancelled';
+  } else {
     pipelineStepsRef.value?.reconnect();
   }
 };
@@ -224,23 +251,33 @@ const handleFailed = (err: string) => {
   console.warn('[流水线执行异常] docId:', currentDocId.value, err);
 };
 
-onMounted(async () => {
-  // 支持从 URL Query 参数还原文档监控: /documents/new?doc_id=xxx
-  const qDocId = route.query.doc_id as string;
-  if (qDocId) {
-    currentDocId.value = qDocId;
-    try {
-      const snap = await documentsApi.getPipelineStatus(qDocId);
-      if (snap && snap.file_name) {
-        currentFileName.value = snap.file_name;
-      }
-      if (snap && (snap.overall_status === 'duplicate_warning' || snap.is_duplicate_warning)) {
-        matchedDocId.value = snap.matched_doc_id;
-        duplicateModalVisible.value = true;
-      }
-    } catch (e) {
-      console.warn('获取文档快照标题失败:', e);
+// 监听路由 Query 参数变化：从带 doc_id 的进度页点击左侧“提交入库”切回 /documents/new 时重置为上传表单
+watch(
+  () => route.query.doc_id,
+  (newDocId) => {
+    const qDocId = typeof newDocId === 'string' ? newDocId.trim() : '';
+    if (!qDocId) {
+      currentDocId.value = '';
+      currentFileName.value = '';
+      currentStatus.value = 'running';
+      showFormAgain.value = false;
+      reviewModalVisible.value = false;
+      duplicateModalVisible.value = false;
+      pendingReviews.value = [];
+      matchedDocId.value = undefined;
+      return;
     }
-  }
-});
+    if (qDocId !== currentDocId.value) {
+      currentDocId.value = qDocId;
+      currentFileName.value = '';
+      currentStatus.value = 'running';
+      showFormAgain.value = false;
+      reviewModalVisible.value = false;
+      duplicateModalVisible.value = false;
+      pendingReviews.value = [];
+      matchedDocId.value = undefined;
+    }
+  },
+  { immediate: true }
+);
 </script>

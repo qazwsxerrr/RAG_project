@@ -187,22 +187,47 @@ class IngestPipelineManager:
         if not state:
             return None
 
-        step_statuses = [
-            PipelineStepStatus(
-                step_index=s.get("step_index", i + 1),
-                name=s.get("name", STEP_NAMES[i]),
-                status=s.get("status", "waiting"),
-                duration_ms=int(s.get("duration_ms") or 0),
-                error=s.get("error")
-            )
-            for i, s in enumerate(state.get("steps", []))
-        ]
-
         pending_reviews_raw = state.get("pending_reviews", [])
         reviews = [
             ReviewItem(**r) if isinstance(r, dict) else r
             for r in pending_reviews_raw
         ]
+
+        overall_status = state.get("overall_status", "pending")
+        current_step_index = int(state.get("current_step_index", 1) or 1)
+        was_human_reviewed = any(
+            getattr(r, "status", None) in ("approved", "modified") for r in reviews
+        )
+        raw_steps = state.get("steps", [])
+        step6_done = (
+            len(raw_steps) >= 6
+            and isinstance(raw_steps[5], dict)
+            and raw_steps[5].get("status") == "completed"
+        )
+
+        step_statuses = []
+        for i, s in enumerate(raw_steps):
+            raw_st = s.get("status", "waiting")
+            detail_val = s.get("detail")
+            if (
+                i == 6
+                and raw_st == "waiting"
+                and not was_human_reviewed
+                and (overall_status in ("completed", "active") or (step6_done and current_step_index >= 8))
+            ):
+                raw_st = "skipped"
+                detail_val = "已跳过人工审核" if len(reviews) > 0 else "无图表项，无需审核"
+
+            step_statuses.append(
+                PipelineStepStatus(
+                    step_index=s.get("step_index", i + 1),
+                    name=s.get("name", STEP_NAMES[i]),
+                    status=raw_st,
+                    duration_ms=int(s.get("duration_ms") or 0),
+                    error=s.get("error"),
+                    detail=detail_val,
+                )
+            )
 
         dedup_info = state.get("dedup_res") or {}
         is_dup = bool(dedup_info.get("is_duplicate"))
@@ -211,11 +236,11 @@ class IngestPipelineManager:
         return PipelineSnapshotResponse(
             doc_id=doc_id,
             file_name=state.get("file_name", "unknown"),
-            overall_status=state.get("overall_status", "pending"),
-            current_step_index=state.get("current_step_index", 1),
+            overall_status=overall_status,
+            current_step_index=current_step_index,
             current_step_name=state.get("current_step_name", STEP_NAMES[0]),
             steps=step_statuses,
-            requires_review=bool(reviews and state.get("overall_status") == IngestStatus.REVIEW.value),
+            requires_review=bool(reviews and overall_status == IngestStatus.REVIEW.value),
             pending_reviews=reviews,
             is_duplicate_warning=is_dup,
             matched_doc_id=matched_id

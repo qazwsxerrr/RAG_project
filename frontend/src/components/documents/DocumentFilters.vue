@@ -1,5 +1,5 @@
 <template>
-  <div class="rounded-xl px-3 py-1.5 border border-slate-200 bg-white flex flex-wrap items-center gap-2 shadow-xs">
+  <div class="rounded-xl px-3 py-1.5 border border-slate-200 bg-white flex flex-wrap items-center gap-2 shadow-sm">
     <!-- 搜索输入 (无独立边框，自然融合) -->
     <div class="relative flex-1 min-w-[200px] flex items-center">
       <svg class="w-3.5 h-3.5 text-slate-400 absolute left-1 pointer-events-none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>

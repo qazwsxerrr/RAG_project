@@ -1,16 +1,10 @@
 <template>
   <div class="glass-panel rounded-2xl p-6 sm:p-8 shadow-sm border border-slate-200/90 bg-white text-slate-800 max-w-4xl mx-auto">
     <div class="mb-6 pb-4 border-b border-slate-100 flex items-center justify-between">
-      <div>
-        <h2 class="text-lg font-bold text-slate-900 tracking-tight flex items-center gap-2">
-          <svg class="w-5 h-5 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          提交文档入库
-        </h2>
-        <p class="text-xs text-slate-500 mt-1">支持多模态高精版面分析（MinerU）、表格/图片 VLM 语义增强与三路混合向量索引</p>
-      </div>
-      <span class="text-xs text-slate-400 font-mono">
-        Phase 4 生产流水线
-      </span>
+      <h2 class="text-lg font-bold text-slate-900 tracking-tight flex items-center gap-2">
+        <svg class="w-5 h-5 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        提交文档入库
+      </h2>
     </div>
 
     <form @submit.prevent="handleSubmit" class="space-y-6">
@@ -145,7 +139,7 @@
             class="rounded bg-white border-slate-300 text-blue-600 focus:ring-0 focus:ring-offset-0 w-4 h-4 cursor-pointer"
           />
           <label for="skip-review" class="text-xs text-slate-600 select-none cursor-pointer">
-            跳过第 7 步表格人工审核（全自动入库，适用于后台无人值守批量导入）
+            跳过表格与图表人工审核
           </label>
         </div>
       </div>
@@ -166,7 +160,7 @@
           class="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-sm shadow-blue-500/25 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <svg v-if="submitting" class="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-          <span>{{ submitting ? '正在上传启动流水线...' : '提交入库' }}</span>
+          <span>{{ submitting ? '正在上传文件...' : '提交入库' }}</span>
         </button>
       </div>
     </form>

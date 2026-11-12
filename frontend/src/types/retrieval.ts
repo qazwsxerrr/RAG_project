@@ -28,6 +28,7 @@ export interface CitationSource {
   page_render_url?: string;
   asset_proxy_url?: string;
   total_pages?: number;
+  is_pdf?: boolean;
   score?: number;
   is_table?: boolean;
   table_html?: string;

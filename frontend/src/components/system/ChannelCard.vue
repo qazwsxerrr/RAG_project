@@ -9,7 +9,7 @@
         <div class="flex items-center gap-2.5 min-w-0">
           <!-- 厂商/模型矢量徽标 -->
           <div class="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" :class="getIconBgClass(channel)">
-            <svg v-if="channel.provider === 'kedaya' || channel.name.includes('grok')" class="w-4 h-4 text-purple-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><path d="m4.93 4.93 14.14 14.14"/></svg>
+            <svg v-if="channel.role === 'PRIMARY'" class="w-4 h-4 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
             <svg v-else-if="channel.model.includes('deepseek')" class="w-4 h-4 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 16.1A5 5 0 0 1 5.9 14h12.2a5 5 0 0 1 3.9 2.1"/><path d="M12 2v10"/><circle cx="12" cy="7" r="3"/></svg>
             <svg v-else-if="channel.model.includes('qwen')" class="w-4 h-4 text-teal-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
             <svg v-else class="w-4 h-4 text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
@@ -17,7 +17,7 @@
 
           <!-- 模型标题与子信息 -->
           <div class="min-w-0">
-            <h3 class="text-xs font-bold text-slate-800 truncate group-hover/card:text-blue-600 transition-colors">
+            <h3 class="text-xs font-bold text-slate-800 truncate group-hover/card:text-blue-600 transition-colors" :title="formatDisplayName(channel)">
               {{ formatDisplayName(channel) }}
             </h3>
             <p class="text-[10px] text-slate-400 font-mono truncate" :title="channel.model">
@@ -26,16 +26,13 @@
           </div>
         </div>
 
-        <!-- 角色与权重标签 -->
+        <!-- 角色标签 -->
         <div class="flex items-center gap-1 shrink-0">
           <span 
-            class="text-[9px] font-medium px-1.5 py-0.5 rounded"
+            class="text-[10px] font-medium px-2 py-0.5 rounded"
             :class="getRoleTagClass(channel.role)"
           >
             {{ getRoleLabel(channel.role) }}
-          </span>
-          <span class="text-[9px] text-slate-400 font-mono">
-            {{ channel.weight }}w
           </span>
         </div>
       </div>
@@ -75,10 +72,10 @@
     <div class="pt-3 mt-3 border-t border-slate-100/70 flex items-center justify-between text-[10px] text-slate-400 font-mono">
       <div class="flex items-center gap-1.5">
         <span class="w-1.5 h-1.5 rounded-full" :class="getStateDotClass(channel.state)"></span>
-        <span>{{ formatStateName(channel.state) }}</span>
+        <span class="font-sans text-[11px] text-slate-600">{{ formatStateName(channel.state) }}</span>
       </div>
-      <div class="truncate max-w-[120px]" :title="channel.masked_key">
-        {{ channel.masked_key }}
+      <div class="text-[11px] font-sans text-slate-400 group-hover/card:text-blue-600 transition-colors">
+        查看调用记录 &rarr;
       </div>
     </div>
   </div>
@@ -98,8 +95,8 @@ defineEmits<{
 }>();
 
 function getRoleLabel(role: string): string {
-  if (role === 'PRIMARY') return '主模型';
-  if (role === 'INFRA') return '检索基建';
+  if (role === 'PRIMARY') return '主用';
+  if (role === 'INFRA') return '向量/排序';
   return '备用';
 }
 
@@ -111,25 +108,25 @@ function getRoleTagClass(role: string): string {
 
 function formatDisplayName(c: ModelChannelItem): string {
   if (c.role === 'INFRA') {
+    const shortInfra = c.model ? c.model.split('/').pop() || c.model : c.name;
+    if (c.name.includes('embedding')) return `向量模型 (${shortInfra})`;
+    if (c.name.includes('rerank')) return `重排模型 (${shortInfra})`;
     return c.name;
   }
+  const shortModel = c.model ? c.model.split('/').pop() || c.model : c.name;
   if (c.role === 'PRIMARY') {
-    return `${c.name} (主节点)`;
+    return `${shortModel} (主用)`;
   }
-  if (c.name.includes('deepseek')) {
-    return 'DeepSeek-V3 (备用)';
+  const lowerModel = (c.model || '').toLowerCase();
+  const lowerName = (c.name || '').toLowerCase();
+  if (lowerModel.includes('vl') || lowerName.includes('vl') || lowerModel.includes('vision')) {
+    return `${shortModel} (视觉备用)`;
   }
-  if (c.name.includes('qwen-vl') || c.name.includes('vl')) {
-    return 'Qwen-VL-72B (视觉备用)';
-  }
-  if (c.name.includes('qwen')) {
-    return 'Qwen-2.5-72B (备用)';
-  }
-  return `${c.name} (备用)`;
+  return `${shortModel} (备用)`;
 }
 
 function getIconBgClass(c: ModelChannelItem): string {
-  if (c.provider === 'kedaya') return 'bg-purple-50';
+  if (c.role === 'PRIMARY') return 'bg-blue-50';
   if (c.model.includes('deepseek')) return 'bg-blue-50';
   if (c.model.includes('qwen')) return 'bg-teal-50';
   return 'bg-slate-100';
@@ -159,9 +156,9 @@ function getStateDotClass(state: string): string {
 }
 
 function formatStateName(state: string): string {
-  if (state === 'CLOSED') return '健康运转';
-  if (state === 'OPEN') return '熔断隔离中';
-  if (state === 'HALF_OPEN') return '探测自愈中';
+  if (state === 'CLOSED') return '运行正常';
+  if (state === 'OPEN') return '熔断隔离';
+  if (state === 'HALF_OPEN') return '恢复探测中';
   return '就绪';
 }
 </script>

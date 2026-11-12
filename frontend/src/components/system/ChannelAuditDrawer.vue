@@ -11,41 +11,49 @@
       
       <!-- 抽屉头部 -->
       <div class="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-        <div class="flex items-center gap-2.5">
-          <div class="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-xs">
+        <div class="flex items-center gap-2.5 min-w-0">
+          <div class="w-8 h-8 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center font-bold text-xs shrink-0">
             AI
           </div>
-          <div>
+          <div class="min-w-0">
             <h2 class="text-sm font-bold text-slate-900 flex items-center gap-2">
-              <span>{{ channel?.name }}</span>
+              <span class="truncate">{{ channel?.name }}</span>
               <span 
-                class="text-[10px] px-1.5 py-0.5 rounded font-mono font-normal"
+                class="text-[10px] px-1.5 py-0.5 rounded font-sans font-medium shrink-0"
                 :class="getStateBadgeClass(channel?.state)"
               >
-                {{ channel?.state }}
+                {{ formatStateText(channel?.state) }}
+              </span>
+              <span v-if="channel?.weight" class="text-[10px] text-slate-400 font-normal shrink-0">
+                权重 {{ channel.weight }}
               </span>
             </h2>
-            <p class="text-[11px] text-slate-400 font-mono">{{ channel?.model }} · {{ channel?.base_url }}</p>
+            <p class="text-[11px] text-slate-400 font-mono truncate" :title="`${channel?.model} · ${channel?.base_url}`">
+              {{ channel?.model }} · {{ channel?.base_url }}
+            </p>
           </div>
         </div>
 
-        <div class="flex items-center gap-2">
-          <!-- 重置熔断按钮 (仅具有 system:admin 或 * 权限的管理员可见) -->
+        <div class="flex items-center gap-2 shrink-0">
+          <!-- 重置熔断按钮：仅管理员可见，且健康状态(CLOSED)下置灰避免无意义操作 -->
           <button
             v-if="canReset"
             @click="handleReset"
-            :disabled="isResetting"
-            class="text-xs px-2.5 py-1 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-100 transition-colors flex items-center gap-1.5"
-            title="手动将状态重置为 CLOSED"
+            :disabled="isResetting || channel?.state === 'CLOSED'"
+            class="text-xs px-2.5 py-1 rounded-lg border transition-colors flex items-center gap-1.5"
+            :class="channel?.state === 'CLOSED'
+              ? 'border-slate-200 text-slate-400 bg-slate-50 cursor-not-allowed'
+              : 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100 cursor-pointer'"
+            :title="channel?.state === 'CLOSED' ? '当前节点运行正常，无需重置' : '手动恢复节点为正常状态'"
           >
             <svg class="w-3.5 h-3.5" :class="{ 'animate-spin': isResetting }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
-            <span>重置健康状态</span>
+            <span>{{ channel?.state === 'CLOSED' ? '状态正常' : '恢复状态' }}</span>
           </button>
 
           <!-- 关闭抽屉按钮 -->
           <button 
             @click="$emit('close')" 
-            class="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+            class="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer"
           >
             <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
@@ -83,16 +91,18 @@
       <!-- 审计日志流水列表 -->
       <div class="flex-1 overflow-y-auto p-4 space-y-2.5">
         <div class="flex items-center justify-between text-xs font-semibold text-slate-600 mb-2">
-          <span>历次真实调用流水 (近 {{ audits.length }} 条)</span>
-          <span class="text-[10px] text-slate-400 font-normal">基于 sys_audit_logs</span>
+          <span>最近调用记录（{{ audits.length }} 条）</span>
+          <span v-if="channel?.masked_key" class="text-[10px] text-slate-400 font-mono font-normal truncate max-w-[220px]" :title="channel.masked_key">
+            凭据: {{ channel.masked_key }}
+          </span>
         </div>
 
         <div v-if="isLoading" class="text-center py-10 text-xs text-slate-400">
-          正在加载审计记录...
+          正在加载调用记录...
         </div>
 
         <div v-else-if="audits.length === 0" class="text-center py-10 text-xs text-slate-400">
-          暂无历史审计调用记录
+          暂无调用记录
         </div>
 
         <div 
@@ -103,9 +113,9 @@
           :class="item.status === 'SUCCESS' ? 'bg-white border-slate-200 hover:border-slate-300' : 'bg-rose-50/40 border-rose-200 hover:border-rose-300'"
         >
           <div class="flex items-center justify-between mb-1">
-            <span class="font-bold flex items-center gap-1.5" :class="item.status === 'SUCCESS' ? 'text-slate-800' : 'text-rose-600'">
+            <span class="font-bold font-sans flex items-center gap-1.5" :class="item.status === 'SUCCESS' ? 'text-slate-800' : 'text-rose-600'">
               <span class="w-1.5 h-1.5 rounded-full" :class="item.status === 'SUCCESS' ? 'bg-emerald-500' : 'bg-rose-500'"></span>
-              <span>{{ item.action }}</span>
+              <span>{{ formatActionLabel(item.action) }}</span>
             </span>
             <span class="text-[10px] text-slate-400">{{ item.created_at }}</span>
           </div>
@@ -151,14 +161,38 @@ const isLoading = ref(false);
 const isResetting = ref(false);
 
 watch(
-  () => props.channel,
-  async (newChannel) => {
-    if (newChannel && props.isOpen) {
-      await fetchAudits(newChannel.name);
+  () => [props.isOpen, props.channel?.name] as const,
+  async ([open, nodeName]) => {
+    if (open && nodeName) {
+      await fetchAudits(nodeName);
     }
   },
   { immediate: true }
 );
+
+function formatStateText(state?: string): string {
+  if (state === 'CLOSED') return '正常';
+  if (state === 'HALF_OPEN') return '恢复探测';
+  if (state === 'OPEN') return '已隔离';
+  return state || '就绪';
+}
+
+function formatActionLabel(action?: string): string {
+  switch (action) {
+    case 'LLM_INFERENCE':
+      return '模型推理调用';
+    case 'LLM_FAILOVER':
+      return '备用节点切换';
+    case 'EMBEDDING_INFERENCE':
+      return '向量计算调用';
+    case 'RERANK_INFERENCE':
+      return '相关性排序调用';
+    case 'LLM_CIRCUIT_RESET':
+      return '手动恢复状态';
+    default:
+      return action || '服务调用';
+  }
+}
 
 function getStateBadgeClass(state?: string): string {
   if (state === 'CLOSED') return 'bg-emerald-50 text-emerald-600 border border-emerald-200/60';

@@ -93,29 +93,17 @@ export const retrievalApi = {
         } catch {
           // ignore
         }
-        authStore.interceptAlert = errorMsg;
-        setTimeout(() => {
-          if (authStore.interceptAlert === errorMsg) {
-            authStore.interceptAlert = '';
-          }
-        }, 4500);
         throw new Error(errorMsg);
       }
 
       if (response.status === 403) {
-        let errorMsg = '您无权访问所选部门或执行该检索操作';
+        let errorMsg = '您当前无权查阅所选部门资料，如需访问请联系管理员开通权限。';
         try {
           const errJson = await response.json();
           errorMsg = errJson.detail || errorMsg;
         } catch {
           // ignore
         }
-        authStore.interceptAlert = errorMsg;
-        setTimeout(() => {
-          if (authStore.interceptAlert === errorMsg) {
-            authStore.interceptAlert = '';
-          }
-        }, 5000);
         throw new Error(errorMsg);
       }
 

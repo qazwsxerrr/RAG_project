@@ -56,6 +56,11 @@ apiClient.interceptors.response.use(
     if (status === 403) {
       authStore.isPermissionDenied = true;
       authStore.interceptAlert = errorDetail;
+      setTimeout(() => {
+        if (authStore.interceptAlert === errorDetail) {
+          authStore.interceptAlert = '';
+        }
+      }, 5000);
       console.warn(`[API 权限拦截 403] 越权或缺乏权限: ${errorDetail}`);
       return Promise.reject(new Error(errorDetail));
     }

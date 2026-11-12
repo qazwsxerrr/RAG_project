@@ -1,6 +1,6 @@
 <template>
   <Teleport to="body">
-    <div v-if="visible" class="fixed inset-y-0 right-0 left-0 md:left-60 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4 sm:p-6 animate-in fade-in duration-200" @click.self="$emit('close')">
+    <div v-if="visible" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-sm p-4 sm:p-6 animate-in fade-in duration-200" @click.self="$emit('close')">
       <div class="bg-white border border-slate-200 rounded-2xl shadow-xl max-w-4xl w-full p-6 overflow-hidden flex flex-col max-h-[90vh] text-slate-800" @click.stop>
       
       <!-- 弹窗顶栏 -->
@@ -12,15 +12,15 @@
           <div>
             <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">
               {{ 
-                currentItem?.type === 'image' ? '配图描述人工审核' : 
-                currentItem?.type === 'table' ? '表格描述人工审核' : 
-                currentItem?.type === 'flowchart' ? '流程图/架构图语义人工审核' : 
-                currentItem?.type === 'code' ? '代码块语义人工审核' : '多模态资产人工审核'
+                currentItem?.type === 'image' ? '配图说明审核' : 
+                currentItem?.type === 'table' ? '表格说明审核' : 
+                currentItem?.type === 'flowchart' ? '流程图说明审核' : 
+                currentItem?.type === 'code' ? '代码块说明审核' : '图表与代码内容审核'
               }}
               <span class="text-xs font-normal text-slate-500">（共 {{ items.length }} 项待审核{{ items.length > 0 ? `，当前第 ${currentIndex + 1} 项` : '' }}）</span>
             </h3>
             <p class="text-xs text-amber-700 mt-0.5">
-              核对图表/代码结构与语义描述：可直接修改描述或填写备注。确认后流水线将唤醒继续入库。
+              核对图表或代码的内容描述，可直接修改说明或填写备注，确认后继续入库。
             </p>
           </div>
         </div>
@@ -61,7 +61,6 @@
                 <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
                 <span>语言: {{ currentItem.language || 'text' }}</span>
               </span>
-              <span>AI 大模型语义提炼</span>
             </div>
             <pre class="p-3.5 overflow-x-auto max-h-56 font-mono text-emerald-300 leading-relaxed whitespace-pre selection:bg-emerald-900">{{ currentItem.raw_content }}</pre>
           </div>
@@ -72,7 +71,6 @@
           >
             <div class="flex items-center justify-between px-3.5 py-1.5 bg-slate-100 border-b border-slate-200 text-[11px] text-slate-500 font-sans">
               <span class="font-medium text-slate-700">Mermaid 流程图结构</span>
-              <span>AI 大模型语义提炼</span>
             </div>
             <pre class="p-3.5 overflow-x-auto max-h-56 font-mono text-slate-700 leading-relaxed whitespace-pre text-[11px]">{{ currentItem.raw_content }}</pre>
           </div>
@@ -82,7 +80,7 @@
               v-show="!imageLoadError"
               :src="withTokenUrl(currentItem.asset_proxy_url || currentItem.image_url || currentItem.asset_url)" 
               :alt="currentItem.title || '审核资产截图'" 
-              class="max-h-56 object-contain rounded shadow-xs"
+              class="max-h-56 object-contain rounded shadow-sm"
               @error="imageLoadError = true"
               @load="imageLoadError = false"
             />
@@ -101,7 +99,7 @@
           <div class="flex items-center justify-between">
             <label class="text-xs font-medium text-slate-700 flex items-center gap-1">
               <svg class="w-3.5 h-3.5 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-              AI 大模型语义提炼描述 (可在线编辑)：
+              内容描述（可修改）：
             </label>
             <span class="text-[11px] text-slate-500">已编辑 {{ editableDescriptions[currentItem.item_id]?.length || 0 }} 字</span>
           </div>
@@ -137,7 +135,7 @@
         </svg>
         <div class="text-center">
           <p class="text-sm font-medium text-slate-600">正在同步审核数据或无待核对项</p>
-          <p class="text-xs text-slate-400 mt-1">若长时间无响应，可点击流水线右上角“重新连接”同步最新快照</p>
+          <p class="text-xs text-slate-400 mt-1">若长时间无响应，可点击右上角“刷新状态”获取最新内容</p>
         </div>
       </div>
 

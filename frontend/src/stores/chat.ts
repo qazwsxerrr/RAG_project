@@ -117,7 +117,7 @@ export const useChatStore = defineStore('chat', () => {
   };
 
   /** 创建全新云端会话 */
-  const createNewSession = async (title: string = '新知识问答会话'): Promise<string> => {
+  const createNewSession = async (title: string = '新会话'): Promise<string> => {
     if (isGenerating.value) {
       stopGeneration();
     }
@@ -136,6 +136,19 @@ export const useChatStore = defineStore('chat', () => {
     loadedMessagesMap[created.id] = true;
     localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, created.id);
     return created.id;
+  };
+
+  /** 重命名指定会话并同步至云端 */
+  const renameSession = async (id: string, newTitle: string) => {
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+    const target = sessions.value.find((s) => s.id === id);
+    if (target && target.title === trimmed) return;
+    const updated = await sessionsApi.updateSession(id, trimmed);
+    if (target) {
+      target.title = updated.title || trimmed;
+      target.updatedAt = Date.now();
+    }
   };
 
   /** 切换会话 */
@@ -315,11 +328,6 @@ export const useChatStore = defineStore('chat', () => {
             t.isReasoning = false;
             t.error = err.message;
             isGenerating.value = false;
-
-            if (err.message && (err.message.includes('越权') || err.message.includes('403'))) {
-              const authStore = useAuthStore();
-              authStore.interceptAlert = err.message;
-            }
           },
         },
         abortController.signal
@@ -328,11 +336,6 @@ export const useChatStore = defineStore('chat', () => {
       assistantMessage.isStreaming = false;
       assistantMessage.error = e.message || '请求发生异常';
       isGenerating.value = false;
-
-      if (e.message && (e.message.includes('越权') || e.message.includes('403'))) {
-        const authStore = useAuthStore();
-        authStore.interceptAlert = e.message;
-      }
     }
   };
 
@@ -346,6 +349,7 @@ export const useChatStore = defineStore('chat', () => {
     initSessions,
     loadSessionMessages,
     createNewSession,
+    renameSession,
     switchSession,
     deleteSession,
     stopGeneration,

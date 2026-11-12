@@ -1,44 +1,29 @@
 <template>
   <div class="document-list-view h-full overflow-y-auto py-8 px-4 sm:px-8 max-w-7xl mx-auto space-y-6 animate-in fade-in duration-300">
-    <!-- 顶部资产统计大盘看板 (100% 对齐参考图单卡片多指标条结构，彻底去除冗余独立大框) -->
-    <div class="bg-white border border-slate-200/90 rounded-xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-4">
+    <!-- 顶部文档统计栏（仅保留真实统计指标，移除静态技术宣传牌） -->
+    <div class="bg-white border border-slate-200/90 rounded-xl p-4 shadow-sm flex flex-wrap items-center justify-between gap-4">
       <div class="flex flex-wrap items-center divide-x divide-slate-100 text-xs">
         <div class="px-4 first:pl-0">
-          <div class="text-[11px] text-slate-400 font-medium">收录文档总数</div>
+          <div class="text-[11px] text-slate-400 font-medium">已入库文档</div>
           <div class="mt-1 flex items-baseline gap-1.5">
             <span class="text-xl font-bold text-slate-900 font-mono">{{ completedDocCount }}</span>
-            <span class="text-[11px] text-slate-500">篇 (已入库)</span>
+            <span class="text-[11px] text-slate-500">篇</span>
           </div>
         </div>
 
         <div class="px-4">
-          <div class="text-[11px] text-slate-400 font-medium">知识切片总数</div>
+          <div class="text-[11px] text-slate-400 font-medium">知识切片</div>
           <div class="mt-1 flex items-baseline gap-1.5">
             <span class="text-xl font-bold text-slate-900 font-mono">{{ totalChunkCount }}</span>
-            <span class="text-[11px] text-slate-500">条切片</span>
+            <span class="text-[11px] text-slate-500">条</span>
           </div>
         </div>
 
         <div class="px-4">
-          <div class="text-[11px] text-slate-400 font-medium">覆盖组织部门</div>
+          <div class="text-[11px] text-slate-400 font-medium">覆盖部门</div>
           <div class="mt-1 flex items-baseline gap-1.5">
             <span class="text-xl font-bold text-slate-900 font-mono">{{ departmentCount }}</span>
-            <span class="text-[11px] text-slate-500">个部门</span>
-          </div>
-        </div>
-
-        <div class="px-4">
-          <div class="text-[11px] text-slate-400 font-medium">多模态高精切分</div>
-          <div class="mt-1 flex items-baseline gap-1.5">
-            <span class="text-sm font-bold text-slate-800 font-mono">MinerU VLM</span>
-            <span class="text-[11px] text-emerald-600 font-medium">● 版面还原</span>
-          </div>
-        </div>
-
-        <div class="px-4">
-          <div class="text-[11px] text-slate-400 font-medium">混合向量索引</div>
-          <div class="mt-1 flex items-baseline gap-1.5">
-            <span class="text-sm font-bold text-emerald-600 font-mono">HNSW + BM25</span>
+            <span class="text-[11px] text-slate-500">个</span>
           </div>
         </div>
       </div>
@@ -48,7 +33,7 @@
         <button 
           @click="handleRefresh" 
           class="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-          title="刷新文档资产"
+          title="刷新文档列表"
         >
           <svg class="w-4 h-4" :class="{ 'animate-spin': documentStore.loading }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
         </button>
@@ -56,7 +41,7 @@
         <router-link 
           v-if="authStore.hasPermission('doc:upload')"
           to="/documents/new" 
-          class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 shadow-xs"
+          class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 shadow-sm"
         >
           <span>+ 提交文档入库</span>
         </router-link>
@@ -72,12 +57,39 @@
 
     <!-- 文档表格 -->
     <DocumentTable 
-      :documents="filteredDocuments"
+      :documents="paginatedDocuments"
       :canDelete="authStore.hasPermission('doc:delete')"
+      @previewDoc="handlePreviewDoc"
       @viewChunks="openChunksModal"
       @viewProgress="goToProgress"
       @deleteDoc="handleDeleteDoc"
     />
+
+    <!-- 轻量分页栏 -->
+    <div
+      v-if="filteredDocuments.length > pageSize"
+      class="flex items-center justify-between text-xs text-slate-500 px-1 pt-1"
+    >
+      <span>
+        共 <strong class="text-slate-800">{{ filteredDocuments.length }}</strong> 篇文档 · 第 {{ currentPage }} / {{ totalPages }} 页
+      </span>
+      <div class="flex items-center gap-2">
+        <button
+          @click="currentPage = Math.max(1, currentPage - 1)"
+          :disabled="currentPage <= 1"
+          class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+        >
+          上一页
+        </button>
+        <button
+          @click="currentPage = Math.min(totalPages, currentPage + 1)"
+          :disabled="currentPage >= totalPages"
+          class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+        >
+          下一页
+        </button>
+      </div>
+    </div>
 
     <!-- 切片下钻抽屉模态框 -->
     <DocumentChunksModal 
@@ -90,10 +102,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useDocumentStore } from '../stores/document';
-import { useAuthStore } from '../stores/auth';
+import { useAuthStore, withTokenUrl } from '../stores/auth';
 import type { DocumentItem } from '../types';
 import DocumentFilters from '../components/documents/DocumentFilters.vue';
 import DocumentTable from '../components/documents/DocumentTable.vue';
@@ -109,6 +121,9 @@ const activeFilters = ref({
   category: '',
   status: '',
 });
+
+const pageSize = 15;
+const currentPage = ref(1);
 
 // 切片弹窗
 const chunksModalVisible = ref(false);
@@ -173,8 +188,26 @@ const filteredDocuments = computed(() => {
   });
 });
 
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredDocuments.value.length / pageSize)));
+
+const paginatedDocuments = computed(() => {
+  const start = (currentPage.value - 1) * pageSize;
+  return filteredDocuments.value.slice(start, start + pageSize);
+});
+
+watch(totalPages, (tp) => {
+  if (currentPage.value > tp) {
+    currentPage.value = tp;
+  }
+});
+
 const handleFilterChange = (filters: any) => {
   activeFilters.value = filters;
+  currentPage.value = 1;
+};
+
+const handlePreviewDoc = (doc: DocumentItem) => {
+  window.open(withTokenUrl(`/api/v1/documents/${doc.doc_id}/preview`), '_blank', 'noopener,noreferrer');
 };
 
 const handleRefresh = async () => {
@@ -192,7 +225,7 @@ const goToProgress = (doc: DocumentItem) => {
 };
 
 const handleDeleteDoc = async (doc: DocumentItem) => {
-  if (confirm(`确定要永久删除文档《${doc.file_name}》及其全部向量切片吗？此操作不可逆。`)) {
+  if (confirm(`确定要永久删除文档《${doc.file_name}》吗？删除后无法恢复。`)) {
     try {
       await documentStore.deleteDoc(doc.doc_id);
     } catch (err: any) {

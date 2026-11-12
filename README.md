@@ -108,7 +108,6 @@ uv pip install --python .venv -r backend/requirements.txt
 
 ```bash
 cd frontend
-npm install
 npm run dev
 ```
 

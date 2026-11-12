@@ -23,7 +23,7 @@ class EmbedderNode(BaseNode):
     """节点 10: 三路混合索引计算 (Dense + Sparse + TSVector)"""
 
     def __init__(self):
-        super().__init__(step_index=10, name="混合索引计算")
+        super().__init__(step_index=10, name="向量化")
 
     async def process(
         self,
@@ -40,7 +40,7 @@ class EmbedderNode(BaseNode):
                 "event": "step_progress",
                 "step": 10,
                 "status": "running",
-                "detail": f"正在为 {len(raw_chunks)} 个切片计算三路混合索引 (Dense + Sparse + TSVector)..."
+                "detail": f"正在为 {len(raw_chunks)} 个切片建立检索索引..."
             })
 
         chunk_texts = [c.content for c in raw_chunks]
@@ -71,7 +71,7 @@ class EmbedderNode(BaseNode):
                 "event": "step_progress",
                 "step": 10,
                 "status": "completed",
-                "detail": f"三路索引计算完毕，共生成 {len(dense_embeddings)} 组索引特征"
+                "detail": f"已完成检索索引构建（共 {len(dense_embeddings)} 条）"
             })
 
         return state

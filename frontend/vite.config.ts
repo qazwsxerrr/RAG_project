@@ -10,6 +10,21 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src')
     }
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return;
+          if (id.includes('markdown-it')) {
+            return 'markdown-vendor';
+          }
+          if (/node_modules[\\/](vue|vue-router|pinia|@vue)[\\/]/.test(id)) {
+            return 'vue-vendor';
+          }
+        }
+      }
+    }
+  },
   server: {
     port: 5173,
     host: '0.0.0.0',

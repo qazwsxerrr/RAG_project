@@ -44,7 +44,8 @@ onMounted(() => {
   window.addEventListener('resize', handleResize);
 
   // 初始化柔和科技粒子节点
-  const particleCount = Math.min(Math.floor((width * height) / 28000), 55);
+  const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false;
+  const particleCount = prefersReducedMotion ? 0 : Math.min(Math.floor((width * height) / 48000), 28);
   const particles: Particle[] = [];
   const palette = [
     'rgba(99, 102, 241, 0.45)',  // Indigo
@@ -65,8 +66,13 @@ onMounted(() => {
   }
 
   const maxDist = 130;
+  let isPaused = document.hidden || prefersReducedMotion;
 
   const render = () => {
+    if (isPaused) {
+      animationFrameId = null;
+      return;
+    }
     ctx.clearRect(0, 0, width, height);
 
     // 绘制连线
@@ -107,10 +113,29 @@ onMounted(() => {
     animationFrameId = requestAnimationFrame(render);
   };
 
-  render();
+  const handleVisibilityChange = () => {
+    if (document.hidden || prefersReducedMotion) {
+      isPaused = true;
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+        animationFrameId = null;
+      }
+    } else {
+      isPaused = false;
+      if (!animationFrameId) {
+        animationFrameId = requestAnimationFrame(render);
+      }
+    }
+  };
+
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+  if (!isPaused && particleCount > 0) {
+    render();
+  }
 
   onUnmounted(() => {
     window.removeEventListener('resize', handleResize);
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
     if (animationFrameId) {
       cancelAnimationFrame(animationFrameId);
     }

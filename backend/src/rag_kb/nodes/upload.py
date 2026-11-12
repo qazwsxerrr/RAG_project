@@ -20,7 +20,7 @@ class UploadNode(BaseNode):
     """节点 4: 图片与表格切图上传 OSS"""
 
     def __init__(self):
-        super().__init__(step_index=4, name="切图OSS上传")
+        super().__init__(step_index=4, name="图片上传")
 
     async def process(
         self,
@@ -99,7 +99,7 @@ class UploadNode(BaseNode):
                 "event": "step_progress",
                 "step": 4,
                 "status": "completed",
-                "detail": f"完成切图上云，共上传 {len(image_elements)} 张配图与 {len(table_elements)} 个表格图"
+                "detail": f"已保存 {len(image_elements)} 张配图与 {len(table_elements)} 张表格截图"
             })
 
         return state

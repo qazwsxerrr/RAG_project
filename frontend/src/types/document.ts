@@ -1,4 +1,4 @@
-export type PipelineStepStatus = 'wait' | 'process' | 'finish' | 'error' | 'warning';
+export type PipelineStepStatus = 'wait' | 'process' | 'finish' | 'error' | 'warning' | 'skipped';
 
 export interface PipelineStep {
   index: number;
@@ -11,8 +11,8 @@ export interface PipelineStep {
 
 export const DEFAULT_PIPELINE_STEPS: PipelineStep[] = [
   { index: 1, name: '接入', code: 'ingest', status: 'wait' },
-  { index: 2, name: 'MinerU 解析', code: 'mineru_parse', status: 'wait' },
-  { index: 3, name: 'MD 加载', code: 'md_load', status: 'wait' },
+  { index: 2, name: '版面解析', code: 'mineru_parse', status: 'wait' },
+  { index: 3, name: '内容加载', code: 'md_load', status: 'wait' },
   { index: 4, name: '图片上传', code: 'image_upload', status: 'wait' },
   { index: 5, name: '图片描述', code: 'image_vlm', status: 'wait' },
   { index: 6, name: '表格转文本', code: 'table_to_text', status: 'wait' },

@@ -28,8 +28,8 @@ class IngestStatus(str, Enum):
 # 11 个标准执行节点名称
 STEP_NAMES: List[str] = [
     "接入",            # 1
-    "MinerU 解析",     # 2
-    "MD 加载",         # 3
+    "版面解析",        # 2
+    "内容加载",        # 3
     "图片上传",        # 4
     "图片描述",        # 5
     "表格转文本",      # 6

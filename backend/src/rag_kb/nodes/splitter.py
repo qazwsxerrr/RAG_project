@@ -20,7 +20,7 @@ class SplitterNode(BaseNode):
     """节点 9: Markdown 两阶段混合切分"""
 
     def __init__(self):
-        super().__init__(step_index=9, name="两阶段混合切分")
+        super().__init__(step_index=9, name="切分")
 
     async def process(
         self,
@@ -40,7 +40,7 @@ class SplitterNode(BaseNode):
                 "event": "step_progress",
                 "step": 9,
                 "status": "running",
-                "detail": "正在执行两阶段语义与代码切分..."
+                "detail": "正在按章节与段落切分文档内容..."
             })
 
         # 调用切分器进行结构化切分
@@ -58,7 +58,7 @@ class SplitterNode(BaseNode):
                 "event": "step_progress",
                 "step": 9,
                 "status": "completed",
-                "detail": f"完成切分，产出 {len(raw_chunks)} 个切片",
+                "detail": f"已完成文档切分，共生成 {len(raw_chunks)} 个切片",
                 "chunk_count": len(raw_chunks)
             })
 

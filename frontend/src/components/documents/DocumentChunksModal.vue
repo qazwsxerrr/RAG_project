@@ -2,7 +2,7 @@
   <Teleport to="body">
     <div 
       v-if="visible" 
-      class="fixed inset-y-0 right-0 left-0 md:left-60 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 sm:p-6 animate-in fade-in duration-200" 
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 sm:p-6 animate-in fade-in duration-200" 
       @click.self="$emit('close')"
     >
       <div 
@@ -10,67 +10,73 @@
         @click.stop
       >
         <!-- 弹窗顶栏 -->
-        <div class="flex items-center justify-between pb-4 border-b border-slate-100 shrink-0">
-          <div>
-            <div class="flex items-center gap-3">
+        <div class="flex items-center justify-between pb-3.5 border-b border-slate-100 shrink-0 gap-3">
+          <div class="min-w-0">
+            <div class="flex items-center gap-3 flex-wrap">
               <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">
                 <svg class="w-4 h-4 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
                   <polyline points="14 2 14 8 20 8"/>
                 </svg>
-                文档切片资产详情
+                文档切片详情
               </h3>
               <span class="text-xs text-slate-400 font-mono">
                 共 {{ chunks.length }} 个切片
               </span>
-              <!-- 切片类型统计徽标 -->
-              <div v-if="stats.tables > 0 || stats.flowcharts > 0 || stats.codes > 0 || stats.images > 0" class="hidden sm:flex items-center gap-1.5 text-[11px]">
-                <span v-if="stats.tables > 0" class="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 font-medium">
-                  {{ stats.tables }} 表格
-                </span>
-                <span v-if="stats.flowcharts > 0" class="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-medium">
-                  {{ stats.flowcharts }} 流程图
-                </span>
-                <span v-if="stats.codes > 0" class="px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200 font-medium">
-                  {{ stats.codes }} 代码块
-                </span>
-                <span v-if="stats.images > 0" class="px-2 py-0.5 rounded-full bg-purple-50 text-purple-700 border border-purple-200 font-medium">
-                  {{ stats.images }} 配图
-                </span>
-              </div>
             </div>
-            <p class="text-xs text-slate-500 mt-1 font-mono truncate max-w-2xl">
+            <p class="text-xs text-slate-500 mt-1 font-mono truncate max-w-2xl" :title="fileName">
               文档: <span class="text-slate-700 font-medium">{{ fileName }}</span>
             </p>
           </div>
           <button 
             @click="$emit('close')" 
-            class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg flex items-center justify-center hover:bg-slate-100 text-xl transition-colors"
+            class="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-lg flex items-center justify-center hover:bg-slate-100 text-xl transition-colors cursor-pointer shrink-0"
             title="关闭弹窗"
           >
             &times;
           </button>
         </div>
 
+        <!-- 切片类型筛选栏 -->
+        <div v-if="!loading && chunks.length > 0" class="pt-3 pb-1 flex flex-wrap items-center justify-between gap-2 shrink-0 text-xs">
+          <div class="inline-flex items-center gap-1 p-1 bg-slate-100 rounded-xl overflow-x-auto">
+            <button
+              v-for="tab in filterTabs"
+              :key="tab.key"
+              @click="selectFilterType(tab.key)"
+              class="px-2.5 py-1 rounded-lg font-medium transition-all flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              :class="selectedType === tab.key ? 'bg-white text-slate-900 shadow-sm font-semibold' : 'text-slate-500 hover:text-slate-800'"
+            >
+              <span>{{ tab.label }}</span>
+              <span class="text-[10px] font-mono px-1.5 py-0.5 rounded-full" :class="selectedType === tab.key ? 'bg-blue-50 text-blue-700' : 'bg-slate-200/70 text-slate-500'">
+                {{ tab.count }}
+              </span>
+            </button>
+          </div>
+          <span v-if="filteredChunks.length > pageSize" class="text-[11px] text-slate-400 font-mono">
+            第 {{ currentPage }} / {{ totalPages }} 页（每页 {{ pageSize }} 条）
+          </span>
+        </div>
+
         <!-- 切片列表滚动区域 -->
-        <div class="overflow-y-auto py-4 space-y-4 flex-1 pr-1.5 custom-scrollbar">
+        <div ref="scrollBodyRef" class="overflow-y-auto py-4 space-y-4 flex-1 pr-1.5 custom-scrollbar">
           <div v-if="loading" class="text-center py-16 text-xs text-slate-500 flex flex-col items-center gap-3">
             <svg class="w-6 h-6 animate-spin text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
               <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
             </svg>
-            <span>正在检索切片多模态资产与向量元数据...</span>
+            <span>正在加载切片内容...</span>
           </div>
 
-          <div v-else-if="chunks.length === 0" class="text-center py-16 text-xs text-slate-400">
-            暂未找到切片数据或文档尚在解析流水线中
+          <div v-else-if="filteredChunks.length === 0" class="text-center py-16 text-xs text-slate-400">
+            {{ chunks.length === 0 ? '暂未找到切片数据或文档尚在处理中' : '当前筛选分类下暂无切片' }}
           </div>
 
           <div 
             v-else 
-            v-for="chunk in chunks" 
+            v-for="chunk in pagedChunks" 
             :key="chunk.chunk_index" 
-            class="border border-slate-200 rounded-xl p-4 bg-white hover:border-slate-300 transition-all space-y-3 shadow-xs"
+            class="border border-slate-200 rounded-xl p-4 bg-white hover:border-slate-300 transition-all space-y-3 shadow-sm"
           >
             <!-- 切片标头与元数据 -->
             <div class="flex flex-wrap items-center justify-between gap-2 text-xs pb-2.5 border-b border-slate-100">
@@ -78,28 +84,26 @@
                 <span class="font-bold text-slate-800 font-mono">{{ chunk.chunk_label || `第 ${chunk.chunk_index} 片` }}</span>
                 <span class="text-slate-300">·</span>
                 <span class="text-slate-600 bg-slate-100 px-2 py-0.5 rounded text-[11px]">
-                  原文档第 {{ chunk.display_page || (chunk.page_idx + 1) }} 页
+                  第 {{ chunk.display_page || (chunk.page_idx + 1) }} 页
                 </span>
 
                 <!-- 类型标签 -->
                 <span v-if="isFlowchart(chunk)" class="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-medium flex items-center gap-1">
-                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>流程图 (Mermaid)
+                  <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>流程图
                 </span>
                 <span v-else-if="isTable(chunk)" class="px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 text-[11px] font-medium flex items-center gap-1">
-                  <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>结构化表格
+                  <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>表格
                 </span>
                 <span v-else-if="isCode(chunk)" class="px-2 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200 text-[11px] font-medium flex items-center gap-1">
                   <span class="w-1.5 h-1.5 rounded-full bg-sky-500"></span>代码块
                 </span>
                 <span v-else-if="isImage(chunk)" class="px-2 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200 text-[11px] font-medium flex items-center gap-1">
-                  <span class="w-1.5 h-1.5 rounded-full bg-purple-500"></span>文档配图
+                  <span class="w-1.5 h-1.5 rounded-full bg-purple-500"></span>配图
                 </span>
               </div>
 
               <div class="text-[11px] text-slate-400 font-mono flex items-center gap-2">
                 <span>字符数: {{ chunk.content.length }}</span>
-                <span>·</span>
-                <span>稀疏Token: {{ chunk.sparse_token_count || 0 }}</span>
               </div>
             </div>
 
@@ -122,7 +126,7 @@
                     <rect x="15" y="15" width="6" height="6" rx="1"/>
                     <path d="M6 9v3a3 3 0 0 0 3 3h6"/>
                   </svg>
-                  <span>原文档流程图 (已矢量化渲染)</span>
+                  <span>流程图</span>
                 </div>
 
                 <!-- 切换视图 Tab -->
@@ -130,14 +134,14 @@
                   <button 
                     @click="setTab(chunk.chunk_index, 'render')" 
                     :class="getTab(chunk.chunk_index) === 'render' ? 'bg-emerald-600 text-white font-medium' : 'text-slate-600 hover:text-slate-900'"
-                    class="px-2 py-0.5 rounded transition-colors"
+                    class="px-2 py-0.5 rounded transition-colors cursor-pointer"
                   >
-                    矢量图 (SVG)
+                    图形预览
                   </button>
                   <button 
                     @click="setTab(chunk.chunk_index, 'source')" 
                     :class="getTab(chunk.chunk_index) === 'source' ? 'bg-emerald-600 text-white font-medium' : 'text-slate-600 hover:text-slate-900'"
-                    class="px-2 py-0.5 rounded transition-colors"
+                    class="px-2 py-0.5 rounded transition-colors cursor-pointer"
                   >
                     Mermaid 语法
                   </button>
@@ -145,9 +149,9 @@
                     v-if="chunk.asset_url" 
                     @click="setTab(chunk.chunk_index, 'asset')" 
                     :class="getTab(chunk.chunk_index) === 'asset' ? 'bg-emerald-600 text-white font-medium' : 'text-slate-600 hover:text-slate-900'"
-                    class="px-2 py-0.5 rounded transition-colors"
+                    class="px-2 py-0.5 rounded transition-colors cursor-pointer"
                   >
-                    原版切图
+                    原图
                   </button>
                 </div>
               </div>
@@ -162,13 +166,13 @@
                 <div v-else-if="mermaidErrors[chunk.chunk_index]" class="w-full p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs space-y-1">
                   <div class="font-semibold flex items-center gap-1.5">
                     <svg class="w-4 h-4 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                    <span>流程图矢量渲染遇到问题，已降级展示原始语法：</span>
+                    <span>流程图图形渲染失败，以下为原始定义：</span>
                   </div>
                   <pre class="bg-white p-2.5 rounded border border-amber-200 font-mono text-[11px] overflow-x-auto text-slate-800">{{ getCleanMermaid(chunk.table_html) }}</pre>
                 </div>
                 <div v-else class="text-xs text-slate-400 py-6 flex items-center gap-2">
                   <svg class="w-4 h-4 animate-spin text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                  <span>Mermaid 矢量流程图计算渲染中...</span>
+                  <span>正在加载流程图...</span>
                 </div>
               </div>
 
@@ -177,7 +181,7 @@
                 <pre class="bg-slate-900 text-emerald-400 p-3.5 rounded-lg text-xs font-mono overflow-x-auto max-h-64 leading-relaxed selection:bg-emerald-900 selection:text-white">{{ getCleanMermaid(chunk.table_html) }}</pre>
                 <button 
                   @click="copyText(getCleanMermaid(chunk.table_html), chunk.chunk_index)" 
-                  class="absolute top-2.5 right-2.5 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white text-[11px] px-2 py-1 rounded flex items-center gap-1 transition-colors backdrop-blur-xs"
+                  class="absolute top-2.5 right-2.5 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white text-[11px] px-2 py-1 rounded flex items-center gap-1 transition-colors backdrop-blur-sm cursor-pointer"
                 >
                   <svg v-if="copiedId === chunk.chunk_index" class="w-3.5 h-3.5 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
                   <svg v-else class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -208,7 +212,7 @@
                   <svg class="w-3.5 h-3.5 text-amber-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/>
                   </svg>
-                  <span>原文档表格 (结构化渲染)</span>
+                  <span>表格</span>
                 </div>
 
                 <!-- 切换视图 Tab (若同时有结构化和原切图) -->
@@ -216,16 +220,16 @@
                   <button 
                     @click="setTab(chunk.chunk_index, 'render')" 
                     :class="getTab(chunk.chunk_index) === 'render' ? 'bg-amber-600 text-white font-medium' : 'text-slate-600 hover:text-slate-900'"
-                    class="px-2 py-0.5 rounded transition-colors"
+                    class="px-2 py-0.5 rounded transition-colors cursor-pointer"
                   >
-                    结构化表格
+                    表格视图
                   </button>
                   <button 
                     @click="setTab(chunk.chunk_index, 'asset')" 
                     :class="getTab(chunk.chunk_index) === 'asset' ? 'bg-amber-600 text-white font-medium' : 'text-slate-600 hover:text-slate-900'"
-                    class="px-2 py-0.5 rounded transition-colors"
+                    class="px-2 py-0.5 rounded transition-colors cursor-pointer"
                   >
-                    原版文档截取
+                    原文截图
                   </button>
                 </div>
               </div>
@@ -261,7 +265,7 @@
               <div class="flex items-center justify-between text-xs">
                 <div class="flex items-center gap-1.5 font-semibold text-sky-900">
                   <svg class="w-3.5 h-3.5 text-sky-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-                  <span>原文档代码块</span>
+                  <span>代码块</span>
                   <span class="px-1.5 py-0.5 bg-sky-100 text-sky-700 rounded text-[10px] font-mono uppercase font-bold">
                     {{ getCodeDetails(chunk).lang }}
                   </span>
@@ -269,7 +273,7 @@
 
                 <button 
                   @click="copyText(getCodeDetails(chunk).code, chunk.chunk_index)" 
-                  class="bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-[11px] px-2.5 py-1 rounded-lg flex items-center gap-1 transition-colors shadow-2xs font-medium"
+                  class="bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 text-[11px] px-2.5 py-1 rounded-lg flex items-center gap-1 transition-colors shadow-sm font-medium cursor-pointer"
                 >
                   <svg v-if="copiedId === chunk.chunk_index" class="w-3.5 h-3.5 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
                   <svg v-else class="w-3.5 h-3.5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -289,7 +293,7 @@
                   <svg class="w-3.5 h-3.5 text-purple-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
                   </svg>
-                  <span>原文档配图 (原图预览)</span>
+                  <span>配图</span>
                 </div>
                 <a 
                   :href="withTokenUrl(chunk.asset_url)" 
@@ -316,49 +320,63 @@
               </div>
             </div>
 
-            <!-- ===================== 分区二：AI 语义检索摘要 (向量化内容) ===================== -->
+            <!-- ===================== 分区二：切片内容 ===================== -->
             <div class="space-y-1.5 pt-1">
-              <div class="flex items-center justify-between text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+              <div class="flex items-center justify-between text-[11px] font-semibold text-slate-500">
                 <span class="flex items-center gap-1.5">
                   <svg class="w-3.5 h-3.5 text-blue-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
                     <polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>
                   </svg>
-                  AI 语义检索摘要 (向量化与倒排索引文本)
-                </span>
-                <span class="text-slate-400 font-normal font-mono">
-                  用于密集/稀疏语义召回
+                  切片内容
                 </span>
               </div>
 
-              <!-- 语义检索摘要卡片 -->
-              <div class="text-xs text-slate-800 leading-relaxed bg-slate-50/70 p-3.5 rounded-lg border border-slate-200/90 max-h-56 overflow-y-auto whitespace-pre-wrap select-text font-sans">
-                {{ chunk.content }}
-              </div>
+              <!-- 切片内容卡片（安全富文本渲染，消除裸露 Markdown 符号） -->
+              <div
+                class="text-xs text-slate-800 leading-relaxed bg-slate-50/70 p-3.5 rounded-lg border border-slate-200/90 max-h-60 overflow-y-auto select-text markdown-body"
+                v-html="renderMarkdownContent(chunk.content)"
+              ></div>
             </div>
 
-            <!-- 关联 OSS 产物链接 (非配图类型时显示) -->
+            <!-- 关联原图链接 (非配图类型时显示) -->
             <div v-if="chunk.asset_url && !isImage(chunk)" class="flex items-center justify-end text-xs pt-1">
               <a 
                 :href="withTokenUrl(chunk.asset_url)" 
                 target="_blank" 
                 class="text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1 transition-colors text-[11px]"
               >
-                <span>查看原版切图产物 (OSS)</span>
+                <span>查看原图</span>
                 <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
               </a>
             </div>
           </div>
         </div>
 
-        <!-- 底部关闭按钮 -->
+        <!-- 底部分页与关闭栏 -->
         <div class="pt-3 border-t border-slate-100 flex items-center justify-between shrink-0">
-          <div class="text-xs text-slate-400">
-            提示：表格与流程图均已在本地完成高保真矢量与结构化渲染
+          <div v-if="filteredChunks.length > pageSize" class="flex items-center gap-2 text-xs">
+            <button
+              @click="goPage(currentPage - 1)"
+              :disabled="currentPage <= 1"
+              class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+            >
+              上一页
+            </button>
+            <span class="text-slate-500 font-mono text-[11px]">{{ currentPage }} / {{ totalPages }}</span>
+            <button
+              @click="goPage(currentPage + 1)"
+              :disabled="currentPage >= totalPages"
+              class="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+            >
+              下一页
+            </button>
           </div>
+          <div v-else></div>
+
           <button 
             @click="$emit('close')" 
-            class="px-5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium rounded-xl transition-colors"
+            class="px-5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium rounded-xl transition-colors cursor-pointer"
           >
             关闭
           </button>
@@ -378,7 +396,7 @@
           <a 
             :href="lightboxUrl" 
             target="_blank" 
-            class="hover:underline flex items-center gap-1 bg-white/20 px-2.5 py-1 rounded backdrop-blur-xs"
+            class="hover:underline flex items-center gap-1 bg-white/20 px-2.5 py-1 rounded backdrop-blur-sm"
           >
             <span>新标签打开原图</span>
             <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
@@ -405,7 +423,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
-import mermaid from 'mermaid';
+import MarkdownIt from 'markdown-it';
 import type { ChunkItem } from '../../types';
 import { documentsApi } from '../../api/documents';
 import { withTokenUrl } from '../../stores/auth';
@@ -422,6 +440,22 @@ defineEmits<{
 
 const chunks = ref<ChunkItem[]>([]);
 const loading = ref(false);
+const scrollBodyRef = ref<HTMLElement | null>(null);
+
+const pageSize = 20;
+const currentPage = ref(1);
+const selectedType = ref<'all' | 'table' | 'flowchart' | 'code' | 'image'>('all');
+
+const md = new MarkdownIt({
+  html: false,
+  linkify: true,
+  breaks: true,
+});
+
+function renderMarkdownContent(text?: string): string {
+  if (!text) return '';
+  return md.render(text);
+}
 
 // 视图 Tab 切换状态 (chunk_index -> 'render' | 'source' | 'asset')
 const activeTabs = ref<Record<number, 'render' | 'source' | 'asset'>>({});
@@ -450,6 +484,54 @@ const stats = computed(() => {
 
   return { tables, flowcharts, codes, images };
 });
+
+const filterTabs = computed(() => {
+  const list: Array<{ key: 'all' | 'table' | 'flowchart' | 'code' | 'image'; label: string; count: number }> = [
+    { key: 'all', label: '全部', count: chunks.value.length },
+  ];
+  if (stats.value.tables > 0) list.push({ key: 'table', label: '表格', count: stats.value.tables });
+  if (stats.value.flowcharts > 0) list.push({ key: 'flowchart', label: '流程图', count: stats.value.flowcharts });
+  if (stats.value.codes > 0) list.push({ key: 'code', label: '代码块', count: stats.value.codes });
+  if (stats.value.images > 0) list.push({ key: 'image', label: '配图', count: stats.value.images });
+  return list;
+});
+
+const filteredChunks = computed(() => {
+  if (selectedType.value === 'all') return chunks.value;
+  return chunks.value.filter((c) => {
+    if (selectedType.value === 'flowchart') return isFlowchart(c);
+    if (selectedType.value === 'table') return isTable(c);
+    if (selectedType.value === 'code') return isCode(c);
+    if (selectedType.value === 'image') return isImage(c);
+    return true;
+  });
+});
+
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredChunks.value.length / pageSize)));
+
+const pagedChunks = computed(() => {
+  const start = (currentPage.value - 1) * pageSize;
+  return filteredChunks.value.slice(start, start + pageSize);
+});
+
+function selectFilterType(type: 'all' | 'table' | 'flowchart' | 'code' | 'image') {
+  selectedType.value = type;
+  currentPage.value = 1;
+  nextTick(() => {
+    if (scrollBodyRef.value) scrollBodyRef.value.scrollTop = 0;
+    renderVisibleFlowcharts();
+  });
+}
+
+function goPage(p: number) {
+  const target = Math.max(1, Math.min(totalPages.value, p));
+  if (target === currentPage.value) return;
+  currentPage.value = target;
+  nextTick(() => {
+    if (scrollBodyRef.value) scrollBodyRef.value.scrollTop = 0;
+    renderVisibleFlowcharts();
+  });
+}
 
 // 类型判断工具函数
 function isFlowchart(chunk: ChunkItem): boolean {
@@ -533,17 +615,25 @@ function getCodeDetails(chunk: ChunkItem): { code: string; lang: string } {
   return { code: stripped || chunk.content, lang };
 }
 
-// 异步渲染所有 Mermaid 流程图
-async function renderAllFlowcharts() {
-  const flowchartsToRender = chunks.value.filter(isFlowchart);
+let mermaidInitialized = false;
+
+// 按需动态加载 mermaid 并仅渲染当前分页可见的流程图切片（纯文本/表格文档完全不加载 1.5MB Mermaid 包）
+async function renderVisibleFlowcharts() {
+  const flowchartsToRender = pagedChunks.value.filter(
+    (c) => isFlowchart(c) && !mermaidSvgs.value[c.chunk_index] && !mermaidErrors.value[c.chunk_index]
+  );
   if (flowchartsToRender.length === 0) return;
 
-  mermaid.initialize({
-    startOnLoad: false,
-    theme: 'neutral',
-    securityLevel: 'loose',
-    fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-  });
+  const { default: mermaid } = await import('mermaid');
+  if (!mermaidInitialized) {
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'neutral',
+      securityLevel: 'loose',
+      fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    });
+    mermaidInitialized = true;
+  }
 
   for (const chunk of flowchartsToRender) {
     const code = getCleanMermaid(chunk.table_html);
@@ -600,17 +690,19 @@ onUnmounted(() => {
 
 // 监听加载切片数据
 watch(
-  () => props.docId,
-  async (newId) => {
-    if (newId && props.visible) {
+  () => [props.visible, props.docId] as const,
+  async ([vis, newId]) => {
+    if (vis && newId) {
       loading.value = true;
+      currentPage.value = 1;
+      selectedType.value = 'all';
       mermaidSvgs.value = {};
       mermaidErrors.value = {};
       activeTabs.value = {};
       try {
         chunks.value = await documentsApi.getDocumentChunks(newId);
         await nextTick();
-        await renderAllFlowcharts();
+        await renderVisibleFlowcharts();
       } catch (err) {
         console.warn('加载切片失败:', err);
         chunks.value = [];

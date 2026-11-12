@@ -17,10 +17,10 @@ from rag_kb.nodes.base import BaseNode
 from rag_kb.services.pipeline.cleaning_service import cleaning_service
 
 class LoaderNode(BaseNode):
-    """节点 3: MD加载与图元对齐"""
+    """节点 3: 内容加载与图元对齐"""
 
     def __init__(self):
-        super().__init__(step_index=3, name="MD加载与图元对齐")
+        super().__init__(step_index=3, name="内容加载")
 
     async def process(
         self,
@@ -70,13 +70,13 @@ class LoaderNode(BaseNode):
 
         state["overall_status"] = IngestStatus.LOADER.value
 
-        mode_label = "专业严谨文档结构预检通过" if clean_report.is_strict_professional else "通用文档自动格式化清洗完成"
+        mode_label = "结构校验通过" if clean_report.is_strict_professional else "文本整理完成"
         if writer and callable(writer):
             writer({
                 "event": "step_progress",
                 "step": 3,
                 "status": "completed",
-                "detail": f"加载 {len(content_list)} 个图元 · {mode_label}"
+                "detail": f"已提取 {len(content_list)} 处版面元素 · {mode_label}"
             })
 
         return state

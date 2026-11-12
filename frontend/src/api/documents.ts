@@ -100,6 +100,10 @@ export const documentsApi = {
     });
 
     eventSource.onerror = (err) => {
+      if (eventSource.readyState === EventSource.CLOSED) {
+        if (onError) onError(err);
+        return;
+      }
       console.warn(`[SSE 断线/重连中] doc_id: ${docId}`, err);
       if (onError) onError(err);
     };

@@ -32,7 +32,7 @@ class TableNode(BaseNode):
     """节点 6: 表格跨页缝合与代码/流程图提炼"""
 
     def __init__(self):
-        super().__init__(step_index=6, name="表格缝合与代码提炼")
+        super().__init__(step_index=6, name="表格转文本")
 
     async def process(
         self,
@@ -51,7 +51,7 @@ class TableNode(BaseNode):
                 "event": "step_progress",
                 "step": 6,
                 "status": "running",
-                "detail": "正在执行表格跨页缝合与代码流程图提炼..."
+                "detail": "正在整理表格、代码块与流程图内容..."
             })
 
         # 1. 表格提取与跨页缝合
@@ -283,7 +283,7 @@ class TableNode(BaseNode):
                 "event": "step_progress",
                 "step": 6,
                 "status": "completed",
-                "detail": f"完成表格与代码提炼，装配 {len(review_items)} 个待审核项",
+                "detail": f"已完成图表与代码整理，共提取 {len(review_items)} 项内容",
                 "pending_reviews": [item.model_dump() for item in review_items]
             })
 

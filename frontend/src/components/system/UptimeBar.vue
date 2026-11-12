@@ -42,9 +42,9 @@
     </div>
 
     <!-- 底部时间轴指示 -->
-    <div class="flex items-center justify-between text-[9px] text-slate-400/70 font-mono mt-1">
-      <span>PAST</span>
-      <span>NOW</span>
+    <div class="flex items-center justify-between text-[10px] text-slate-400/80 mt-1">
+      <span>较早</span>
+      <span>最新</span>
     </div>
   </div>
 </template>

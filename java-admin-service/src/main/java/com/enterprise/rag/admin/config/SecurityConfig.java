@@ -14,6 +14,7 @@ import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequest
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.logout.HttpStatusReturningLogoutSuccessHandler;
+import org.springframework.web.util.UriComponentsBuilder;
 
 @Configuration
 @EnableWebSecurity
@@ -98,7 +99,14 @@ public class SecurityConfig {
                 }
                 String prompt = httpReq.getParameter("prompt");
                 if (prompt != null && !prompt.isBlank()) {
+                    String existingUri = req.getAuthorizationRequestUri();
+                    String newUri = UriComponentsBuilder
+                            .fromUriString(existingUri)
+                            .queryParam("prompt", prompt.trim())
+                            .build()
+                            .toUriString();
                     return org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest.from(req)
+                            .authorizationRequestUri(newUri)
                             .additionalParameters(params -> params.put("prompt", prompt.trim()))
                             .build();
                 }

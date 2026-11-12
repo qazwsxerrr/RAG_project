@@ -79,6 +79,8 @@ class CitationSource(BaseModel):
     preview_url: Optional[str] = Field(None, description="后端安全流式内联预览接口路径")
     page_render_url: Optional[str] = Field(None, description="单页高清 PNG 路径")
     asset_proxy_url: Optional[str] = Field(None, description="切片关联资产图代理路径")
+    total_pages: Optional[int] = Field(None, description="原文档总页数")
+    is_pdf: bool = Field(False, description="原文档是否为 PDF 格式")
     score: float = 0.0
 
 class ChatQueryResponse(BaseModel):

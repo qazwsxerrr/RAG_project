@@ -75,7 +75,7 @@
         </div>
 
         <!-- 安全合规熔断与拦截专属警示卡片 (工控级黄盾/红盾警示) -->
-        <div v-if="isSecurityBlocked" class="p-3.5 rounded-xl bg-amber-50/90 border border-amber-200/90 text-xs text-amber-800 flex items-start gap-3 shadow-xs my-2 select-none animate-in fade-in duration-200">
+        <div v-if="isSecurityBlocked" class="p-3.5 rounded-xl bg-amber-50/90 border border-amber-200/90 text-xs text-amber-800 flex items-start gap-3 shadow-sm my-2 select-none animate-in fade-in duration-200">
           <div class="w-7 h-7 rounded-lg bg-amber-100 flex items-center justify-center flex-shrink-0 text-amber-600 mt-0.5">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
@@ -85,8 +85,7 @@
           </div>
           <div class="space-y-1 flex-1">
             <div class="font-bold text-amber-900 flex items-center justify-between">
-              <span>企业级内容安全防御系统已触发阻断</span>
-              <span class="text-[10px] font-mono font-medium px-2 py-0.5 rounded-full bg-amber-200/70 text-amber-800">SAFETY FUSED</span>
+              <span>当前内容触发安全限制，无法生成回答</span>
             </div>
             <div class="text-[12px] text-amber-800 leading-relaxed font-sans select-text">
               {{ securityBlockMessage }}
@@ -107,7 +106,7 @@
           <!-- 底部轻量辅助条：字数统计与复制回答 -->
           <div v-if="!message.isStreaming && hasCleanContent" class="mt-2.5 pt-2 flex items-center justify-between text-[11px] text-slate-400 select-none">
             <span class="font-mono text-[10px] text-slate-400">
-              {{ cleanContentText.length }} 字 · {{ citedIds.size > 0 ? `已标注 ${citedIds.size} 处溯源依据` : '知识库无直接关联依据 (防幻觉保护)' }}
+              {{ cleanContentText.length }} 字 · {{ displayCitations.length > 0 ? `已标注 ${displayCitations.length} 处溯源依据` : '知识库无直接关联依据 (防幻觉保护)' }}
             </span>
             
             <button 
@@ -243,20 +242,85 @@ const hasCleanContent = computed(() => {
   return cleanContentText.value.length > 0;
 });
 
-// 提取正文中实际引用的 [1], [2] 角标 ID 集合
-const citedIds = computed(() => {
-  if (!hasCleanContent.value) return new Set<number>();
-  const matches = cleanContentText.value.matchAll(/\[(\d+)\]/g);
+// 当前消息真实下发的有效引文编号集合
+const validCitationIds = computed(() => {
   const ids = new Set<number>();
-  for (const m of matches) {
-    ids.add(Number(m[1]));
+  for (const c of props.message.citations || []) {
+    if (typeof c.citation_id === 'number') {
+      ids.add(c.citation_id);
+    }
   }
   return ids;
+});
+
+// 剥离 Markdown 代码块与行内代码，避免将 arr[1] 等代码下标识别为引用角标
+const stripCodeSegments = (markdownText: string): string => {
+  return markdownText
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/~~~[\s\S]*?~~~/g, ' ')
+    .replace(/`[^`\n]+`/g, ' ');
+};
+
+const proseOnlyText = computed(() => {
+  if (!hasCleanContent.value) return '';
+  return stripCodeSegments(cleanContentText.value);
+});
+
+// 提取非代码正文中实际引用的有效 [1], [2] 角标 ID 集合
+const citedIds = computed(() => {
+  if (!proseOnlyText.value) return new Set<number>();
+  const validSet = validCitationIds.value;
+  const matches = proseOnlyText.value.matchAll(/\[(\d+)\]/g);
+  const ids = new Set<number>();
+  for (const m of matches) {
+    const id = Number(m[1]);
+    if (validSet.size === 0 || validSet.has(id)) {
+      ids.add(id);
+    }
+  }
+  return ids;
+});
+
+const noEvidencePatterns = [
+  /未找到.{0,16}(相关|直接)?(依据|信息|内容|规定|记录|说明|数据)/,
+  /未包含.{0,12}(相关|任何)?(依据|信息|内容|规定|数据)/,
+  /暂无.{0,12}(相关)?(依据|规定|记录|信息|说明)/,
+  /无法从.{0,15}(检索|现有|当前).{0,10}(找到|得出|获知|确认)/,
+  /没有.{0,10}(找到|提及|涉及|包含).{0,12}(相关)?(依据|规定|内容|条款|信息)/,
+  /不在.{0,12}(知识库|参考资料|现有材料).{0,8}(范围|内)/,
+];
+
+const exclusionCitationSentencePattern =
+  /(材料|文档|资料|片段|切片|文献|内容)[^。！？\n]{0,40}(\[\d+\][\s,，、~～\-]*)+[^。！？\n]{0,28}(均|都|并)?(未|不|无|没有)(包含|提及|涉及|找到|规定|说明|记录)/;
+
+// 识别整条回答是否为纯拒答（若复合提问后半段有非排除性真实引用段落，则保留有效引文）
+const isNoEvidenceAnswer = computed(() => {
+  if (!proseOnlyText.value) return false;
+  const text = proseOnlyText.value.trim();
+  const headMatchesRefusal = noEvidencePatterns.some((re) => re.test(text.slice(0, 180)));
+  if (!headMatchesRefusal) return false;
+
+  // 无任何角标时直接判为无依据
+  if (citedIds.value.size === 0) return true;
+
+  // 逐句检查带 [n] 的句子：只要存在至少一句不是“材料[1]未提及/无依据”的实质作答句，就不屏蔽引文
+  const clauses = text.split(/[。！？\n]+/).map((s) => s.trim()).filter(Boolean);
+  const citedClauses = clauses.filter((clause) => /\[(\d+)\]/.test(clause));
+  if (citedClauses.length === 0) return true;
+
+  const hasPositiveCitationClause = citedClauses.some((clause) => {
+    if (exclusionCitationSentencePattern.test(clause)) return false;
+    if (noEvidencePatterns.some((re) => re.test(clause))) return false;
+    return true;
+  });
+
+  return !hasPositiveCitationClause;
 });
 
 // 仅呈现正文中实际采纳、有据可查的参考切片，严禁出现“回答未找到依据却展示5个来源”的自相矛盾
 const displayCitations = computed(() => {
   if (!props.message.citations || props.message.citations.length === 0) return [];
+  if (isNoEvidenceAnswer.value) return [];
   if (citedIds.value.size === 0) return [];
   return props.message.citations.filter((c) => citedIds.value.has(c.citation_id));
 });
@@ -265,10 +329,23 @@ const renderedMarkdown = computed(() => {
   if (!hasCleanContent.value) return '';
   let rawHtml = md.render(cleanContentText.value);
 
-  // 将 [1], [2], [3] 转换为纯文本高亮超链接 (彻底去除边框和底色小方块)
-  rawHtml = rawHtml.replace(/\[(\d+)\]/g, (_match, id) => {
-    return `<span class="citation-badge text-xs font-mono font-medium text-blue-600 hover:text-blue-800 hover:underline cursor-pointer align-baseline mx-0.5" data-citation-id="${id}">[${id}]</span>`;
-  });
+  if (!isNoEvidenceAnswer.value) {
+    const validSet = validCitationIds.value;
+    // 跳过 <pre>...</pre> 与 <code>...</code>，严禁污染代码块中的数组下标如 arr[1]
+    const segments = rawHtml.split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>)/gi);
+    rawHtml = segments
+      .map((seg, idx) => {
+        if (idx % 2 === 1) return seg;
+        return seg.replace(/\[(\d+)\]/g, (fullMatch, idStr) => {
+          const idNum = Number(idStr);
+          if (validSet.size > 0 && !validSet.has(idNum)) {
+            return fullMatch;
+          }
+          return `<span class="citation-badge text-xs font-mono font-medium text-blue-600 hover:text-blue-800 hover:underline cursor-pointer align-baseline mx-0.5" data-citation-id="${idNum}">[${idNum}]</span>`;
+        });
+      })
+      .join('');
+  }
 
   return rawHtml;
 });
@@ -283,9 +360,6 @@ const handleContentClick = (e: MouseEvent) => {
   const found = props.message.citations?.find((c: CitationSource) => c.citation_id === citId);
   if (found) {
     emit('citationClick', found);
-  } else if (props.message.citations && props.message.citations.length > 0) {
-    const idx = (citId - 1) % props.message.citations.length;
-    emit('citationClick', props.message.citations[idx]);
   }
 };
 

@@ -82,5 +82,5 @@ async def get_session_messages(
     """获取指定会话的历史消息列表 (校验会话存在且归属于当前登录员工)"""
     sess = await get_session(session_id=session_id, tenant_id=user.tenant_id, user_id=user.user_id)
     if not sess:
-        raise HTTPException(status_code=404, detail="未找到该会话或无权访问他人会话 (BOLA Blocked)")
+        raise HTTPException(status_code=404, detail="未找到该会话或无权访问他人会话")
     return await get_messages(session_id=session_id, limit=limit)

@@ -2,8 +2,8 @@
   <div class="channel-status-view flex-1 h-full overflow-y-auto bg-[#FAFBFD] p-6 lg:p-8">
     <div class="max-w-7xl mx-auto space-y-6">
       
-      <!-- 1. 顶部全局看板 (100% 对齐参考图: 渠道状态 + 时间粒度切换 + 汇总指标) -->
-      <header class="bg-white rounded-xl border border-slate-200/80 p-5 shadow-xs">
+      <!-- 1. 顶部全局看板 -->
+      <header class="bg-white rounded-xl border border-slate-200/80 p-5 shadow-sm">
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-100">
           
           <!-- 标题与实时更新状态 -->
@@ -36,7 +36,9 @@
           <div class="flex items-center gap-4 text-xs font-mono">
             <div class="bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-100 flex items-center gap-2">
               <span class="text-slate-400">集群可用率:</span>
-              <span class="font-bold text-emerald-600">{{ data?.overall_sla !== undefined && data?.overall_sla !== null ? `${data.overall_sla}%` : '-' }}</span>
+              <span class="font-bold" :class="data?.overall_sla !== undefined && data?.overall_sla !== null ? 'text-emerald-600' : 'text-slate-500'">
+                {{ data?.overall_sla !== undefined && data?.overall_sla !== null ? `${data.overall_sla}%` : '暂无调用' }}
+              </span>
             </div>
             <div class="bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-100 flex items-center gap-2">
               <span class="text-slate-400">平均首字延迟:</span>
@@ -45,29 +47,25 @@
           </div>
         </div>
 
-        <!-- 过滤标签行 (90m / 24h / 7d / 30d 对齐参考图) -->
+        <!-- 时间范围切换 -->
         <div class="flex items-center justify-between pt-3 text-xs">
           <div class="flex items-center space-x-1 bg-slate-100/80 p-0.5 rounded-lg font-mono">
             <button
               v-for="range in (['90m', '24h', '7d', '30d'] as const)"
               :key="range"
               @click="changeRange(range)"
-              class="px-2.5 py-1 rounded-md text-[11px] font-medium transition-all"
-              :class="activeRange === range ? 'bg-white text-slate-800 shadow-xs font-bold' : 'text-slate-500 hover:text-slate-800'"
+              class="px-2.5 py-1 rounded-md text-[11px] font-medium transition-all cursor-pointer"
+              :class="activeRange === range ? 'bg-white text-slate-800 shadow-sm font-bold' : 'text-slate-500 hover:text-slate-800'"
             >
               {{ range }}
             </button>
           </div>
-
-          <div class="text-[11px] text-slate-400 font-mono">
-            被动用量 · 真实全链路度量 · 自动容灾热切换就绪
-          </div>
         </div>
       </header>
 
-      <!-- 2. 分组展示大模型渠道流 (KEDAYA, SILICONFLOW, INFRA 等) -->
+      <!-- 2. 分组展示模型与检索服务状态 -->
       <div v-if="isLoading && !data" class="text-center py-20 text-xs text-slate-400">
-        正在拉取多模型渠道状态...
+        正在加载渠道状态...
       </div>
 
       <div v-else class="space-y-6">
@@ -78,14 +76,14 @@
         >
           <!-- 厂商分组标题 -->
           <div class="flex items-center justify-between">
-            <h2 class="text-xs font-bold text-slate-400 tracking-wider uppercase flex items-center gap-2">
-              <span>{{ group.vendor_name }}</span>
+            <h2 class="text-xs font-bold text-slate-500 tracking-wide flex items-center gap-2">
+              <span>{{ formatVendorGroupTitle(group) }}</span>
             </h2>
-            <span class="text-[11px] text-slate-400 font-mono">{{ group.channels.length }}</span>
+            <span class="text-[11px] text-slate-400 font-mono">{{ group.channels.length }} 个节点</span>
           </div>
 
-          <!-- 该厂商下的模型卡片网格 -->
-          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <!-- 3 列网格留足卡片水平空间，避免标题与模型名截断 -->
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             <ChannelCard
               v-for="channel in group.channels"
               :key="channel.name"
@@ -111,7 +109,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { systemApi, type ChannelsStatusResponse, type ModelChannelItem } from '../api/system';
+import { systemApi, type ChannelsStatusResponse, type ModelChannelItem, type VendorGroup } from '../api/system';
 import ChannelCard from '../components/system/ChannelCard.vue';
 import ChannelAuditDrawer from '../components/system/ChannelAuditDrawer.vue';
 
@@ -135,8 +133,8 @@ const overallStatusDotClass = computed(() => {
       if (c.state === 'HALF_OPEN') return 'bg-amber-400';
     }
   }
-  if (data.value.overall_sla < 85.0) return 'bg-rose-500';
-  if (data.value.overall_sla < 95.0) return 'bg-amber-400';
+  if (data.value.overall_sla !== null && data.value.overall_sla < 85.0) return 'bg-rose-500';
+  if (data.value.overall_sla !== null && data.value.overall_sla < 95.0) return 'bg-amber-400';
   return 'bg-emerald-500';
 });
 
@@ -179,6 +177,29 @@ function changeRange(range: '90m' | '24h' | '7d' | '30d') {
 function handleSelectChannel(channel: ModelChannelItem) {
   selectedChannel.value = channel;
   isDrawerOpen.value = true;
+}
+
+// 若后端为旧进程仍返回历史写死标题（如含“旗舰主节点”/“容灾备选池”），前端按真实节点配置动态格式化展示
+function formatVendorGroupTitle(group: VendorGroup): string {
+  if (group.vendor_id === 'INFRA') {
+    return '向量与排序服务';
+  }
+  const raw = group.vendor_name || '';
+  if (!raw.includes('旗舰') && !raw.includes('备选池') && !raw.includes('候选池') && !raw.includes('服务池')) {
+    return raw;
+  }
+  const roles = new Set(group.channels.map((c) => c.role));
+  const models = group.channels.map((c) => c.model).filter(Boolean);
+  if (roles.size === 1 && roles.has('PRIMARY') && models.length === 1) {
+    return `${group.vendor_id} · 主用模型服务 (${models[0]})`;
+  }
+  if (roles.has('PRIMARY') && roles.has('FALLBACK')) {
+    return `${group.vendor_id} · 主备模型服务`;
+  }
+  if (roles.has('PRIMARY')) {
+    return `${group.vendor_id} · 主用模型服务`;
+  }
+  return `${group.vendor_id} · 备用模型服务`;
 }
 
 onMounted(async () => {

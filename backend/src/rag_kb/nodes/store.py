@@ -27,7 +27,7 @@ class StoreNode(BaseNode):
     """节点 11: 标题向量防重与蓝绿安全入库"""
 
     def __init__(self):
-        super().__init__(step_index=11, name="向量索引入库")
+        super().__init__(step_index=11, name="入库")
 
     async def process(
         self,
@@ -56,7 +56,7 @@ class StoreNode(BaseNode):
                 "event": "step_progress",
                 "step": 11,
                 "status": "running",
-                "detail": "正在执行标题向量防重检测与数据库蓝绿安全入库..."
+                "detail": "正在进行重复文档检测并写入知识库..."
             })
 
         async with AsyncSessionLocal() as session:
@@ -154,7 +154,7 @@ class StoreNode(BaseNode):
                 "status": "completed",
                 "chunk_count": len(raw_chunks),
                 "version": target_version,
-                "message": "入库流水线 11 节点全部成功执行完毕！"
+                "message": "文档处理完成，已正式入库"
             })
 
         return state

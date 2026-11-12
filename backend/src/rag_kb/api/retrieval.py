@@ -113,7 +113,7 @@ async def search_endpoint(
     # 0. RBAC 鉴权与部门防越权拦截 (Phase-6: 服务端强制推导，绝不信任前端入参)
     effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
     if not effective_dept_scope:
-        raise HTTPException(status_code=403, detail="【数据隔离安全拦截】无法派生有效部门权限范围 (Fail-Closed)")
+        raise HTTPException(status_code=403, detail="【权限不足】未配置有效的部门访问范围")
 
     # 前置安全熔断护栏：拦截涉黄、暴恐、涉枪涉爆违禁词与越狱注入
     is_safe, error_msg = validate_prompt_security(request.query)
@@ -244,7 +244,7 @@ async def chat_endpoint(
     # 0. RBAC 鉴权与部门防越权拦截 (Phase-6: 服务端强制推导，绝不信任前端入参)
     effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
     if not effective_dept_scope:
-        raise HTTPException(status_code=403, detail="【数据隔离安全拦截】无法派生有效部门权限范围 (Fail-Closed)")
+        raise HTTPException(status_code=403, detail="【权限不足】未配置有效的部门访问范围")
 
     # Phase-8: 单用户活跃流式问答并发护栏（防止连续狂点并发拉爆大模型与数据库连接池）
     active_stream_slot = await acquire_chat_stream_slot(tenant_id=user.tenant_id, user_id=user.user_id)

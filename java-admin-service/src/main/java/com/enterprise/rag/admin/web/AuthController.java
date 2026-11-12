@@ -138,6 +138,24 @@ public class AuthController {
         return me;
     }
 
+    /**
+     * Phase-6 §2.5: 会话登出端点（清理 Session 与 JSESSIONID Cookie）
+     */
+    @PostMapping("/api/admin/auth/logout")
+    public Map<String, Object> logout(jakarta.servlet.http.HttpServletRequest request, jakarta.servlet.http.HttpServletResponse response) {
+        jakarta.servlet.http.HttpSession session = request.getSession(false);
+        if (session != null) {
+            session.invalidate();
+        }
+        org.springframework.security.core.context.SecurityContextHolder.clearContext();
+        jakarta.servlet.http.Cookie cookie = new jakarta.servlet.http.Cookie("JSESSIONID", null);
+        cookie.setPath("/");
+        cookie.setMaxAge(0);
+        cookie.setHttpOnly(true);
+        response.addCookie(cookie);
+        return Map.of("code", 200, "message", "Logged out successfully");
+    }
+
     public record ModelTokenRequest(String provider, List<String> scopes) {}
 
     /**

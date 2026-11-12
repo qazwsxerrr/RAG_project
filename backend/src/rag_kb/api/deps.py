@@ -286,7 +286,7 @@ def assert_doc_visible(user: UserContext, doc: Any) -> None:
     if not doc_dept_path or not str(doc_dept_path).strip():
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="【安全拦截】文档所属部门路径缺失或异常，拒绝判定放行 (Fail-Closed)"
+            detail="【安全拦截】文档所属部门信息缺失或异常，无法访问"
         )
 
     allowed_prefixes = user.allowed_department_prefixes
@@ -294,7 +294,7 @@ def assert_doc_visible(user: UserContext, doc: Any) -> None:
     if not matched:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"【越权访问拦截】您无权访问或操作属于其他部门的文档资源 (BOLA Blocked)"
+            detail="【越权访问拦截】您当前无权访问或操作其他部门的文档资料"
         )
 
 
@@ -315,7 +315,7 @@ def derive_secure_department_scope(
         if not allowed_prefixes:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="【越权拦截】用户可用部门前缀为空，拒绝检索 (Fail-Closed)"
+                detail="【越权拦截】当前账号未配置可用部门权限范围，无法检索"
             )
         return allowed_prefixes
 
@@ -330,7 +330,7 @@ def derive_secure_department_scope(
         if not allowed_prefixes:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="【越权拦截】用户可用部门前缀为空，拒绝检索 (Fail-Closed)"
+                detail="【越权拦截】当前账号未配置可用部门权限范围，无法检索"
             )
         return allowed_prefixes
 
@@ -339,7 +339,7 @@ def derive_secure_department_scope(
         if not matched:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"【越权访问拦截】您无权访问或检索非授权部门目录: {clean_path} (BOLA Blocked)"
+                detail=f"【越权访问拦截】您当前无权查阅该部门资料: {clean_path}"
             )
 
     return clean_requested
