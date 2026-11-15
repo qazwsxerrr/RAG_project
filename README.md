@@ -94,7 +94,7 @@ mvn -q spring-boot:run
 uv pip install --python .venv -r backend/requirements.txt
 
 # 启动后端（热重载模式）
-.venv/bin/uvicorn backend.app.main:app --host 0.0.0.0 --port 8001 --reload
+.venv/bin/uvicorn rag_kb.api.main:app --app-dir backend/src --host 0.0.0.0 --port 8001 --reload
 ```
 
 * 后端健康检查：[http://localhost:8001/health](http://localhost:8001/health)
@@ -127,7 +127,18 @@ npm run dev
 .venv/bin/pytest backend/tests/test_step7_resilient_failover.py -v
 ```
 
-> 注：若测试涉及跨语言 JWT 验签契约，需先在 `java-admin-service` 目录执行 `mvn -q test` 生成测试夹具。
+跨语言 JWT 验签契约使用短有效期 fixture，运行前显式生成。
+
+```bash
+(cd java-admin-service && mvn -q -Dtest=JavaIssuedTokenFixtureGenerator test)
+.venv/bin/pytest backend/tests/test_step8_auth_permissions.py -v
+```
+
+### 流式连接的凭据过期与吊销
+
+- 凭据自然过期时，SSE 发送 `auth_expired`。流水线客户端重新申请短票，并携带 `last_event_id` 续传，换票请求按需刷新业务 JWT。
+- 问答流过期后结束本次生成，前端保留已收到的内容，刷新凭据并提示重新发送问题。问答续传需要服务端保存生成进度，当前采用用户确认重发的方式。
+- 账号停用、吊销或权限变更时，SSE 发送 `auth_revoked`，客户端结束连接并退出登录。同次检查同时命中过期和吊销时，优先处理吊销。
 
 ---
 
@@ -151,9 +162,9 @@ npm run dev
 ├── keys/                          # RS256 鉴权密钥对（rsa_private.pem 由 Java 持有）
 ├── java-admin-service/            # Spring Boot 鉴权中心（签发业务 JWT、模型密钥租约）
 ├── backend/                       # Python FastAPI 异步后端工程
-│   ├── app/main.py                # 统一服务启动兼容入口（8001）
 │   └── src/
 │       ├── rag_kb/                # 知识库管理、RBAC 保护端点、多模态入库图
+│       │   └── api/main.py        # FastAPI 服务入口（8001）
 │       └── rag_search/            # 混合检索流水线、RRF 融合重排与流式生成图
 └── frontend/                      # Vue 3 + Vite 现代化前端工程
     ├── vite.config.ts             # 开发反代配置（/api/v1 -> 8001, /api/admin -> 8080）

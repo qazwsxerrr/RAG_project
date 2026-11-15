@@ -104,3 +104,9 @@ def setup_logging(level: int = logging.INFO):
         handler.setFormatter(formatter)
         if not any(isinstance(f, TraceLogFilter) for f in handler.filters):
             handler.addFilter(filter_instance)
+
+    # 彻底关闭 uvicorn.access 默认访问日志（避免输出含 ?query_string 的原始请求行，统一由 TraceLoggingMiddleware 记录纯 path）
+    uvicorn_access = logging.getLogger("uvicorn.access")
+    uvicorn_access.handlers.clear()
+    uvicorn_access.propagate = False
+    uvicorn_access.disabled = True

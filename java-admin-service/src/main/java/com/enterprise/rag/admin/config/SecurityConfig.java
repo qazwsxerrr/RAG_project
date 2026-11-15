@@ -7,18 +7,54 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientProvider;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientProviderBuilder;
+import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserService;
 import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizedClientManager;
 import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizationRequestResolver;
 import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestCustomizers;
 import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestResolver;
+import org.springframework.security.oauth2.client.web.OAuth2AuthorizedClientRepository;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.logout.HttpStatusReturningLogoutSuccessHandler;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import java.time.Duration;
+
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
+
+    @Bean
+    public OAuth2AuthorizedClientManager authorizedClientManager(
+            ClientRegistrationRepository clientRegistrationRepository,
+            OAuth2AuthorizedClientRepository authorizedClientRepository
+    ) {
+        OAuth2AuthorizedClientProvider provider = OAuth2AuthorizedClientProviderBuilder.builder()
+                .authorizationCode()
+                .refreshToken(builder -> builder.clockSkew(Duration.ofSeconds(60)))
+                .build();
+        DefaultOAuth2AuthorizedClientManager manager = new DefaultOAuth2AuthorizedClientManager(
+                clientRegistrationRepository,
+                authorizedClientRepository
+        );
+        manager.setAuthorizedClientProvider(provider);
+        return manager;
+    }
+
+    @Bean
+    public OidcUserService oidcUserService() {
+        OidcUserService service = new OidcUserService();
+        // 换票刷新时强制从标准 OIDC UserInfo 端点拉取最新部门与角色组声明
+        service.setRetrieveUserInfo(req -> {
+            String uri = req.getClientRegistration().getProviderDetails().getUserInfoEndpoint().getUri();
+            return uri != null && !uri.isBlank();
+        });
+        return service;
+    }
 
     @Bean
     public SecurityFilterChain securityFilterChain(

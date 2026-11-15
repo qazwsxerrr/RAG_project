@@ -70,9 +70,7 @@ export interface ReviewItem {
   remark?: string;
   status?: string;
   html_table?: string;
-  image_url?: string;
   asset_url?: string;
-  asset_proxy_url?: string;
   raw_oss_url?: string;
   raw_content?: string;
   language?: string;

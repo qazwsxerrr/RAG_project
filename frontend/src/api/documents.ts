@@ -1,6 +1,17 @@
 import { apiClient } from './client';
 import type { DepartmentItem, DocumentItem, ChunkItem, PipelineSnapshot } from '../types';
-import { withTokenUrl } from '../stores/auth';
+import { useAuthStore } from '../stores/auth';
+
+export interface StreamTicketResult {
+  ticket: string;
+  doc_id: string;
+  purpose: 'preview' | 'events';
+  expires_in: number;
+}
+
+export interface ManagedPipelineStream {
+  close: () => void;
+}
 
 export const documentsApi = {
   /** 获取可用部门列表（支持下拉与动态匹配） */
@@ -59,14 +70,22 @@ export const documentsApi = {
     return apiClient.post(`/documents/${docId}/retry`, fromStep ? { from_step: fromStep } : {});
   },
 
-  /** 创建流水线 SSE 长连接 (监听 11 节点流转事件，受控附加内存态 JWT) */
-  createPipelineEventSource(
+  /** 签发绑定单文档与单一用途的短期受限票据 (TTL 60s) */
+  async createStreamTicket(docId: string, purpose: 'preview' | 'events'): Promise<StreamTicketResult> {
+    return apiClient.post(`/documents/${docId}/stream-ticket`, { purpose });
+  },
+
+  /**
+   * 创建受控流水线 SSE 长连接：
+   * 1. 绝不在 URL 暴露通用业务 JWT，仅携带 60s 单文档受限 ticket；
+   * 2. 网络瞬断或短票过期断开时，自动按指数退避重新换取全新短票并携带 last_event_id 无缝续传历史事件；
+   * 3. 收到 auth_revoked 或换票失败（如账号停用、越权、文档不存在）时立即停止重连并上报真实异常。
+   */
+  async createPipelineEventSource(
     docId: string,
     onEvent: (eventName: string, data: any) => void,
-    onError?: (err: any) => void
-  ): EventSource {
-    const eventSource = new EventSource(withTokenUrl(`/api/v1/documents/${docId}/events`));
-
+    onFatalError?: (err: any) => void
+  ): Promise<ManagedPipelineStream> {
     const knownEvents = [
       'initial_state',
       'pipeline_queued',
@@ -80,34 +99,123 @@ export const documentsApi = {
       'pipeline_resumed',
       'pipeline_completed',
       'pipeline_failed',
-      'pipeline_cancelled'
+      'pipeline_cancelled',
     ];
 
-    knownEvents.forEach((evtName) => {
-      eventSource.addEventListener(evtName, (e: MessageEvent) => {
-        try {
-          const parsed = JSON.parse(e.data);
-          // 实时事件的 SSE data 是 { event, data } 包装；initial_state 直接是快照
-          const payload =
-            parsed && typeof parsed === 'object' && parsed.event && parsed.data && typeof parsed.data === 'object'
-              ? parsed.data
-              : parsed;
-          onEvent(evtName, payload);
-        } catch {
-          onEvent(evtName, e.data);
-        }
-      });
-    });
+    const terminalEvents = new Set(['pipeline_completed', 'pipeline_failed', 'pipeline_cancelled']);
+    let activeSource: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let manuallyClosed = false;
+    let lastEventId = 0;
+    let retryAttempt = 0;
+    const maxRetries = 5;
 
-    eventSource.onerror = (err) => {
-      if (eventSource.readyState === EventSource.CLOSED) {
-        if (onError) onError(err);
-        return;
+    const cleanupCurrent = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
       }
-      console.warn(`[SSE 断线/重连中] doc_id: ${docId}`, err);
-      if (onError) onError(err);
+      if (activeSource) {
+        activeSource.close();
+        activeSource = null;
+      }
     };
 
-    return eventSource;
+    const closeAll = () => {
+      manuallyClosed = true;
+      cleanupCurrent();
+    };
+
+    const openWithFreshTicket = async (): Promise<void> => {
+      if (manuallyClosed) return;
+      cleanupCurrent();
+
+      const ticketResp = await this.createStreamTicket(docId, 'events');
+      if (manuallyClosed) return;
+
+      const query = new URLSearchParams({ ticket: ticketResp.ticket });
+      if (lastEventId > 0) {
+        query.set('last_event_id', String(lastEventId));
+      }
+      const source = new EventSource(
+        `/api/v1/documents/${encodeURIComponent(docId)}/events?${query.toString()}`
+      );
+      activeSource = source;
+
+      source.onopen = () => {
+        retryAttempt = 0;
+      };
+
+      source.addEventListener('auth_revoked', () => {
+        if (manuallyClosed || activeSource !== source) return;
+        closeAll();
+        const authStore = useAuthStore();
+        authStore.logout();
+      });
+
+      source.addEventListener('auth_expired', () => {
+        if (manuallyClosed || activeSource !== source) return;
+        cleanupCurrent();
+        // 换票请求经现有鉴权拦截器续期，并携带 last_event_id 恢复事件消费。
+        void openWithFreshTicket().catch((ticketErr) => {
+          if (manuallyClosed) return;
+          closeAll();
+          onFatalError?.(ticketErr);
+        });
+      });
+
+      knownEvents.forEach((evtName) => {
+        source.addEventListener(evtName, (e: MessageEvent) => {
+          if (e.lastEventId) {
+            const parsedId = parseInt(e.lastEventId, 10);
+            if (!Number.isNaN(parsedId) && parsedId > lastEventId) {
+              lastEventId = parsedId;
+            }
+          }
+          let payload;
+          try {
+            payload = JSON.parse(e.data);
+          } catch (err) {
+            closeAll();
+            onFatalError?.(err);
+            return;
+          }
+          if (evtName === 'initial_state' && payload && ['completed', 'active', 'failed', 'cancelled'].includes(payload.overall_status)) {
+            closeAll();
+          } else if (terminalEvents.has(evtName)) {
+            closeAll();
+          }
+          onEvent(evtName, payload);
+        });
+      });
+
+      source.onerror = (err) => {
+        if (manuallyClosed || activeSource !== source) return;
+        // 立即关闭旧实例（杜绝浏览器用已过期的旧 ticket 死循环重连）
+        source.close();
+        activeSource = null;
+
+        if (retryAttempt >= maxRetries) {
+          manuallyClosed = true;
+          onFatalError?.(err);
+          return;
+        }
+
+        const delayMs = Math.min(1000 * Math.pow(2, retryAttempt), 10000);
+        retryAttempt += 1;
+        reconnectTimer = setTimeout(async () => {
+          if (manuallyClosed) return;
+          try {
+            await openWithFreshTicket();
+          } catch (ticketErr) {
+            manuallyClosed = true;
+            onFatalError?.(ticketErr);
+          }
+        }, delayMs);
+      };
+    };
+
+    await openWithFreshTicket();
+    return { close: closeAll };
   }
 };

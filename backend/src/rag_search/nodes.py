@@ -451,7 +451,7 @@ async def mmr_node(
             "raw_oss_url": c.get("raw_oss_url"),
             "preview_url": f"/api/v1/documents/{doc_id}/preview",
             "page_render_url": f"/api/v1/documents/{doc_id}/pages/{target_page}" if is_pdf else None,
-            "asset_proxy_url": f"/api/v1/documents/chunks/{chunk_id}/asset" if asset_url else None,
+            "asset_proxy_url": f"/api/v1/chunks/{chunk_id}/asset" if asset_url else None,
             "is_pdf": is_pdf,
             "score": c.get("score", 0.0)
         }

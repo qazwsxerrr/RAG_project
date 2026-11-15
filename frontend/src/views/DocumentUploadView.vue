@@ -76,7 +76,7 @@
       <!-- 右侧快速操作按钮组 -->
       <div class="flex items-center space-x-2">
         <button 
-          v-if="currentDocId && !showFormAgain && authStore.hasPermission('doc:upload')"
+          v-if="currentDocId && !showFormAgain && authStore.hasPermission(PERMISSIONS.DOC_UPLOAD)"
           @click="showFormAgain = true"
           class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-medium shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer"
         >
@@ -96,13 +96,13 @@
 
     <!-- 上传表单卡片 (仅具备 doc:upload 权限时渲染) -->
     <DocumentForm 
-      v-if="(!currentDocId || showFormAgain) && authStore.hasPermission('doc:upload')"
+      v-if="(!currentDocId || showFormAgain) && authStore.hasPermission(PERMISSIONS.DOC_UPLOAD)"
       @submitted="handleSubmitted" 
     />
 
     <!-- 无上传权限且未指定 doc_id 时的安全兜底提示 -->
     <div
-      v-else-if="!currentDocId && !authStore.hasPermission('doc:upload')"
+      v-else-if="!currentDocId && !authStore.hasPermission(PERMISSIONS.DOC_UPLOAD)"
       class="bg-white border border-slate-200 rounded-2xl p-10 text-center space-y-3 max-w-lg mx-auto"
     >
       <div class="text-sm font-bold text-slate-800">暂无文档上传权限</div>
@@ -161,7 +161,7 @@ import ReviewDialog from '../components/documents/ReviewDialog.vue';
 import DuplicateDialog from '../components/documents/DuplicateDialog.vue';
 import type { ReviewItem } from '../types';
 import { documentsApi } from '../api/documents';
-import { useAuthStore } from '../stores/auth';
+import { useAuthStore, PERMISSIONS } from '../stores/auth';
 
 const route = useRoute();
 const router = useRouter();

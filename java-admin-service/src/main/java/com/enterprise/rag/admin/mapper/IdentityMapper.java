@@ -69,12 +69,29 @@ public class IdentityMapper {
         return list.isEmpty() ? Optional.empty() : Optional.of(list.getFirst());
     }
 
-    public UserRecord upsertUser(String idSource, String externalId, String realName, String deptPath) {
+    /**
+     * JIT 建档与登录元数据更新：
+     * - 新员工首次登录自动建档并写入初始 dept_path；
+     * - 存量员工仅在 IdP 实时刷新检测到部门真实变动 (syncDeptPath=true) 时才同步更新 dept_path，
+     *   彻底杜绝旧会话快照反向覆盖数据库人工修正后的部门路径。
+     */
+    public UserRecord upsertUser(
+            String idSource,
+            String externalId,
+            String realName,
+            String deptPath,
+            boolean syncDeptPath
+    ) {
         Optional<UserRecord> existing = findUser(idSource, externalId);
         if (existing.isPresent()) {
             UserRecord u = existing.get();
-            String updateSql = "UPDATE sys_users SET real_name = ?, dept_path = ?, last_login_at = NOW() WHERE id = ?";
-            jdbcTemplate.update(updateSql, realName, deptPath, u.id());
+            if (syncDeptPath && !Objects.equals(u.deptPath(), deptPath)) {
+                String updateSql = "UPDATE sys_users SET real_name = ?, dept_path = ?, last_login_at = NOW() WHERE id = ?";
+                jdbcTemplate.update(updateSql, realName, deptPath, u.id());
+            } else {
+                String updateSql = "UPDATE sys_users SET real_name = ?, last_login_at = NOW() WHERE id = ?";
+                jdbcTemplate.update(updateSql, realName, u.id());
+            }
             return findUser(idSource, externalId).orElse(u);
         }
 

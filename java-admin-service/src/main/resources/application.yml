@@ -23,6 +23,11 @@ spring:
     baseline-on-migrate: true
     locations: classpath:db/migration
 
+  data:
+    redis:
+      url: ${REDIS_URL:redis://127.0.0.1:6379/0}
+      timeout: 5s
+
   security:
     oauth2:
       client:
@@ -50,12 +55,17 @@ spring:
 
 # Phase-6 业务 JWT 与模型租约配置
 rag:
+  redis:
+    revocation-ttl-seconds: ${AUTH_REVOCATION_TTL_SECONDS:86400}
   jwt:
     issuer: "rag-admin"
     audience: "rag-engine"
-    ttl-minutes: 30
+    ttl-minutes: ${JWT_TTL_MINUTES:10}
+    kid: ${JWT_KEY_ID:rag-admin-key-1}
     private-key-path: ${JWT_PRIVATE_KEY_PATH:../keys/rsa_private.pem}
     public-key-path: ${JWT_PUBLIC_KEY_PATH:../keys/rsa_public.pem}
+    previous-kid: ${JWT_PREVIOUS_KEY_ID:}
+    previous-public-key-path: ${JWT_PREVIOUS_PUBLIC_KEY_PATH:}
   internal:
     service-id: ${MODEL_KEY_SERVICE_ID:rag-engine}
     service-token: ${MODEL_KEY_SERVICE_SECRET:rag-engine-service-secret}

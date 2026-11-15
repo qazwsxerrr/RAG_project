@@ -24,4 +24,4 @@ ENV PYTHONPATH=/app/backend/src:/app
 
 EXPOSE 8001
 
-CMD ["uvicorn", "rag_kb.api.main:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["uvicorn", "rag_kb.api.main:app", "--host", "0.0.0.0", "--port", "8001", "--no-access-log"]

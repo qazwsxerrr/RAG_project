@@ -27,15 +27,9 @@ export interface UserProfile {
   cv: number;
 }
 
-/** 凭会话 Cookie 换取业务 JWT (30min) */
+/** 凭会话 Cookie 换取业务 JWT (10min) */
 export async function fetchToken(): Promise<TokenResponse> {
   const resp = await adminClient.post<TokenResponse>('/auth/token');
-  return resp.data;
-}
-
-/** 获取当前登录用户画像与权限范围 */
-export async function getMe(): Promise<UserProfile> {
-  const resp = await adminClient.get<UserProfile>('/users/me');
   return resp.data;
 }
 

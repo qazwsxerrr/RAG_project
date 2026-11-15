@@ -18,11 +18,11 @@ class MultimodalVLMService:
 
     @property
     def base_url(self) -> str:
-        return settings.active_llm_base_url
+        return settings.active_base_url
 
     @property
     def model(self) -> str:
-        return settings.active_llm_model
+        return settings.active_model_name
 
     def _call_gateway(
         self,
@@ -234,7 +234,7 @@ class MultimodalVLMService:
         if image_url_or_path.startswith("http://") or image_url_or_path.startswith("https://"):
             if "aliyuncs.com" in image_url_or_path and "OSSAccessKeyId" not in image_url_or_path:
                 from rag_kb.utils.oss import oss_service
-                return oss_service.sign_url(image_url_or_path, expires=3600)
+                return oss_service.signed_url(image_url_or_path, expires=3600)
             return image_url_or_path
 
         if image_url_or_path.startswith("data:image"):

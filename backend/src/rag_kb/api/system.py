@@ -16,6 +16,7 @@ from sqlalchemy import select, desc, or_
 
 from rag_kb.api.deps import UserContext, require_permission
 from rag_kb.core.config import settings, derive_provider_from_url
+from rag_kb.core.constants import Permissions
 from rag_kb.core.llm import llm_gateway
 from rag_kb.core.resilience.circuit_breaker import CallMetric
 from rag_kb.core.logging.context import get_request_id
@@ -162,7 +163,7 @@ def _aggregate_logs_metrics(logs: List[AuditLog]) -> Dict[str, Any]:
 @router.get("/llm/channels")
 async def get_llm_channels_status(
     range: str = Query("90m", pattern="^(90m|24h|7d|30d)$"),
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.SYSTEM_ADMIN))
 ):
     """获取所有模型渠道与检索基建组件的真实监控大盘数据 (基于 UTC 时间窗与 SSOT 审计表)"""
     tracker = llm_gateway.health_tracker
@@ -329,7 +330,7 @@ async def get_llm_channels_status(
 async def get_channel_audit_logs(
     node_name: str,
     limit: int = 30,
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.SYSTEM_ADMIN))
 ):
     """查询指定模型或基建节点的近 30 次真实审计调用流水"""
     try:
@@ -369,7 +370,7 @@ async def get_channel_audit_logs(
 @router.post("/llm/channels/{node_name}/reset")
 async def reset_channel_circuit_breaker(
     node_name: str,
-    user: UserContext = Depends(require_permission("system:admin"))
+    user: UserContext = Depends(require_permission(Permissions.SYSTEM_ADMIN))
 ):
     """管理员手动重置指定模型节点的熔断状态至 CLOSED 健康 (持久化审计 + 跨 Worker 一致性)"""
     tracker = llm_gateway.health_tracker

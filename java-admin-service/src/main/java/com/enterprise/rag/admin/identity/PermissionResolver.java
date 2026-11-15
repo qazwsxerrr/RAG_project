@@ -11,6 +11,15 @@ import java.util.*;
 @Service
 public class PermissionResolver {
 
+    public static final Set<String> KNOWN_PERMISSIONS = Set.of(
+            "*",
+            "kb:retrieve",
+            "doc:upload",
+            "doc:delete",
+            "doc:review",
+            "system:admin"
+    );
+
     private final IdentityMapper identityMapper;
 
     public PermissionResolver(IdentityMapper identityMapper) {

@@ -1,3 +1,0 @@
-"""
-Backend App Module Adapter
-"""

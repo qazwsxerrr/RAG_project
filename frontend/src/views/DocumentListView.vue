@@ -39,7 +39,7 @@
         </button>
 
         <router-link 
-          v-if="authStore.hasPermission('doc:upload')"
+          v-if="authStore.hasPermission(PERMISSIONS.DOC_UPLOAD)"
           to="/documents/new" 
           class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 shadow-sm"
         >
@@ -58,7 +58,7 @@
     <!-- 文档表格 -->
     <DocumentTable 
       :documents="paginatedDocuments"
-      :canDelete="authStore.hasPermission('doc:delete')"
+      :canDelete="authStore.hasPermission(PERMISSIONS.DOC_DELETE)"
       @previewDoc="handlePreviewDoc"
       @viewChunks="openChunksModal"
       @viewProgress="goToProgress"
@@ -105,7 +105,8 @@
 import { ref, computed, watch, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useDocumentStore } from '../stores/document';
-import { useAuthStore, withTokenUrl } from '../stores/auth';
+import { useAuthStore, PERMISSIONS } from '../stores/auth';
+import { openDocumentPreviewWithTicket } from '../utils/secureMedia';
 import type { DocumentItem } from '../types';
 import DocumentFilters from '../components/documents/DocumentFilters.vue';
 import DocumentTable from '../components/documents/DocumentTable.vue';
@@ -206,8 +207,8 @@ const handleFilterChange = (filters: any) => {
   currentPage.value = 1;
 };
 
-const handlePreviewDoc = (doc: DocumentItem) => {
-  window.open(withTokenUrl(`/api/v1/documents/${doc.doc_id}/preview`), '_blank', 'noopener,noreferrer');
+const handlePreviewDoc = async (doc: DocumentItem) => {
+  await openDocumentPreviewWithTicket(doc.doc_id);
 };
 
 const handleRefresh = async () => {

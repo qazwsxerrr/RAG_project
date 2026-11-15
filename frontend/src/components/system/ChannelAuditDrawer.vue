@@ -141,7 +141,7 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue';
 import { systemApi, type ModelChannelItem, type AuditLogItem } from '../../api/system';
-import { useAuthStore } from '../../stores/auth';
+import { useAuthStore, PERMISSIONS } from '../../stores/auth';
 
 const props = defineProps<{
   isOpen: boolean;
@@ -154,7 +154,7 @@ const emit = defineEmits<{
 }>();
 
 const authStore = useAuthStore();
-const canReset = computed(() => authStore.hasPermission('system:admin') || authStore.hasPermission('*'));
+const canReset = computed(() => authStore.hasPermission(PERMISSIONS.SYSTEM_ADMIN));
 
 const audits = ref<AuditLogItem[]>([]);
 const isLoading = ref(false);

@@ -1,6 +1,15 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
-import { fetchToken, getMe, logout as apiLogout, type UserProfile } from '../api/auth';
+import { fetchToken, logout as apiLogout, type UserProfile } from '../api/auth';
+
+export const PERMISSIONS = {
+  ALL: '*',
+  KB_RETRIEVE: 'kb:retrieve',
+  DOC_UPLOAD: 'doc:upload',
+  DOC_DELETE: 'doc:delete',
+  DOC_REVIEW: 'doc:review',
+  SYSTEM_ADMIN: 'system:admin',
+} as const;
 
 /** 解析 JWT 载荷信息 */
 export function parseJwtPayload(token: string): Record<string, any> | null {
@@ -43,7 +52,7 @@ export const useAuthStore = defineStore('auth', () => {
   const isPermissionDenied = ref<boolean>(false);
 
   /**
-   * 凭会话 Cookie 向 Java 鉴权中心换取业务 JWT (30min)，支持并发互斥锁
+   * 凭会话 Cookie 向 Java 鉴权中心换取业务 JWT (10min)，直接从已签名 JWT 载荷同步当前员工画像
    */
   const refreshToken = async (): Promise<string> => {
     if (refreshPromise) {
@@ -56,11 +65,21 @@ export const useAuthStore = defineStore('auth', () => {
         if (resp && resp.access_token) {
           token.value = resp.access_token;
           isPermissionDenied.value = false;
-          try {
-            currentUser.value = await getMe();
-          } catch {
-            // me 接口非阻塞
+          const payload = parseJwtPayload(resp.access_token);
+          if (!payload || !payload.sub) {
+            throw new Error('鉴权中心返回的 JWT 载荷缺少必要身份字段');
           }
+          currentUser.value = {
+            user_id: String(payload.sub),
+            tenant_id: String(payload.tenant_id || 'default_tenant'),
+            username: String(payload.username || ''),
+            dept_path: String(payload.dept_path || ''),
+            data_scope: String(payload.data_scope || 'DEPT_TREE'),
+            roles: Array.isArray(payload.roles) ? payload.roles : [],
+            perms: Array.isArray(payload.perms) ? payload.perms : [],
+            is_to_c: Boolean(payload.is_to_c),
+            cv: Number(payload.cv ?? 1),
+          };
           return resp.access_token;
         }
         throw new Error('鉴权中心未返回有效 access_token');
@@ -113,7 +132,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   const hasPermission = (perm: string): boolean => {
     const perms = currentUser.value?.perms || [];
-    return perms.includes('*') || perms.includes(perm);
+    return perms.includes(PERMISSIONS.ALL) || perms.includes(perm);
   };
 
   return {
@@ -127,20 +146,3 @@ export const useAuthStore = defineStore('auth', () => {
     logout,
   };
 });
-
-/**
- * 为原生浏览器标签 (<img> / <a> / EventSource) 受控注入当前内存态 JWT
- * 仅对本系统后端代理路径 (/api/v1/...) 追加 ?token=，外部绝对链接保持原样
- */
-export function withTokenUrl(url?: string | null): string {
-  if (!url) return '';
-  if (!url.startsWith('/api/')) return url;
-  const authStore = useAuthStore();
-  const tk = authStore.token;
-  if (!tk) return url;
-
-  const [pathAndQuery, hash] = url.split('#');
-  const sep = pathAndQuery.includes('?') ? '&' : '?';
-  const withParam = `${pathAndQuery}${sep}token=${encodeURIComponent(tk)}`;
-  return hash ? `${withParam}#${hash}` : withParam;
-}

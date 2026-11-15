@@ -143,7 +143,7 @@ class BlueGreenUpdateService:
                 for rev in pending_reviews:
                     if not isinstance(rev, dict):
                         continue
-                    item_key = rev.get("item_id") or rev.get("item_key") or f"rev_{uuid.uuid4().hex[:8]}"
+                    item_key = rev["item_id"]
                     review_rec = DocumentReviewItem(
                         id=uuid.uuid4(),
                         document_id=doc_id,
@@ -153,7 +153,7 @@ class BlueGreenUpdateService:
                         page_idx=rev.get("page_idx", 0),
                         display_page=rev.get("display_page", 1),
                         line_number=rev.get("line_number"),
-                        asset_url=rev.get("asset_url", "") or "",
+                        asset_url=rev.get("raw_oss_url") or "",
                         raw_content=rev.get("raw_content"),
                         vlm_description=rev.get("vlm_description", ""),
                         user_description=rev.get("user_description"),

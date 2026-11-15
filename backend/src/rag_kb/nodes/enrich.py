@@ -53,7 +53,7 @@ class EnrichNode(BaseNode):
                 return
 
             signed_img_url = (
-                oss_service.sign_url(raw_url, expires=3600)
+                oss_service.signed_url(raw_url, expires=3600)
                 if ("aliyuncs.com" in raw_url and "OSSAccessKeyId" not in raw_url)
                 else raw_url
             )

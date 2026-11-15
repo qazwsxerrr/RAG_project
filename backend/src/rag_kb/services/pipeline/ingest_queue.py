@@ -26,6 +26,7 @@ from sqlalchemy import select
 
 from rag_kb.core.config import settings
 from rag_kb.core.constants import IngestStatus
+from rag_kb.core.logging.context import set_trace_context, reset_trace_context, get_request_id
 from rag_kb.core.redis_client import get_redis_client
 from rag_kb.db.session import AsyncSessionLocal
 from rag_kb.db.models import Document
@@ -117,6 +118,9 @@ class RedisIngestQueueService:
         temp_file_path: Optional[str] = None,
         attempt: int = 0,
         from_step: int = 1,
+        user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> str:
         """向真实 Redis Streams 投递轻量文档解析任务（严禁携带大体积二进制）"""
         await self.ensure_consumer_group()
@@ -135,6 +139,9 @@ class RedisIngestQueueService:
             "temp_file_path": str(temp_file_path or ""),
             "attempt": str(int(attempt)),
             "from_step": str(eff_step),
+            "user_id": str(user_id or ""),
+            "tenant_id": str(tenant_id or settings.DEFAULT_TENANT_ID),
+            "request_id": str(request_id or get_request_id()),
         }
         msg_id = await redis_cli.xadd(
             self.stream_key,
@@ -462,10 +469,22 @@ class RedisIngestQueueService:
             cleanup_doc_temp_files(doc_id, final_mem_state.get("temp_file_path"))
             final_mem_state["temp_file_path"] = None
 
-    async def resume_after_review(self, doc_id: str, resume_payload: List[Dict[str, Any]]) -> None:
+    async def resume_after_review(
+        self,
+        doc_id: str,
+        resume_payload: List[Dict[str, Any]],
+        user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
         """受队列并发信号量保护唤醒第 7 步人工审核挂起图，并完整同步 DB 终态"""
         sem = self._get_semaphore()
         await sem.acquire()
+        trace_token = set_trace_context(
+            request_id=request_id,
+            tenant_id=tenant_id or settings.DEFAULT_TENANT_ID,
+            user_id=user_id,
+        )
         try:
             state = pipeline_manager.get_state(doc_id) or {}
             state["overall_status"] = "running"
@@ -522,12 +541,25 @@ class RedisIngestQueueService:
                 },
             )
         finally:
+            reset_trace_context(trace_token)
             sem.release()
 
-    async def resume_after_duplicate_decision(self, doc_id: str, state: Dict[str, Any]) -> None:
+    async def resume_after_duplicate_decision(
+        self,
+        doc_id: str,
+        state: Dict[str, Any],
+        user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
         """受队列并发信号量保护恢复第 11 步防重冲突决策后的入库操作，并完整同步 DB 终态"""
         sem = self._get_semaphore()
         await sem.acquire()
+        trace_token = set_trace_context(
+            request_id=request_id,
+            tenant_id=tenant_id or settings.DEFAULT_TENANT_ID,
+            user_id=user_id,
+        )
         try:
             eff_from = 11 if can_safely_jump_to_step(state, 11) else 1
             state["resume_from_step"] = eff_from
@@ -585,6 +617,7 @@ class RedisIngestQueueService:
                 },
             )
         finally:
+            reset_trace_context(trace_token)
             sem.release()
 
     def schedule_background_resume(self, coro) -> asyncio.Task:
@@ -607,108 +640,158 @@ class RedisIngestQueueService:
         skip_review = fields.get("skip_review") == "1"
         attempt = int(fields.get("attempt", "0") or 0)
         requested_from_step = max(1, min(11, int(fields.get("from_step", "1") or 1)))
+        user_id = fields.get("user_id") or None
+        tenant_id = fields.get("tenant_id") or settings.DEFAULT_TENANT_ID
+        request_id = fields.get("request_id") or None
 
-        try:
-            tags = json.loads(fields.get("tags_json", "[]"))
-            if not isinstance(tags, list):
-                tags = []
-        except Exception:
-            tags = []
-
-        if not doc_id:
-            await redis_cli.xack(self.stream_key, self.group_name, msg_id)
-            return
-
-        # 若文档在排队期间已被用户物理删除，清理残余临时文件并直接 XACK 跳过，避免浪费算力
-        try:
-            doc_uuid = uuid.UUID(doc_id)
-            async with AsyncSessionLocal() as session:
-                db_doc = await session.get(Document, doc_uuid)
-                if db_doc is None:
-                    logger.info(f"[IngestQueue] 文档已在排队期间被删除，跳过消费: doc_id={doc_id}")
-                    cleanup_doc_temp_files(doc_id, temp_file_path)
-                    await redis_cli.xack(self.stream_key, self.group_name, msg_id)
-                    return
-        except ValueError:
-            await redis_cli.xack(self.stream_key, self.group_name, msg_id)
-            return
-
-        state = pipeline_manager.get_state(doc_id)
-        if not state:
-            state = get_default_state(
-                doc_id=doc_id,
-                file_name=file_name,
-                temp_file_path=temp_file_path,
-                department=department,
-                category=category,
-                tags=tags,
-                skip_review=skip_review,
-            )
-            state["raw_oss_url"] = raw_oss_url
-            state["file_hash"] = file_hash
-            pipeline_manager.register_pipeline(doc_id, state)
-        else:
-            state["raw_oss_url"] = raw_oss_url or state.get("raw_oss_url")
-            state["file_hash"] = file_hash or state.get("file_hash")
-            state["error"] = None
-            state["failed_step"] = None
-
-        effective_start_step = (
-            requested_from_step
-            if (requested_from_step > 1 and can_safely_jump_to_step(state, requested_from_step))
-            else 1
+        trace_token = set_trace_context(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
         )
-        state["resume_from_step"] = effective_start_step if effective_start_step > 1 else None
-        state["current_step_index"] = effective_start_step
-        state["overall_status"] = "running"
-        await self._sync_db_pipeline_state(doc_id, "running", effective_start_step, state.get("steps"))
-
-        config = {"configurable": {"thread_id": doc_id}}
-        graph = get_ingest_graph()
-
         try:
-            latest_graph_state: Optional[Dict[str, Any]] = None
-            async for mode, chunk in graph.astream(
-                state,
-                config=config,
-                stream_mode=["custom", "values"],
-            ):
-                if mode == "custom" and isinstance(chunk, dict):
-                    evt_name = chunk.get("event", "message")
-                    await pipeline_manager.broadcast(doc_id, evt_name, chunk)
-                elif mode == "values" and isinstance(chunk, dict):
-                    latest_graph_state = chunk
+            request_id = get_request_id()
+            tags_raw = fields.get("tags_json", "[]")
+            try:
+                tags = json.loads(tags_raw)
+                if not isinstance(tags, list):
+                    tags = []
+            except Exception:
+                tags = []
 
-            state["resume_from_step"] = None
-            if latest_graph_state:
-                latest_graph_state["resume_from_step"] = None
-                pipeline_manager.update_state(doc_id, latest_graph_state)
+            if not doc_id:
+                await redis_cli.xack(self.stream_key, self.group_name, msg_id)
+                return
 
-            # 检查图结束后的最新态（BaseNode 捕获节点异常时会把 state["overall_status"] 置为 "failed" 并短路至 END）
-            final_mem_state = latest_graph_state or pipeline_manager.get_state(doc_id) or state
-            final_status = final_mem_state.get("overall_status", "")
-            err_msg = final_mem_state.get("error")
+            # 若文档在排队期间已被用户物理删除，清理残余临时文件并直接 XACK 跳过，避免浪费算力
+            try:
+                doc_uuid = uuid.UUID(doc_id)
+                async with AsyncSessionLocal() as session:
+                    db_doc = await session.get(Document, doc_uuid)
+                    if db_doc is None:
+                        logger.info(f"[IngestQueue] 文档已在排队期间被删除，跳过消费: doc_id={doc_id}")
+                        cleanup_doc_temp_files(doc_id, temp_file_path)
+                        await redis_cli.xack(self.stream_key, self.group_name, msg_id)
+                        return
+            except ValueError:
+                await redis_cli.xack(self.stream_key, self.group_name, msg_id)
+                return
 
-            if final_status == IngestStatus.FAILED.value or err_msg:
-                failed_step = final_mem_state.get("failed_step") or final_mem_state.get("current_step_index", 1)
-                is_format_rejected = "[FORMAT_INVALID]" in str(err_msg or "")
+            state = pipeline_manager.get_state(doc_id)
+            if not state:
+                state = get_default_state(
+                    doc_id=doc_id,
+                    file_name=file_name,
+                    temp_file_path=temp_file_path,
+                    department=department,
+                    category=category,
+                    tags=tags,
+                    skip_review=skip_review,
+                )
+                state["raw_oss_url"] = raw_oss_url
+                state["file_hash"] = file_hash
+                pipeline_manager.register_pipeline(doc_id, state)
+            else:
+                state["raw_oss_url"] = raw_oss_url or state.get("raw_oss_url")
+                state["file_hash"] = file_hash or state.get("file_hash")
+                state["error"] = None
+                state["failed_step"] = None
 
-                # 若非确定性格式错误且尚有自动重试配额，重新投递队列重试一次（保留失败步骤上下文）
+            effective_start_step = (
+                requested_from_step
+                if (requested_from_step > 1 and can_safely_jump_to_step(state, requested_from_step))
+                else 1
+            )
+            state["resume_from_step"] = effective_start_step if effective_start_step > 1 else None
+            state["current_step_index"] = effective_start_step
+            state["overall_status"] = "running"
+            await self._sync_db_pipeline_state(doc_id, "running", effective_start_step, state.get("steps"))
+
+            config = {"configurable": {"thread_id": doc_id}}
+            graph = get_ingest_graph()
+
+            try:
+                latest_graph_state: Optional[Dict[str, Any]] = None
+                async for mode, chunk in graph.astream(
+                    state,
+                    config=config,
+                    stream_mode=["custom", "values"],
+                ):
+                    if mode == "custom" and isinstance(chunk, dict):
+                        evt_name = chunk.get("event", "message")
+                        await pipeline_manager.broadcast(doc_id, evt_name, chunk)
+                    elif mode == "values" and isinstance(chunk, dict):
+                        latest_graph_state = chunk
+
+                state["resume_from_step"] = None
+                if latest_graph_state:
+                    latest_graph_state["resume_from_step"] = None
+                    pipeline_manager.update_state(doc_id, latest_graph_state)
+
+                # 检查图结束后的最新态（BaseNode 捕获节点异常时会把 state["overall_status"] 置为 "failed" 并短路至 END）
+                final_mem_state = latest_graph_state or pipeline_manager.get_state(doc_id) or state
+                final_status = final_mem_state.get("overall_status", "")
+                err_msg = final_mem_state.get("error")
+
+                if final_status == IngestStatus.FAILED.value or err_msg:
+                    failed_step = final_mem_state.get("failed_step") or final_mem_state.get("current_step_index", 1)
+                    is_format_rejected = "[FORMAT_INVALID]" in str(err_msg or "")
+
+                    # 若非确定性格式错误且尚有自动重试配额，重新投递队列重试一次（保留失败步骤上下文）
+                    if (not is_format_rejected) and attempt < settings.INGEST_MAX_AUTO_RETRIES:
+                        logger.warning(
+                            f"[IngestQueue] 文档解析瞬态失败，执行队列自动重试 ({attempt + 1}/{settings.INGEST_MAX_AUTO_RETRIES}): doc_id={doc_id}, err={err_msg}"
+                        )
+                        # 重试前清空历史步骤报错残留并重置状态为 waiting
+                        steps = final_mem_state.get("steps", [])
+                        for idx in range(max(0, failed_step - 1), len(steps)):
+                            steps[idx]["status"] = "waiting"
+                            steps[idx]["error"] = None
+                            steps[idx]["duration_ms"] = 0
+                        final_mem_state["error"] = None
+                        final_mem_state["failed_step"] = None
+                        final_mem_state["overall_status"] = "queued"
+                        await self._sync_db_pipeline_state(doc_id, "queued", failed_step, steps)
+
+                        await redis_cli.xack(self.stream_key, self.group_name, msg_id)
+                        await self.enqueue_ingest_task(
+                            doc_id=doc_id,
+                            file_name=file_name,
+                            raw_oss_url=raw_oss_url,
+                            file_hash=file_hash,
+                            department=department,
+                            category=category,
+                            tags=tags,
+                            skip_review=skip_review,
+                            temp_file_path=temp_file_path,
+                            attempt=attempt + 1,
+                            from_step=failed_step,
+                            user_id=user_id,
+                            tenant_id=tenant_id,
+                            request_id=request_id,
+                        )
+                        return
+
+                await self._finalize_post_graph_state(doc_id, final_mem_state)
+                await redis_cli.xack(self.stream_key, self.group_name, msg_id)
+
+            except Exception as err:
+                state["resume_from_step"] = None
+                logger.error(f"[IngestQueue] 流水线消费顶层异常 [doc_id={doc_id}]: {err}", exc_info=True)
+                is_format_rejected = "[FORMAT_INVALID]" in str(err)
+                curr_state = pipeline_manager.get_state(doc_id) or state
+                step_idx = curr_state.get("failed_step") or curr_state.get("current_step_index", 1)
+
                 if (not is_format_rejected) and attempt < settings.INGEST_MAX_AUTO_RETRIES:
-                    logger.warning(
-                        f"[IngestQueue] 文档解析瞬态失败，执行队列自动重试 ({attempt + 1}/{settings.INGEST_MAX_AUTO_RETRIES}): doc_id={doc_id}, err={err_msg}"
-                    )
-                    # 重试前清空历史步骤报错残留并重置状态为 waiting
-                    steps = final_mem_state.get("steps", [])
-                    for idx in range(max(0, failed_step - 1), len(steps)):
+                    steps = curr_state.get("steps", [])
+                    for idx in range(max(0, step_idx - 1), len(steps)):
                         steps[idx]["status"] = "waiting"
                         steps[idx]["error"] = None
                         steps[idx]["duration_ms"] = 0
-                    final_mem_state["error"] = None
-                    final_mem_state["failed_step"] = None
-                    final_mem_state["overall_status"] = "queued"
-                    await self._sync_db_pipeline_state(doc_id, "queued", failed_step, steps)
-
+                    curr_state["error"] = None
+                    curr_state["failed_step"] = None
+                    curr_state["overall_status"] = "queued"
+                    await self._sync_db_pipeline_state(doc_id, "queued", step_idx, steps)
                     await redis_cli.xack(self.stream_key, self.group_name, msg_id)
                     await self.enqueue_ingest_task(
                         doc_id=doc_id,
@@ -721,62 +804,31 @@ class RedisIngestQueueService:
                         skip_review=skip_review,
                         temp_file_path=temp_file_path,
                         attempt=attempt + 1,
-                        from_step=failed_step,
+                        from_step=step_idx,
+                        user_id=user_id,
+                        tenant_id=tenant_id,
+                        request_id=request_id,
                     )
                     return
 
-            await self._finalize_post_graph_state(doc_id, final_mem_state)
-            await redis_cli.xack(self.stream_key, self.group_name, msg_id)
-
-        except Exception as err:
-            state["resume_from_step"] = None
-            logger.error(f"[IngestQueue] 流水线消费顶层异常 [doc_id={doc_id}]: {err}", exc_info=True)
-            is_format_rejected = "[FORMAT_INVALID]" in str(err)
-            curr_state = pipeline_manager.get_state(doc_id) or state
-            step_idx = curr_state.get("failed_step") or curr_state.get("current_step_index", 1)
-
-            if (not is_format_rejected) and attempt < settings.INGEST_MAX_AUTO_RETRIES:
-                steps = curr_state.get("steps", [])
-                for idx in range(max(0, step_idx - 1), len(steps)):
-                    steps[idx]["status"] = "waiting"
-                    steps[idx]["error"] = None
-                    steps[idx]["duration_ms"] = 0
-                curr_state["error"] = None
-                curr_state["failed_step"] = None
-                curr_state["overall_status"] = "queued"
-                await self._sync_db_pipeline_state(doc_id, "queued", step_idx, steps)
-                await redis_cli.xack(self.stream_key, self.group_name, msg_id)
-                await self.enqueue_ingest_task(
+                await self._sync_db_pipeline_state(
                     doc_id=doc_id,
-                    file_name=file_name,
-                    raw_oss_url=raw_oss_url,
-                    file_hash=file_hash,
-                    department=department,
-                    category=category,
-                    tags=tags,
-                    skip_review=skip_review,
-                    temp_file_path=temp_file_path,
-                    attempt=attempt + 1,
-                    from_step=step_idx,
+                    overall_status=IngestStatus.FAILED.value,
+                    step_index=step_idx,
+                    steps=curr_state.get("steps"),
                 )
-                return
-
-            await self._sync_db_pipeline_state(
-                doc_id=doc_id,
-                overall_status=IngestStatus.FAILED.value,
-                step_index=step_idx,
-                steps=curr_state.get("steps"),
-            )
-            await pipeline_manager.broadcast(
-                doc_id,
-                "pipeline_failed",
-                {
-                    "doc_id": doc_id,
-                    "step": step_idx,
-                    "error": str(err),
-                },
-            )
-            await redis_cli.xack(self.stream_key, self.group_name, msg_id)
+                await pipeline_manager.broadcast(
+                    doc_id,
+                    "pipeline_failed",
+                    {
+                        "doc_id": doc_id,
+                        "step": step_idx,
+                        "error": str(err),
+                    },
+                )
+                await redis_cli.xack(self.stream_key, self.group_name, msg_id)
+        finally:
+            reset_trace_context(trace_token)
 
 
 ingest_queue_service = RedisIngestQueueService()

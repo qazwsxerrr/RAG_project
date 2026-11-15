@@ -192,12 +192,14 @@
               <!-- Tab 3: 原版切图展示 (若存在) -->
               <div v-show="getTab(chunk.chunk_index) === 'asset'" v-if="chunk.asset_url" class="relative group bg-white border border-slate-200 rounded-lg p-3 flex justify-center">
                 <img 
-                  :src="withTokenUrl(chunk.asset_url)" 
+                  v-if="getAssetBlobUrl(chunk.asset_url)"
+                  :src="getAssetBlobUrl(chunk.asset_url)" 
                   alt="流程图原文档截取" 
                   class="max-h-72 object-contain rounded cursor-zoom-in transition-transform duration-150 group-hover:scale-[1.01]" 
-                  @click="openLightbox(withTokenUrl(chunk.asset_url))" 
+                  @click="openLightbox(getAssetBlobUrl(chunk.asset_url))" 
                   loading="lazy"
                 />
+                <span v-else class="text-xs text-slate-400 py-6">正在加载切图...</span>
                 <div class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900/80 text-white text-[11px] px-2.5 py-1 rounded flex items-center gap-1 pointer-events-none">
                   <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
                   <span>点击放大</span>
@@ -247,12 +249,14 @@
                 class="relative group bg-white border border-slate-200 rounded-lg p-3 flex justify-center"
               >
                 <img 
-                  :src="withTokenUrl(chunk.asset_url)" 
+                  v-if="getAssetBlobUrl(chunk.asset_url)"
+                  :src="getAssetBlobUrl(chunk.asset_url)" 
                   alt="表格原文档截取" 
                   class="max-h-72 object-contain rounded cursor-zoom-in transition-transform duration-150 group-hover:scale-[1.01]" 
-                  @click="openLightbox(withTokenUrl(chunk.asset_url))" 
+                  @click="openLightbox(getAssetBlobUrl(chunk.asset_url))" 
                   loading="lazy"
                 />
+                <span v-else class="text-xs text-slate-400 py-6">正在加载切图...</span>
                 <div class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900/80 text-white text-[11px] px-2.5 py-1 rounded flex items-center gap-1 pointer-events-none">
                   <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
                   <span>点击放大</span>
@@ -295,24 +299,26 @@
                   </svg>
                   <span>配图</span>
                 </div>
-                <a 
-                  :href="withTokenUrl(chunk.asset_url)" 
-                  target="_blank" 
-                  class="text-[11px] text-purple-700 hover:text-purple-800 font-medium flex items-center gap-1"
+                <button
+                  type="button"
+                  @click="openProtectedImageInNewTab(getAssetBlobUrl(chunk.asset_url) || chunk.asset_url)"
+                  class="text-[11px] text-purple-700 hover:text-purple-800 font-medium flex items-center gap-1 cursor-pointer"
                 >
                   <span>在新标签打开</span>
                   <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                </a>
+                </button>
               </div>
 
               <div class="relative group bg-white border border-slate-200 rounded-lg p-3 flex justify-center overflow-hidden">
                 <img 
-                  :src="withTokenUrl(chunk.asset_url)" 
+                  v-if="getAssetBlobUrl(chunk.asset_url)"
+                  :src="getAssetBlobUrl(chunk.asset_url)" 
                   :alt="chunk.chunk_label" 
                   class="max-h-72 object-contain rounded cursor-zoom-in transition-transform duration-150 group-hover:scale-[1.01]" 
-                  @click="openLightbox(withTokenUrl(chunk.asset_url))" 
+                  @click="openLightbox(getAssetBlobUrl(chunk.asset_url))" 
                   loading="lazy"
                 />
+                <span v-else class="text-xs text-slate-400 py-6">正在加载配图...</span>
                 <div class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900/80 text-white text-[11px] px-2.5 py-1 rounded flex items-center gap-1 pointer-events-none">
                   <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
                   <span>点击全屏放大</span>
@@ -341,14 +347,14 @@
 
             <!-- 关联原图链接 (非配图类型时显示) -->
             <div v-if="chunk.asset_url && !isImage(chunk)" class="flex items-center justify-end text-xs pt-1">
-              <a 
-                :href="withTokenUrl(chunk.asset_url)" 
-                target="_blank" 
-                class="text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1 transition-colors text-[11px]"
+              <button
+                type="button"
+                @click="openProtectedImageInNewTab(getAssetBlobUrl(chunk.asset_url) || chunk.asset_url)"
+                class="text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1 transition-colors text-[11px] cursor-pointer"
               >
                 <span>查看原图</span>
                 <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-              </a>
+              </button>
             </div>
           </div>
         </div>
@@ -426,7 +432,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import MarkdownIt from 'markdown-it';
 import type { ChunkItem } from '../../types';
 import { documentsApi } from '../../api/documents';
-import { withTokenUrl } from '../../stores/auth';
+import { createSecureBlobCache, openProtectedImageInNewTab } from '../../utils/secureMedia';
 
 const props = defineProps<{
   visible: boolean;
@@ -467,6 +473,19 @@ const mermaidErrors = ref<Record<number, string>>({});
 // 复制状态与图片灯箱
 const copiedId = ref<number | null>(null);
 const lightboxUrl = ref<string | null>(null);
+const assetBlobCache = createSecureBlobCache();
+
+function getAssetBlobUrl(assetUrl?: string): string {
+  return assetBlobCache.getUrl(assetUrl);
+}
+
+function preloadVisibleChunkAssets() {
+  for (const c of pagedChunks.value) {
+    if (c.asset_url) {
+      assetBlobCache.ensureLoaded(c.asset_url).catch(() => {});
+    }
+  }
+}
 
 // 切片统计
 const stats = computed(() => {
@@ -519,6 +538,7 @@ function selectFilterType(type: 'all' | 'table' | 'flowchart' | 'code' | 'image'
   currentPage.value = 1;
   nextTick(() => {
     if (scrollBodyRef.value) scrollBodyRef.value.scrollTop = 0;
+    preloadVisibleChunkAssets();
     renderVisibleFlowcharts();
   });
 }
@@ -529,6 +549,7 @@ function goPage(p: number) {
   currentPage.value = target;
   nextTick(() => {
     if (scrollBodyRef.value) scrollBodyRef.value.scrollTop = 0;
+    preloadVisibleChunkAssets();
     renderVisibleFlowcharts();
   });
 }
@@ -564,6 +585,12 @@ function getTab(chunkIndex: number): 'render' | 'source' | 'asset' {
 
 function setTab(chunkIndex: number, tab: 'render' | 'source' | 'asset') {
   activeTabs.value[chunkIndex] = tab;
+  if (tab === 'asset') {
+    const found = chunks.value.find((c) => c.chunk_index === chunkIndex);
+    if (found?.asset_url) {
+      assetBlobCache.ensureLoaded(found.asset_url).catch(() => {});
+    }
+  }
 }
 
 // 提取清洗 Mermaid 代码
@@ -686,12 +713,18 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown);
+  assetBlobCache.revokeAll();
 });
 
 // 监听加载切片数据
 watch(
   () => [props.visible, props.docId] as const,
   async ([vis, newId]) => {
+    if (!vis) {
+      lightboxUrl.value = null;
+      assetBlobCache.revokeAll();
+      return;
+    }
     if (vis && newId) {
       loading.value = true;
       currentPage.value = 1;
@@ -699,9 +732,11 @@ watch(
       mermaidSvgs.value = {};
       mermaidErrors.value = {};
       activeTabs.value = {};
+      assetBlobCache.revokeAll();
       try {
         chunks.value = await documentsApi.getDocumentChunks(newId);
         await nextTick();
+        preloadVisibleChunkAssets();
         await renderVisibleFlowcharts();
       } catch (err) {
         console.warn('加载切片失败:', err);

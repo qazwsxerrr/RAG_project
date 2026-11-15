@@ -95,7 +95,7 @@ class MinerUParserAdapter:
 
         # 若 Bucket 为私有访问，生成带有签名的临时下载 URL（2 小时有效），确保 MinerU 云端集群能够直接下载
         if "aliyuncs.com" in file_url and "OSSAccessKeyId" not in file_url:
-            signed_file_url = oss_service.sign_url(file_url, expires=7200)
+            signed_file_url = oss_service.signed_url(file_url, expires=7200)
         else:
             signed_file_url = file_url
 
@@ -283,7 +283,7 @@ class MinerUParserAdapter:
 
         # 私有 OSS 生成签名 URL
         if "aliyuncs.com" in file_url and "OSSAccessKeyId" not in file_url:
-            signed_file_url = oss_service.sign_url(file_url, expires=7200)
+            signed_file_url = oss_service.signed_url(file_url, expires=7200)
         else:
             signed_file_url = file_url
 

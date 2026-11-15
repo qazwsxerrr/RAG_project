@@ -77,7 +77,7 @@
           <!-- 厂商分组标题 -->
           <div class="flex items-center justify-between">
             <h2 class="text-xs font-bold text-slate-500 tracking-wide flex items-center gap-2">
-              <span>{{ formatVendorGroupTitle(group) }}</span>
+              <span>{{ group.vendor_name }}</span>
             </h2>
             <span class="text-[11px] text-slate-400 font-mono">{{ group.channels.length }} 个节点</span>
           </div>
@@ -109,7 +109,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import { systemApi, type ChannelsStatusResponse, type ModelChannelItem, type VendorGroup } from '../api/system';
+import { systemApi, type ChannelsStatusResponse, type ModelChannelItem } from '../api/system';
 import ChannelCard from '../components/system/ChannelCard.vue';
 import ChannelAuditDrawer from '../components/system/ChannelAuditDrawer.vue';
 
@@ -177,29 +177,6 @@ function changeRange(range: '90m' | '24h' | '7d' | '30d') {
 function handleSelectChannel(channel: ModelChannelItem) {
   selectedChannel.value = channel;
   isDrawerOpen.value = true;
-}
-
-// 若后端为旧进程仍返回历史写死标题（如含“旗舰主节点”/“容灾备选池”），前端按真实节点配置动态格式化展示
-function formatVendorGroupTitle(group: VendorGroup): string {
-  if (group.vendor_id === 'INFRA') {
-    return '向量与排序服务';
-  }
-  const raw = group.vendor_name || '';
-  if (!raw.includes('旗舰') && !raw.includes('备选池') && !raw.includes('候选池') && !raw.includes('服务池')) {
-    return raw;
-  }
-  const roles = new Set(group.channels.map((c) => c.role));
-  const models = group.channels.map((c) => c.model).filter(Boolean);
-  if (roles.size === 1 && roles.has('PRIMARY') && models.length === 1) {
-    return `${group.vendor_id} · 主用模型服务 (${models[0]})`;
-  }
-  if (roles.has('PRIMARY') && roles.has('FALLBACK')) {
-    return `${group.vendor_id} · 主备模型服务`;
-  }
-  if (roles.has('PRIMARY')) {
-    return `${group.vendor_id} · 主用模型服务`;
-  }
-  return `${group.vendor_id} · 备用模型服务`;
 }
 
 onMounted(async () => {

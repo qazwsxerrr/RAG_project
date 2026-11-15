@@ -196,8 +196,8 @@ class LLMGateway:
     ) -> Tuple[str, Dict[str, str], Dict[str, Any], str]:
         """同步请求组装（未显式传 api_key 时同步向鉴权中心换取短期租约）"""
         final_api_key = api_key or ""
-        final_base_url = (base_url if base_url is not None else settings.active_llm_base_url).rstrip("/")
-        final_model = model if model is not None else settings.active_llm_model
+        final_base_url = (base_url if base_url is not None else settings.active_base_url).rstrip("/")
+        final_model = model if model is not None else settings.active_model_name
 
         if not final_api_key or final_api_key.startswith("your_") or "*" in final_api_key:
             try:
@@ -238,8 +238,8 @@ class LLMGateway:
     ) -> Tuple[str, Dict[str, str], Dict[str, Any], str]:
         """异步请求组装（全程异步向鉴权中心换取短期租约，绝不阻塞事件循环）"""
         final_api_key = api_key or ""
-        final_base_url = (base_url if base_url is not None else settings.active_llm_base_url).rstrip("/")
-        final_model = model if model is not None else settings.active_llm_model
+        final_base_url = (base_url if base_url is not None else settings.active_base_url).rstrip("/")
+        final_model = model if model is not None else settings.active_model_name
 
         if not final_api_key or final_api_key.startswith("your_") or "*" in final_api_key:
             try:

@@ -14,29 +14,33 @@
 - POST /documents/{doc_id}/retry: 流水线重试
 """
 
+import re
 import uuid
 import json
 import hashlib
 import asyncio
 import logging
 from pathlib import Path
-from typing import List, Optional, AsyncGenerator, Dict, Any
+from typing import List, Optional, AsyncGenerator, Dict, Any, Tuple
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Header, Query, Depends, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from langgraph.types import Command
 
 from rag_kb.api.deps import (
     UserContext,
     get_current_user,
     require_permission,
-    require_permission_with_query_token,
     assert_doc_visible,
-    is_path_under_prefix
+    is_path_under_prefix,
+    issue_stream_ticket,
+    verify_stream_ticket,
+    get_session_auth_error,
+    SESSION_AUTH_ERROR_DETAILS,
 )
 from rag_kb.core.config import settings
-from rag_kb.core.constants import IngestStatus, STEP_NAMES
+from rag_kb.core.constants import IngestStatus, STEP_NAMES, Permissions
+from rag_kb.core.logging.context import get_request_id
 from rag_kb.db.session import get_db, AsyncSessionLocal
 from rag_kb.db.models import Document, DocumentChunk, Department, DocumentReviewItem
 from rag_kb.graph.state import get_default_state, IngestState
@@ -52,7 +56,9 @@ from rag_kb.api.schemas import (
     DuplicateResolveRequest,
     DuplicateResolveResponse,
     RetryPipelineRequest,
-    ReviewItem
+    ReviewItem,
+    StreamTicketRequest,
+    StreamTicketResponse,
 )
 from rag_kb.api.sse import pipeline_manager, format_sse
 from rag_kb.core.logging.audit import record_audit_log
@@ -69,12 +75,62 @@ router = APIRouter(prefix="/documents", tags=["文档管理与入库流水线"])
 router_chunks = APIRouter(prefix="/chunks", tags=["切片资产"])
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".pptx", ".md", ".txt"}
+PRIVATE_NO_STORE_CACHE = "private, no-store"
+_RANGE_HEADER_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
-def _sse_business_payload(event: dict) -> str:
-    payload = event.get("data")
-    if event.get("event") and isinstance(payload, dict):
-        return json.dumps(payload, default=str, ensure_ascii=False)
-    return json.dumps(event, default=str, ensure_ascii=False)
+
+def _parse_http_byte_range(range_header: Optional[str], total_size: int) -> Optional[Tuple[int, int]]:
+    """解析标准单段 HTTP Range 头 (bytes=start-end)，返回闭区间 (start, end)"""
+    if not range_header or total_size <= 0:
+        return None
+    m = _RANGE_HEADER_RE.match(range_header.strip())
+    if not m:
+        return None
+    start_str, end_str = m.group(1), m.group(2)
+    if not start_str and not end_str:
+        return None
+    if not start_str:
+        suffix_len = int(end_str)
+        if suffix_len <= 0:
+            return None
+        start = max(0, total_size - suffix_len)
+        end = total_size - 1
+    else:
+        start = int(start_str)
+        end = int(end_str) if end_str else (total_size - 1)
+        if start >= total_size or start > end:
+            raise HTTPException(
+                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+                detail="Requested Range Not Satisfiable",
+                headers={"Content-Range": f"bytes */{total_size}"},
+            )
+        end = min(end, total_size - 1)
+    return start, end
+
+
+async def _authenticate_bearer_or_ticket(
+    doc_id: str,
+    purpose: str,
+    authorization: Optional[str],
+    ticket: Optional[str],
+) -> UserContext:
+    """支持标准 Authorization Bearer 头或单文档单用途受限短票 (?ticket=)，彻底拒绝通用 ?token="""
+    if authorization and authorization.strip():
+        user = await get_current_user(authorization=authorization)
+    elif ticket and ticket.strip():
+        user = await verify_stream_ticket(ticket.strip(), expected_doc_id=doc_id, expected_purpose=purpose)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="【鉴权失败】缺少 Authorization 请求头或有效的单资源访问短票",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not user.has_permission(Permissions.KB_RETRIEVE.value):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"【权限不足】当前操作需要 [{Permissions.KB_RETRIEVE.value}] 权限点，您的角色缺乏此权限",
+        )
+    return user
 
 async def _resolve_or_create_department(db: AsyncSession, department_path: str) -> Department:
     """根据已校验的合法部门路径查找或建档 Department 记录，保障 rag_documents 外键完整"""
@@ -155,7 +211,7 @@ async def upload_document(
     custom_file_name: Optional[str] = Form(None),
     skip_review: bool = Form(False),
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission("doc:upload"))
+    user: UserContext = Depends(require_permission(Permissions.DOC_UPLOAD))
 ):
     """
     企业级高并发异步文档上传受理接口 (Phase-6 RBAC + Phase-8 Redis 限流与队列削峰)：
@@ -288,6 +344,9 @@ async def upload_document(
                     tags=parsed_tags,
                     skip_review=skip_review,
                     temp_file_path=str(temp_file_path),
+                    user_id=user.user_id,
+                    tenant_id=user.tenant_id,
+                    request_id=get_request_id(),
                 )
 
                 await db.commit()
@@ -341,7 +400,7 @@ async def upload_document(
 @router.get("", response_model=List[DocumentItemSchema])
 async def list_documents(
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """获取所有已入库与正在入库的文档列表 (强制按当前员工权限前缀隔离)"""
     stmt = select(Document).order_by(Document.created_at.desc())
@@ -422,7 +481,7 @@ async def list_documents(
 async def delete_document(
     doc_id: str,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission("doc:delete"))
+    user: UserContext = Depends(require_permission(Permissions.DOC_DELETE))
 ):
     """物理删除文档及其全部切片 (Phase-6: 校验 doc:delete 且强制 assert_doc_visible 防越权)"""
     try:
@@ -460,7 +519,7 @@ async def delete_document(
 async def get_document_chunks(
     doc_id: str,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """获取指定文档已入库的全部切片详情 (校验 kb:retrieve 并做 assert_doc_visible)"""
     try:
@@ -503,7 +562,7 @@ async def get_document_chunks(
 async def get_pipeline_status(
     doc_id: str,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """获取流水线静态快照 (Phase-6: 校验权限并做 assert_doc_visible)"""
     snapshot = pipeline_manager.to_snapshot(doc_id)
@@ -530,7 +589,7 @@ async def get_pipeline_status(
                         page_idx=r.page_idx,
                         display_page=r.display_page,
                         line_number=r.line_number,
-                        asset_url=r.asset_url,
+                        asset_url=f"/api/v1/documents/{doc_id}/review-items/{r.item_key}/asset" if r.asset_url else "",
                         raw_oss_url=r.asset_url,
                         raw_content=r.raw_content,
                         vlm_description=r.vlm_description,
@@ -604,7 +663,7 @@ async def get_pipeline_status(
             page_idx=r.page_idx,
             display_page=r.display_page,
             line_number=r.line_number,
-            asset_url=r.asset_url,
+            asset_url=f"/api/v1/documents/{doc_id}/review-items/{r.item_key}/asset" if r.asset_url else "",
             raw_oss_url=r.asset_url,
             raw_content=r.raw_content,
             vlm_description=r.vlm_description,
@@ -627,22 +686,62 @@ async def get_pipeline_status(
         pending_reviews=pending_review_items
     )
 
+@router.post("/{doc_id}/stream-ticket", response_model=StreamTicketResponse)
+async def create_document_stream_ticket(
+    doc_id: str,
+    req: StreamTicketRequest,
+    db: AsyncSession = Depends(get_db),
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
+):
+    """
+    签发绑定当前用户与单篇文档的短期只读流式票据（TTL 默认 60s），
+    供浏览器新窗口 PDF 分片预览或 EventSource 建立连接使用，避免通用业务 JWT 出现在 URL 中。
+    """
+    try:
+        doc_uuid = uuid.UUID(doc_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="无效的文档 UUID 格式")
+
+    state = pipeline_manager.get_state(doc_id)
+    if state:
+        mem_dept = state.get("department", "")
+        if "/" not in user.allowed_department_prefixes and not any(
+            is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes
+        ):
+            raise HTTPException(status_code=403, detail="【越权访问拦截】您当前无权访问其他部门的文档资料")
+    else:
+        doc = await db.get(Document, doc_uuid)
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id}")
+        assert_doc_visible(user, doc)
+
+    ticket, ttl = await issue_stream_ticket(user=user, doc_id=doc_id, purpose=req.purpose)
+    return StreamTicketResponse(
+        ticket=ticket,
+        doc_id=doc_id,
+        purpose=req.purpose,
+        expires_in=ttl,
+    )
+
+
 @router.get("/{doc_id}/events")
 async def stream_pipeline_events(
     doc_id: str,
     last_event_id: Optional[str] = Header(None, alias="Last-Event-ID"),
-    from_event_id: Optional[int] = Query(None, description="支持 Query 参数重传历史事件"),
+    last_event_id_query: Optional[int] = Query(None, alias="last_event_id", ge=0, description="受控换新票重连时续传的历史事件序号"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
-    token: Optional[str] = Query(None)
+    ticket: Optional[str] = Query(None, description="单文档短期受限 SSE 票据")
 ):
     """
     SSE 长连接推流接口（实时同步 11 节点流转、审核挂起信号）
     支持标准 Last-Event-ID 机制进行断网重连与历史事件回放 (强制验签与防越权校验)
     """
-    auth_header = authorization or (f"Bearer {token}" if token else None)
-    user = await get_current_user(authorization=auth_header)
-    if not user.has_permission("kb:retrieve"):
-        raise HTTPException(status_code=403, detail="【权限不足】缺少 kb:retrieve 权限点")
+    user = await _authenticate_bearer_or_ticket(
+        doc_id=doc_id,
+        purpose="events",
+        authorization=authorization,
+        ticket=ticket,
+    )
 
     state = pipeline_manager.get_state(doc_id)
     if state:
@@ -667,36 +766,52 @@ async def stream_pipeline_events(
     since_id = 0
     if last_event_id and last_event_id.isdigit():
         since_id = int(last_event_id)
-    elif from_event_id is not None:
-        since_id = from_event_id
+    elif last_event_id_query is not None:
+        since_id = int(last_event_id_query)
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        # 首次连接下发初始快照
-        if since_id == 0:
-            snapshot = pipeline_manager.to_snapshot(doc_id)
-            if snapshot:
-                init_data = json.dumps(snapshot.model_dump(), default=str, ensure_ascii=False)
-                yield f"id: 0\nevent: initial_state\ndata: {init_data}\n\n"
-        else:
-            # 回放历史断线事件
-            for past_evt in pipeline_manager.get_history(doc_id):
-                past_id = int(past_evt.get("id", 0))
-                if past_id > since_id:
-                    p_name = past_evt.get("event", "message")
-                    p_data = _sse_business_payload(past_evt)
-                    yield f"id: {past_id}\nevent: {p_name}\ndata: {p_data}\n\n"
-
-        curr_status = state.get("overall_status") if state else None
-        if curr_status in ["completed", "failed"]:
-            return
-
         try:
+            auth_error = await get_session_auth_error(
+                user.user_id, token_iat_ms=user.token_iat_ms, token_exp=user.token_exp
+            )
+            if auth_error:
+                yield format_sse(auth_error, {"doc_id": doc_id, "detail": SESSION_AUTH_ERROR_DETAILS[auth_error]})
+                return
+
+            # 首次连接下发初始快照，重连时回放尚未消费的历史事件。
+            if since_id == 0:
+                snapshot = pipeline_manager.to_snapshot(doc_id)
+                if snapshot:
+                    init_data = json.dumps(snapshot.model_dump(), default=str, ensure_ascii=False)
+                    yield f"id: 0\nevent: initial_state\ndata: {init_data}\n\n"
+            else:
+                for past_evt in pipeline_manager.get_history(doc_id):
+                    past_id = int(past_evt["id"])
+                    if past_id > since_id:
+                        yield format_sse(past_evt["event"], past_evt["data"], past_id)
+
+            curr_status = state.get("overall_status") if state else None
+            if curr_status in ["completed", "failed"]:
+                return
+
             while True:
-                event = await event_queue.get()
-                event_id = event.get("id", "")
-                event_name = event.get("event", "message")
-                data_str = _sse_business_payload(event)
-                yield f"id: {event_id}\nevent: {event_name}\ndata: {data_str}\n\n"
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    event = None
+
+                auth_error = await get_session_auth_error(
+                    user.user_id, token_iat_ms=user.token_iat_ms, token_exp=user.token_exp
+                )
+                if auth_error:
+                    yield format_sse(auth_error, {"doc_id": doc_id, "detail": SESSION_AUTH_ERROR_DETAILS[auth_error]})
+                    break
+                if event is None:
+                    yield ": keepalive\n\n"
+                    continue
+
+                event_name = event["event"]
+                yield format_sse(event_name, event["data"], event["id"])
 
                 if event_name in ["pipeline_completed", "pipeline_failed"]:
                     break
@@ -709,7 +824,7 @@ async def stream_pipeline_events(
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": PRIVATE_NO_STORE_CACHE,
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         }
@@ -721,7 +836,7 @@ async def stream_pipeline_events(
 async def submit_pipeline_review(
     doc_id: str,
     request: ReviewSubmitRequest,
-    user: UserContext = Depends(require_permission("doc:review")),
+    user: UserContext = Depends(require_permission(Permissions.DOC_REVIEW)),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -761,7 +876,13 @@ async def submit_pipeline_review(
     # 后台受队列并发信号量保护注入 Command(resume=...) 唤醒流水线并完整同步 DB 终态
     resume_payload = [item.model_dump() for item in request.items]
     ingest_queue_service.schedule_background_resume(
-        ingest_queue_service.resume_after_review(doc_id, resume_payload)
+        ingest_queue_service.resume_after_review(
+            doc_id,
+            resume_payload,
+            user_id=user.user_id,
+            tenant_id=user.tenant_id,
+            request_id=get_request_id(),
+        )
     )
 
     await pipeline_manager.broadcast(doc_id, "review_completed", {
@@ -792,7 +913,7 @@ async def submit_pipeline_review(
 async def get_review_item_asset(
     doc_id: str,
     item_id: str,
-    user: UserContext = Depends(require_permission_with_query_token("kb:retrieve")),
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
     db: AsyncSession = Depends(get_db)
 ):
     """人工审核多模态资产私有 OSS 安全流式反向代理 (挂载 kb:retrieve 鉴权与 assert_doc_visible)"""
@@ -817,7 +938,7 @@ async def get_review_item_asset(
     if state:
         for r in state.get("pending_reviews", []):
             if r.get("item_id") == item_id:
-                target_url = r.get("raw_oss_url") or r.get("asset_url")
+                target_url = r.get("raw_oss_url")
                 break
     else:
         rev_item = (await db.execute(
@@ -836,7 +957,7 @@ async def get_review_item_asset(
 
     ext = Path(clean_key).suffix.lower()
     media_type = "image/png" if ext == ".png" else "image/jpeg"
-    headers = {"Cache-Control": "public, max-age=86400", "Content-Disposition": "inline"}
+    headers = {"Cache-Control": PRIVATE_NO_STORE_CACHE, "Content-Disposition": "inline"}
     if content_length:
         headers["Content-Length"] = str(content_length)
 
@@ -846,7 +967,7 @@ async def get_review_item_asset(
 async def get_chunk_asset(
     chunk_id: str,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission_with_query_token("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """切片关联的多模态切图安全流式反向代理 (Phase-6: 校验关联主文档归属权限 BOLA)"""
     try:
@@ -873,20 +994,11 @@ async def get_chunk_asset(
 
     ext = Path(clean_key).suffix.lower()
     media_type = "image/png" if ext == ".png" else "image/jpeg"
-    headers = {"Cache-Control": "public, max-age=86400", "Content-Disposition": "inline"}
+    headers = {"Cache-Control": PRIVATE_NO_STORE_CACHE, "Content-Disposition": "inline"}
     if content_length:
         headers["Content-Length"] = str(content_length)
 
     return StreamingResponse(stream_gen, media_type=media_type, headers=headers)
-
-@router.get("/chunks/{chunk_id}/asset")
-async def get_document_chunk_asset_alias(
-    chunk_id: str,
-    db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission_with_query_token("kb:retrieve"))
-):
-    """切片切图别名路由 (/api/v1/documents/chunks/{chunk_id}/asset)"""
-    return await get_chunk_asset(chunk_id, db=db, user=user)
 
 # ==================== 6.1 原文预览与单页高清渲染 ====================
 
@@ -968,10 +1080,18 @@ def _render_pdf_page_sync(pdf_bytes: bytes, page_num: int, scale: float) -> tupl
 @router.get("/{doc_id}/preview")
 async def preview_document(
     doc_id: str,
+    range_header: Optional[str] = Header(None, alias="Range"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    ticket: Optional[str] = Query(None, description="单文档短期受限预览票据"),
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission_with_query_token("kb:retrieve"))
 ):
-    """文档安全流式预览接口 (Phase-6: 校验权限并做 assert_doc_visible)"""
+    """文档安全流式预览接口 (支持 HTTP Range 206 分片秒开，仅允许 Bearer 或单资源受限短票)"""
+    user = await _authenticate_bearer_or_ticket(
+        doc_id=doc_id,
+        purpose="preview",
+        authorization=authorization,
+        ticket=ticket,
+    )
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
@@ -983,11 +1103,6 @@ async def preview_document(
         raise HTTPException(status_code=404, detail="未找到文档或未关联 OSS 原文")
     assert_doc_visible(user, doc)
 
-    try:
-        stream_gen, content_length, clean_key = oss_service.get_object_stream(doc.raw_oss_url)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"拉取 OSS 失败: {e}")
-
     ext = Path(doc.title).suffix.lower()
     if ext == ".pdf":
         media_type = "application/pdf"
@@ -997,10 +1112,47 @@ async def preview_document(
         media_type = "application/octet-stream"
 
     encoded_filename = quote(doc.title)
+    if range_header:
+        try:
+            bucket = oss_service.get_client()
+            clean_key = oss_service.normalize_key(doc.raw_oss_url)
+            head_meta = await asyncio.to_thread(bucket.head_object, clean_key)
+            total_len = int(head_meta.content_length or 0)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"拉取 OSS 元数据失败: {e}")
+
+        parsed_range = _parse_http_byte_range(range_header, total_len)
+        if parsed_range is not None:
+            start, end = parsed_range
+            try:
+                part_stream, _, _ = await asyncio.to_thread(
+                    oss_service.get_object_stream, doc.raw_oss_url, 65536, (start, end)
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"拉取 OSS 分片失败: {e}")
+            part_headers = {
+                "Content-Disposition": f"inline; filename*=utf-8''{encoded_filename}",
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes {start}-{end}/{total_len}",
+                "Content-Length": str(end - start + 1),
+                "Cache-Control": PRIVATE_NO_STORE_CACHE,
+            }
+            return StreamingResponse(
+                part_stream,
+                status_code=status.HTTP_206_PARTIAL_CONTENT,
+                media_type=media_type,
+                headers=part_headers,
+            )
+
+    try:
+        stream_gen, content_length, _ = await asyncio.to_thread(oss_service.get_object_stream, doc.raw_oss_url)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"拉取 OSS 失败: {e}")
+
     headers = {
         "Content-Disposition": f"inline; filename*=utf-8''{encoded_filename}",
         "Accept-Ranges": "bytes",
-        "Cache-Control": "public, max-age=3600"
+        "Cache-Control": PRIVATE_NO_STORE_CACHE,
     }
     if content_length:
         headers["Content-Length"] = str(content_length)
@@ -1013,7 +1165,7 @@ async def get_document_page_image(
     page_num: int,
     scale: float = 2.0,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission_with_query_token("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """
     文档单页超高精渲染接口 (Phase-6: 校验权限并做 assert_doc_visible)
@@ -1042,7 +1194,7 @@ async def get_document_page_image(
             raise HTTPException(status_code=500, detail=f"渲染 PDF 单页失败: {e}")
 
     headers = {
-        "Cache-Control": "public, max-age=86400",
+        "Cache-Control": PRIVATE_NO_STORE_CACHE,
         "X-Total-Pages": str(total_pages),
         "X-Current-Page": str(page_num),
         "Access-Control-Expose-Headers": "X-Total-Pages, X-Current-Page",
@@ -1056,7 +1208,7 @@ async def resolve_duplicate(
     doc_id: str,
     request: DuplicateResolveRequest,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission("doc:upload"))
+    user: UserContext = Depends(require_permission(Permissions.DOC_UPLOAD))
 ):
     """防重冲突解决决策接口 (Phase-6: 校验权限与 assert_doc_visible)"""
     try:
@@ -1098,7 +1250,13 @@ async def resolve_duplicate(
 
     # 受队列并发信号量保护唤醒继续完成第 11 步入库并同步 DB 终态
     ingest_queue_service.schedule_background_resume(
-        ingest_queue_service.resume_after_duplicate_decision(doc_id, state)
+        ingest_queue_service.resume_after_duplicate_decision(
+            doc_id,
+            state,
+            user_id=user.user_id,
+            tenant_id=user.tenant_id,
+            request_id=get_request_id(),
+        )
     )
     return DuplicateResolveResponse(
         doc_id=doc_id,
@@ -1111,7 +1269,7 @@ async def retry_pipeline(
     doc_id: str,
     request: Optional[RetryPipelineRequest] = None,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission("doc:upload"))
+    user: UserContext = Depends(require_permission(Permissions.DOC_UPLOAD))
 ):
     """流水线失败引导重试 (Phase-6 权限校验 + Phase-8 重新推入 Redis Streams 消费队列受控执行)"""
     try:
@@ -1145,7 +1303,7 @@ async def retry_pipeline(
             state["raw_oss_url"] = doc.raw_oss_url
             state["file_hash"] = doc.file_hash
             state["enhanced_md_oss_url"] = doc.enhanced_md_oss_url
-            pipeline_manager.register_state(doc_id, state)
+            pipeline_manager.register_pipeline(doc_id, state)
         else:
             raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id} 的历史现场")
 
@@ -1184,6 +1342,9 @@ async def retry_pipeline(
         skip_review=bool(state.get("skip_review", False)),
         temp_file_path=state.get("temp_file_path"),
         from_step=effective_from_step,
+        user_id=user.user_id,
+        tenant_id=user.tenant_id,
+        request_id=get_request_id(),
     )
 
     retry_hint = (

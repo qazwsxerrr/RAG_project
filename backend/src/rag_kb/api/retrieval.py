@@ -20,10 +20,12 @@ from rag_kb.core.rate_limit import (
 )
 from rag_kb.api.deps import (
     UserContext,
-    get_current_user,
     require_permission,
-    derive_secure_department_scope
+    derive_secure_department_scope,
+    get_session_auth_error,
+    SESSION_AUTH_ERROR_DETAILS,
 )
+from rag_kb.core.constants import Permissions
 
 from rag_kb.api.schemas import (
     ChatQueryRequest,
@@ -98,7 +100,7 @@ class ThinkingProcessBuilder:
 async def search_endpoint(
     http_request: Request,
     request: ChatQueryRequest,
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """纯检索接口 (阶段 1 ~ 阶段 6)：获取经过多阶段漏斗精选的切片与思考流"""
     # Phase-8: Redis Lua 原子滑动窗口频率限流
@@ -223,7 +225,7 @@ async def search_endpoint(
 async def chat_endpoint(
     http_request: Request,
     request: ChatQueryRequest,
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """
     阶段 1 ~ 阶段 8 全流程智能问答流式打字机接口 (POST SSE 协议)
@@ -323,15 +325,44 @@ async def chat_endpoint(
 
     async def chat_event_stream() -> AsyncGenerator[str, None]:
         t0 = time.perf_counter()
-        graph = get_retrieval_graph()
         citations = []
         final_chunks = []
         builder = ThinkingProcessBuilder()
+        last_revocation_check = t0
+
+        async def _get_auth_error(force: bool = False) -> Optional[str]:
+            nonlocal last_revocation_check
+            now_mono = time.perf_counter()
+            if not force and (now_mono - last_revocation_check) < 1.0:
+                return None
+            last_revocation_check = now_mono
+            return await get_session_auth_error(
+                user.user_id,
+                token_iat_ms=user.token_iat_ms,
+                token_exp=user.token_exp,
+            )
 
         try:
+            auth_error = await _get_auth_error(force=True)
+            if auth_error:
+                yield format_sse(auth_error, {"detail": SESSION_AUTH_ERROR_DETAILS[auth_error]})
+                return
+            graph = get_retrieval_graph()
             latest_state = initial_state
             # 1. 跑检索图并派发思考流动画帧 (单次遍历 values+custom，彻底杜绝重复跑图延迟)
             async for mode, chunk in graph.astream(initial_state, stream_mode=["custom", "values"]):
+                auth_error = await _get_auth_error()
+                if auth_error:
+                    await record_audit_log(
+                        action="RETRIEVAL_CHAT",
+                        resource_id=request.conversation_id,
+                        duration_ms=int((time.perf_counter() - t0) * 1000),
+                        status="EXPIRED" if auth_error == "auth_expired" else "REVOKED",
+                        error_msg=SESSION_AUTH_ERROR_DETAILS[auth_error],
+                        details={"query": request.query},
+                    )
+                    yield format_sse(auth_error, {"detail": SESSION_AUTH_ERROR_DETAILS[auth_error]})
+                    return
                 if mode == "custom" and isinstance(chunk, dict):
                     if chunk.get("type") == "thinking_step" and "step" in chunk:
                         builder.update_step(chunk["step"])
@@ -351,10 +382,36 @@ async def chat_endpoint(
                 if citations:
                     yield format_sse("citations", citations)
 
+            # 进入大模型生成前强制复核一次吊销状态，杜绝停用账号继续消耗上游模型 Token
+            auth_error = await _get_auth_error(force=True)
+            if auth_error:
+                await record_audit_log(
+                    action="RETRIEVAL_CHAT",
+                    resource_id=request.conversation_id,
+                    duration_ms=int((time.perf_counter() - t0) * 1000),
+                    status="EXPIRED" if auth_error == "auth_expired" else "REVOKED",
+                    error_msg=SESSION_AUTH_ERROR_DETAILS[auth_error],
+                    details={"query": request.query},
+                )
+                yield format_sse(auth_error, {"detail": SESSION_AUTH_ERROR_DETAILS[auth_error]})
+                return
+
             # 2. 阶段 7~8: 大模型流式问答生成 (分流推理思考与正式解答)
             full_answer_parts = []
             full_reasoning_parts = []
             async for evt_type, token in stream_answer(request.query, final_chunks, citations):
+                auth_error = await _get_auth_error()
+                if auth_error:
+                    await record_audit_log(
+                        action="RETRIEVAL_CHAT",
+                        resource_id=request.conversation_id,
+                        duration_ms=int((time.perf_counter() - t0) * 1000),
+                        status="EXPIRED" if auth_error == "auth_expired" else "REVOKED",
+                        error_msg=SESSION_AUTH_ERROR_DETAILS[auth_error],
+                        details={"query": request.query, "aborted_chars": len("".join(full_answer_parts))},
+                    )
+                    yield format_sse(auth_error, {"detail": SESSION_AUTH_ERROR_DETAILS[auth_error]})
+                    return
                 if evt_type == "reasoning":
                     full_reasoning_parts.append(token)
                     yield format_sse("reasoning", {"content": token})

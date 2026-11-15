@@ -72,7 +72,7 @@ class TableNode(BaseNode):
             }
             tbl_img = tbl.image_url
             if tbl_img and "aliyuncs.com" in tbl_img and "OSSAccessKeyId" not in tbl_img:
-                tbl_img = oss_service.sign_url(tbl_img, expires=3600)
+                tbl_img = oss_service.signed_url(tbl_img, expires=3600)
 
             async with tbl_sem:
                 logger.info(f"▶ [表格处理] 正在提取表格语义 (第 {idx + 1}/{len(processed_tables)} 个, 页码: {tbl.display_page})...")
@@ -196,9 +196,8 @@ class TableNode(BaseNode):
                 page_idx=tbl.page_idx,
                 display_page=tbl.display_page,
                 line_number=real_line,
-                asset_url=tbl_proxy or tbl_img,
+                asset_url=tbl_proxy,
                 raw_oss_url=tbl_img,
-                asset_proxy_url=tbl_proxy,
                 raw_content=tbl.html_content or tbl.raw_content,
                 vlm_description=table_text,
                 user_description=table_text,
@@ -228,9 +227,8 @@ class TableNode(BaseNode):
                 page_idx=img.get("page_idx", 0),
                 display_page=img.get("page_idx", 0) + 1,
                 line_number=real_line,
-                asset_url=img_proxy or raw_img,
+                asset_url=img_proxy,
                 raw_oss_url=raw_img,
-                asset_proxy_url=img_proxy,
                 raw_content=img.get("alt", ""),
                 vlm_description=vlm_desc,
                 user_description=vlm_desc,

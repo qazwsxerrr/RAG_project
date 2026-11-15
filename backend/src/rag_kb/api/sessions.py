@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 from rag_kb.api.deps import UserContext, require_permission
+from rag_kb.core.constants import Permissions
 from rag_kb.db.chat_store import (
     create_session,
     list_sessions,
@@ -31,7 +32,7 @@ class UpdateSessionRequest(BaseModel):
 async def get_sessions(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """获取当前登录员工专属会话列表 (强制绑定 tenant_id + user_id)"""
     return await list_sessions(tenant_id=user.tenant_id, user_id=user.user_id, limit=limit, offset=offset)
@@ -39,7 +40,7 @@ async def get_sessions(
 @router.post("")
 async def create_new_session(
     req: Optional[CreateSessionRequest] = None,
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """创建新会话 (租户与用户归属严格绑定 Token)"""
     title = req.title if req else "新会话"
@@ -48,7 +49,7 @@ async def create_new_session(
 @router.delete("/{session_id}")
 async def remove_session(
     session_id: str,
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """删除会话 (仅允许删除当前员工本人的会话)"""
     ok = await delete_session(session_id=session_id, tenant_id=user.tenant_id, user_id=user.user_id)
@@ -60,7 +61,7 @@ async def remove_session(
 async def update_session_info(
     session_id: str,
     req: UpdateSessionRequest,
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """更新会话元数据（仅允许修改当前员工本人的会话）"""
     updated = await update_session(
@@ -77,7 +78,7 @@ async def update_session_info(
 async def get_session_messages(
     session_id: str,
     limit: int = Query(50, ge=1, le=200),
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """获取指定会话的历史消息列表 (校验会话存在且归属于当前登录员工)"""
     sess = await get_session(session_id=session_id, tenant_id=user.tenant_id, user_id=user.user_id)

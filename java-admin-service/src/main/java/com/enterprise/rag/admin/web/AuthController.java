@@ -2,24 +2,42 @@ package com.enterprise.rag.admin.web;
 
 import com.enterprise.rag.admin.identity.PermissionResolver;
 import com.enterprise.rag.admin.identity.PermissionResolver.ResolvedPermissions;
+import com.enterprise.rag.admin.identity.RedisRevocationSync;
 import com.enterprise.rag.admin.identity.UserMappingService;
 import com.enterprise.rag.admin.identity.UserMappingService.MappedIdentity;
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.RSAKey;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.oauth2.client.OAuth2AuthorizeRequest;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
+import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
+import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserRequest;
+import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserService;
+import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
+import org.springframework.security.oauth2.core.OAuth2AuthorizationException;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
 import org.springframework.security.oauth2.jwt.JwsHeader;
 import org.springframework.security.oauth2.jwt.JwtClaimsSet;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
 import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
+import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
@@ -34,7 +52,11 @@ public class AuthController {
     private final PermissionResolver permissionResolver;
     private final JwtEncoder jwtEncoder;
     private final RSAKey rsaKey;
+    private final JWKSet publicJwkSet;
     private final Environment env;
+    private final OAuth2AuthorizedClientManager authorizedClientManager;
+    private final OidcUserService oidcUserService;
+    private final RedisRevocationSync redisRevocationSync;
 
     @Value("${rag.model-vault.allowed-providers:kedaya,siliconflow,deepseek,dashscope,zhipu,openai,volces}")
     private String allowedProvidersConfig;
@@ -45,7 +67,7 @@ public class AuthController {
     @Value("${rag.jwt.audience:rag-engine}")
     private String jwtAudience;
 
-    @Value("${rag.jwt.ttl-minutes:30}")
+    @Value("${rag.jwt.ttl-minutes:10}")
     private int jwtTtlMinutes;
 
     @Value("${rag.internal.service-id:rag-engine}")
@@ -59,38 +81,204 @@ public class AuthController {
             PermissionResolver permissionResolver,
             JwtEncoder jwtEncoder,
             RSAKey rsaKey,
-            Environment env
+            JWKSet publicJwkSet,
+            Environment env,
+            OAuth2AuthorizedClientManager authorizedClientManager,
+            OidcUserService oidcUserService,
+            RedisRevocationSync redisRevocationSync
     ) {
-        this.userMappingService = userMappingService;
-        this.permissionResolver = permissionResolver;
-        this.jwtEncoder = jwtEncoder;
-        this.rsaKey = rsaKey;
-        this.env = env;
+        this.userMappingService = Objects.requireNonNull(userMappingService, "userMappingService 不能为空");
+        this.permissionResolver = Objects.requireNonNull(permissionResolver, "permissionResolver 不能为空");
+        this.jwtEncoder = Objects.requireNonNull(jwtEncoder, "jwtEncoder 不能为空");
+        this.rsaKey = Objects.requireNonNull(rsaKey, "rsaKey 不能为空");
+        this.publicJwkSet = Objects.requireNonNull(publicJwkSet, "publicJwkSet 不能为空");
+        this.env = Objects.requireNonNull(env, "env 不能为空");
+        this.authorizedClientManager = Objects.requireNonNull(authorizedClientManager, "authorizedClientManager 不能为空");
+        this.oidcUserService = Objects.requireNonNull(oidcUserService, "oidcUserService 不能为空");
+        this.redisRevocationSync = Objects.requireNonNull(redisRevocationSync, "redisRevocationSync 不能为空");
     }
 
     /**
-     * Phase-6 §2.1 & §3.1: JWKS 公钥端点
+     * Phase-6 §2.1 & §3.1: JWKS 公钥端点（支持平滑密钥轮换期间同时暴露新旧公钥）
      */
     @GetMapping("/.well-known/jwks.json")
     public Map<String, Object> getJwks() {
-        return new JWKSet(rsaKey.toPublicJWK()).toJSONObject();
+        return publicJwkSet.toJSONObject();
+    }
+
+    private record RefreshedOidcSession(
+            OidcUser oidcUser,
+            boolean deptChangedInIdp,
+            boolean rolesChangedInIdp
+    ) {}
+
+    /**
+     * 标准 OIDC 会话实时身份刷新：
+     * 严格 Fail-Fast，移除一切静默跳过旧身份回退分支。
+     * 若员工在 IdP 侧已被禁用或会话吊销，同步写入真实 Redis 秒级吊销其存量业务 JWT，并立即销毁本地 Session 返回 401。
+     */
+    private RefreshedOidcSession refreshOidcIdentityStrict(
+            OidcUser currentOidcUser,
+            Authentication authentication,
+            HttpServletRequest request,
+            HttpServletResponse response
+    ) {
+        if (currentOidcUser == null
+                || !(authentication instanceof OAuth2AuthenticationToken oauthToken)
+                || request == null
+                || response == null) {
+            invalidateLocalSession(request, response);
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【鉴权失败】缺少 OIDC 会话身份");
+        }
+
+        String previousIdpDept = UserMappingService.extractDeptPath(currentOidcUser);
+        Set<String> previousRoles = new LinkedHashSet<>(UserMappingService.extractRoleCodes(currentOidcUser));
+        try {
+            OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest
+                    .withClientRegistrationId(oauthToken.getAuthorizedClientRegistrationId())
+                    .principal(oauthToken)
+                    .attribute(HttpServletRequest.class.getName(), request)
+                    .attribute(HttpServletResponse.class.getName(), response)
+                    .build();
+
+            OAuth2AuthorizedClient authorizedClient = authorizedClientManager.authorize(authorizeRequest);
+            if (authorizedClient == null || authorizedClient.getAccessToken() == null) {
+                markExistingUserPermissionChanged(currentOidcUser.getSubject());
+                invalidateLocalSession(request, response);
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业 IdP 授权已过期或被撤销，请重新登录");
+            }
+
+            OidcUser refreshedUser = oidcUserService.loadUser(new OidcUserRequest(
+                    authorizedClient.getClientRegistration(),
+                    authorizedClient.getAccessToken(),
+                    currentOidcUser.getIdToken()
+            ));
+
+            OAuth2AuthenticationToken updatedAuth = new OAuth2AuthenticationToken(
+                    refreshedUser,
+                    refreshedUser.getAuthorities(),
+                    oauthToken.getAuthorizedClientRegistrationId()
+            );
+            SecurityContext context = SecurityContextHolder.createEmptyContext();
+            context.setAuthentication(updatedAuth);
+            SecurityContextHolder.setContext(context);
+            HttpSession session = request.getSession(false);
+            if (session != null) {
+                session.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, context);
+            }
+
+            String latestIdpDept = UserMappingService.extractDeptPath(refreshedUser);
+            boolean deptChanged = !Objects.equals(previousIdpDept, latestIdpDept);
+            boolean rolesChanged = !Objects.equals(previousRoles, new LinkedHashSet<>(UserMappingService.extractRoleCodes(refreshedUser)));
+            return new RefreshedOidcSession(refreshedUser, deptChanged, rolesChanged);
+        } catch (ResponseStatusException e) {
+            throw e;
+        } catch (OAuth2AuthorizationException | OAuth2AuthenticationException ex) {
+            String errorCode = (ex instanceof OAuth2AuthorizationException authzEx)
+                    ? authzEx.getError().getErrorCode()
+                    : ((OAuth2AuthenticationException) ex).getError().getErrorCode();
+            if (isTransientIdpError(ex, errorCode)) {
+                log.warn("[OIDC_SESSION_REFRESH] IdP 临时通信或服务异常 (code={})，Fail-Fast 拒绝本次换票但不写入全账号封禁: {}",
+                        errorCode, ex.getMessage());
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "【鉴权中台暂时不可用】企业 IdP 通信异常，请稍后重试", ex);
+            }
+            log.warn("[OIDC_SESSION_REFRESH] IdP 明确拒绝或撤销当前会话 (code={})，主动销毁本地会话并淘汰当前用户既有权限票据: {}",
+                    errorCode, ex.getMessage());
+            markExistingUserPermissionChanged(currentOidcUser.getSubject());
+            invalidateLocalSession(request, response);
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业身份授权已过期或被撤销，请重新登录", ex);
+        } catch (Exception ex) {
+            if (isTransientIdpError(ex, null)) {
+                log.warn("[OIDC_SESSION_REFRESH] IdP 临时网络或服务端异常，Fail-Fast 拒绝本次换票但不封禁账号: {}", ex.getMessage());
+                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "【鉴权中台暂时不可用】企业 IdP 通信异常，请稍后重试", ex);
+            }
+            log.warn("[OIDC_SESSION_REFRESH] IdP 实时刷新身份失败，主动销毁本地会话: {}", ex.getMessage());
+            markExistingUserPermissionChanged(currentOidcUser.getSubject());
+            invalidateLocalSession(request, response);
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业身份状态已变更或停用，请重新登录", ex);
+        }
+    }
+
+    private void markExistingUserPermissionChanged(String externalId) {
+        if (externalId == null || externalId.isBlank()) {
+            return;
+        }
+        userMappingService.findExistingUserId(externalId)
+                .ifPresent(uid -> redisRevocationSync.markPermissionChanged(uid, System.currentTimeMillis()));
+    }
+
+    private static boolean isTransientIdpError(Throwable ex, String errorCode) {
+        if ("server_error".equalsIgnoreCase(errorCode) || "temporarily_unavailable".equalsIgnoreCase(errorCode)) {
+            return true;
+        }
+        Throwable cursor = ex;
+        int depth = 0;
+        while (cursor != null && depth < 10) {
+            if (cursor instanceof IOException) {
+                return true;
+            }
+            String msg = cursor.getMessage();
+            if (msg != null) {
+                String lower = msg.toLowerCase(Locale.ROOT);
+                if (lower.contains("connection refused")
+                        || lower.contains("timed out")
+                        || lower.contains("timeout")
+                        || lower.contains("502")
+                        || lower.contains("503")
+                        || lower.contains("504")) {
+                    return true;
+                }
+            }
+            cursor = cursor.getCause();
+            depth++;
+        }
+        return false;
+    }
+
+    private void invalidateLocalSession(HttpServletRequest request, HttpServletResponse response) {
+        if (request != null) {
+            HttpSession session = request.getSession(false);
+            if (session != null) {
+                session.invalidate();
+            }
+        }
+        SecurityContextHolder.clearContext();
+        if (response != null) {
+            Cookie cookie = new Cookie("JSESSIONID", null);
+            cookie.setPath("/");
+            cookie.setMaxAge(0);
+            cookie.setHttpOnly(true);
+            response.addCookie(cookie);
+        }
     }
 
     /**
-     * Phase-6 §2.3 & §3.1: 会话换 30min 业务 JWT (含 JIT 建档与权限展开)
+     * Phase-6 §2.3 & §3.1: 会话换短期业务 JWT (默认 10min，含标准 OIDC 实时身份刷新与权限展开)
      */
     @PostMapping("/api/admin/auth/token")
-    public Map<String, Object> exchangeToken(@AuthenticationPrincipal OidcUser oidcUser) {
-        MappedIdentity mapped = userMappingService.mapAndProvision(oidcUser);
+    public Map<String, Object> exchangeToken(
+            @AuthenticationPrincipal OidcUser oidcUser,
+            Authentication authentication,
+            HttpServletRequest request,
+            HttpServletResponse response
+    ) {
+        RefreshedOidcSession refreshed = refreshOidcIdentityStrict(oidcUser, authentication, request, response);
+        MappedIdentity mapped = userMappingService.mapAndProvision(refreshed.oidcUser(), refreshed.deptChangedInIdp());
         ResolvedPermissions perms = permissionResolver.resolve(mapped.roleCodes());
 
         Instant now = Instant.now();
+        String userIdStr = mapped.user().id().toString();
+        if (refreshed.deptChangedInIdp() || refreshed.rolesChangedInIdp()) {
+            redisRevocationSync.markPermissionChanged(userIdStr, System.currentTimeMillis());
+        }
+        long lastPermChangedMs = redisRevocationSync.getPermissionChangedAtMs(userIdStr);
+        long issuedAtMs = Math.max(System.currentTimeMillis(), lastPermChangedMs + 1);
         Instant exp = now.plus(jwtTtlMinutes, ChronoUnit.MINUTES);
 
         JwtClaimsSet claims = JwtClaimsSet.builder()
                 .issuer(jwtIssuer)
                 .audience(List.of(jwtAudience))
-                .subject(mapped.user().id().toString())
+                .subject(userIdStr)
                 .claim("username", mapped.user().realName())
                 .claim("tenant_id", mapped.user().tenantId())
                 .claim("roles", mapped.roleCodes())
@@ -100,6 +288,7 @@ public class AuthController {
                 .claim("is_to_c", false)
                 .claim("cv", 1)
                 .claim("typ", "access")
+                .claim("iat_ms", issuedAtMs)
                 .issuedAt(now)
                 .expiresAt(exp)
                 .build();
@@ -121,9 +310,18 @@ public class AuthController {
      * Phase-6 §2.5: 回显当前登录员工基本信息与权限范围
      */
     @GetMapping("/api/admin/users/me")
-    public Map<String, Object> getMyProfile(@AuthenticationPrincipal OidcUser oidcUser) {
-        MappedIdentity mapped = userMappingService.mapAndProvision(oidcUser);
+    public Map<String, Object> getMyProfile(
+            @AuthenticationPrincipal OidcUser oidcUser,
+            Authentication authentication,
+            HttpServletRequest request,
+            HttpServletResponse response
+    ) {
+        RefreshedOidcSession refreshed = refreshOidcIdentityStrict(oidcUser, authentication, request, response);
+        MappedIdentity mapped = userMappingService.mapAndProvision(refreshed.oidcUser(), refreshed.deptChangedInIdp());
         ResolvedPermissions perms = permissionResolver.resolve(mapped.roleCodes());
+        if (refreshed.deptChangedInIdp() || refreshed.rolesChangedInIdp()) {
+            redisRevocationSync.markPermissionChanged(mapped.user().id().toString(), System.currentTimeMillis());
+        }
 
         Map<String, Object> me = new LinkedHashMap<>();
         me.put("user_id", mapped.user().id().toString());
@@ -142,17 +340,8 @@ public class AuthController {
      * Phase-6 §2.5: 会话登出端点（清理 Session 与 JSESSIONID Cookie）
      */
     @PostMapping("/api/admin/auth/logout")
-    public Map<String, Object> logout(jakarta.servlet.http.HttpServletRequest request, jakarta.servlet.http.HttpServletResponse response) {
-        jakarta.servlet.http.HttpSession session = request.getSession(false);
-        if (session != null) {
-            session.invalidate();
-        }
-        org.springframework.security.core.context.SecurityContextHolder.clearContext();
-        jakarta.servlet.http.Cookie cookie = new jakarta.servlet.http.Cookie("JSESSIONID", null);
-        cookie.setPath("/");
-        cookie.setMaxAge(0);
-        cookie.setHttpOnly(true);
-        response.addCookie(cookie);
+    public Map<String, Object> logout(HttpServletRequest request, HttpServletResponse response) {
+        invalidateLocalSession(request, response);
         return Map.of("code", 200, "message", "Logged out successfully");
     }
 

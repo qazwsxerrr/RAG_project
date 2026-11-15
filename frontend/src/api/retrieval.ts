@@ -146,27 +146,38 @@ export const retrievalApi = {
 
           if (line.startsWith('data:')) {
             const dataStr = line.slice(5).trim();
+            let data;
             try {
-              const data = JSON.parse(dataStr);
-              if (currentEvent === 'thinking') {
-                callbacks.onThinking?.(data);
-              } else if (currentEvent === 'citations') {
-                callbacks.onCitations?.(data);
-              } else if (currentEvent === 'reasoning') {
-                if (data.content) {
-                  callbacks.onReasoning?.(data.content);
-                }
-              } else if (currentEvent === 'message') {
-                if (data.content) {
-                  callbacks.onMessage?.(data.content);
-                }
-              } else if (currentEvent === 'done') {
-                callbacks.onDone?.(data);
-              } else if (currentEvent === 'error') {
-                callbacks.onError?.(new Error(data.error || '大模型推理失败'));
-              }
+              data = JSON.parse(dataStr);
             } catch (err) {
               console.warn('[SSE 解析异常]', line, err);
+              continue;
+            }
+            if (currentEvent === 'thinking') {
+              callbacks.onThinking?.(data);
+            } else if (currentEvent === 'citations') {
+              callbacks.onCitations?.(data);
+            } else if (currentEvent === 'reasoning') {
+              if (data.content) {
+                callbacks.onReasoning?.(data.content);
+              }
+            } else if (currentEvent === 'message') {
+              if (data.content) {
+                callbacks.onMessage?.(data.content);
+              }
+            } else if (currentEvent === 'done') {
+              callbacks.onDone?.(data);
+            } else if (currentEvent === 'auth_expired') {
+              await reader.cancel();
+              await authStore.refreshToken();
+              callbacks.onError?.(new Error('访问凭据已续期，本次回答已中断，请重新发送问题。'));
+              return;
+            } else if (currentEvent === 'auth_revoked') {
+              await reader.cancel();
+              await authStore.logout();
+              return;
+            } else if (currentEvent === 'error') {
+              callbacks.onError?.(new Error(data.error || '大模型推理失败'));
             }
           }
         }

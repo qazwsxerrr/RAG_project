@@ -91,7 +91,7 @@
           </router-link>
 
           <router-link
-            v-if="authStore.hasPermission('doc:upload')"
+            v-if="authStore.hasPermission(PERMISSIONS.DOC_UPLOAD)"
             to="/documents/new"
             @click="isMobileMenuOpen = false"
             class="flex items-center px-2.5 py-2 rounded-lg text-xs transition-colors"
@@ -106,6 +106,7 @@
           </router-link>
 
           <router-link
+            v-if="authStore.hasPermission(PERMISSIONS.SYSTEM_ADMIN)"
             to="/channels"
             @click="isMobileMenuOpen = false"
             class="flex items-center px-2.5 py-2 rounded-lg text-xs transition-colors"
@@ -266,7 +267,7 @@
 import { ref, provide, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useChatStore } from './stores/chat';
-import { useAuthStore } from './stores/auth';
+import { useAuthStore, PERMISSIONS } from './stores/auth';
 import SciFiBackground from './components/retrieval/SciFiBackground.vue';
 
 const route = useRoute();

@@ -8,7 +8,7 @@
 import os
 import hashlib
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 import oss2
 from rag_kb.core.config import settings
 from rag_kb.core.resilience import retry_on_transient
@@ -87,9 +87,8 @@ class AliyunOSSService:
             data = f.read()
         return self.upload_bytes(data, target_key, content_type)
 
-    def signed_url(self, target_key_or_url: str, expires: Optional[int] = None) -> str:
-        """为指定的 OSS Object Key 生成带有效期的临时访问 URL（默认 2 小时）"""
-        bucket = self.get_client()
+    def normalize_key(self, target_key_or_url: str) -> str:
+        """统一剥离 OSS 完整 HTTP/HTTPS 域名前缀及前导 '/'，返回标准 Object Key"""
         clean_endpoint = self.endpoint.replace("https://", "").replace("http://", "").rstrip("/")
         base_prefix = f"https://{self.bucket_name}.{clean_endpoint}/"
         http_prefix = f"http://{self.bucket_name}.{clean_endpoint}/"
@@ -99,34 +98,30 @@ class AliyunOSSService:
             clean_key = clean_key[len(base_prefix):]
         elif clean_key.startswith(http_prefix):
             clean_key = clean_key[len(http_prefix):]
-        clean_key = clean_key.lstrip("/")
+        return clean_key.lstrip("/")
 
+    def signed_url(self, target_key_or_url: str, expires: Optional[int] = None) -> str:
+        """为指定的 OSS Object Key 生成带有效期的临时访问 URL（默认 2 小时）"""
+        bucket = self.get_client()
+        clean_key = self.normalize_key(target_key_or_url)
         exp = expires or settings.OSS_SIGNED_URL_EXPIRES
         return bucket.sign_url("GET", clean_key, exp)
 
-    def sign_url(self, target_key_or_url: str, expires: Optional[int] = None) -> str:
-        """signed_url 的别名方法"""
-        return self.signed_url(target_key_or_url, expires)
-
-    def get_object_stream(self, target_path_or_url: str, chunk_size: int = 65536):
+    def get_object_stream(
+        self,
+        target_path_or_url: str,
+        chunk_size: int = 65536,
+        byte_range: Optional[Tuple[Optional[int], Optional[int]]] = None,
+    ):
         """
         从阿里云 OSS 纯内存分块流式拉取对象，返回二进制生成器、Content-Length 与干净路径。
+        支持 HTTP Range 分片读取，保障大体积 PDF 原生秒开。
         零磁盘临时文件落盘，严格遵守 AGENTS.md 准则。
         """
         bucket = self.get_client()
-        clean_endpoint = self.endpoint.replace("https://", "").replace("http://", "").rstrip("/")
-        base_prefix = f"https://{self.bucket_name}.{clean_endpoint}/"
-        http_prefix = f"http://{self.bucket_name}.{clean_endpoint}/"
-
-        clean_key = target_path_or_url
-        if clean_key.startswith(base_prefix):
-            clean_key = clean_key[len(base_prefix):]
-        elif clean_key.startswith(http_prefix):
-            clean_key = clean_key[len(http_prefix):]
-        clean_key = clean_key.lstrip("/")
-
-        oss_obj = bucket.get_object(clean_key)
-        if oss_obj.status != 200:
+        clean_key = self.normalize_key(target_path_or_url)
+        oss_obj = bucket.get_object(clean_key, byte_range=byte_range)
+        if oss_obj.status not in (200, 206):
             raise RuntimeError(f"【阿里云 OSS 读取失败】HTTP 状态码: {oss_obj.status}, 路径: {clean_key}")
 
         def stream_generator():

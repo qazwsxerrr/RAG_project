@@ -5,7 +5,20 @@
 """
 
 from enum import Enum
-from typing import List
+from typing import List, Set
+
+
+class Permissions(str, Enum):
+    """全局 RBAC 权限点单一事实源（与 V1__rbac.sql 及 Java PermissionResolver 严格对齐）"""
+    ALL = "*"
+    KB_RETRIEVE = "kb:retrieve"
+    DOC_UPLOAD = "doc:upload"
+    DOC_DELETE = "doc:delete"
+    DOC_REVIEW = "doc:review"
+    SYSTEM_ADMIN = "system:admin"
+
+
+KNOWN_PERMISSION_VALUES: Set[str] = {p.value for p in Permissions}
 
 class IngestStatus(str, Enum):
     QUEUED = "queued"

@@ -76,19 +76,6 @@ class IngestPipelineManager:
             self._subscribers[doc_id] = []
         self._evict_finished_if_needed()
 
-    def register_state(self, doc_id: str, state: IngestState):
-        """兼容恢复/重试时的状态注册别名"""
-        state["file_bytes"] = None
-        self._active_states[doc_id] = state
-        self._active_states.move_to_end(doc_id)
-        if doc_id not in self._event_history:
-            self._event_history[doc_id] = []
-        if doc_id not in self._event_counters:
-            self._event_counters[doc_id] = 0
-        if doc_id not in self._subscribers:
-            self._subscribers[doc_id] = []
-        self._evict_finished_if_needed()
-
     def remove_pipeline(self, doc_id: str) -> None:
         """当上传失败中断或删除文档时，彻底移除内存中的半成品状态与事件缓存"""
         self._active_states.pop(doc_id, None)

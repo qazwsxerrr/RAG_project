@@ -135,4 +135,10 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("rag_kb.api.main:app", host=settings.HOST, port=settings.PORT, reload=settings.DEBUG)
+    uvicorn.run(
+        "rag_kb.api.main:app",
+        host=settings.HOST,
+        port=settings.PORT,
+        reload=settings.DEBUG,
+        access_log=False,
+    )

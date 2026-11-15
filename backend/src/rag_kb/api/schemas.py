@@ -114,12 +114,25 @@ class ReviewItem(BaseModel):
     line_number: Optional[int] = None
     asset_url: str
     raw_oss_url: Optional[str] = None
-    asset_proxy_url: Optional[str] = None
     raw_content: Optional[str] = None
     vlm_description: str
     user_description: Optional[str] = None
+    remark: Optional[str] = None
     language: Optional[str] = None
     status: str = "pending" # pending | approved | modified
+
+
+class StreamTicketRequest(BaseModel):
+    """单文档短期流式访问票据请求"""
+    purpose: str = Field(..., pattern="^(preview|events)$", description="受限用途: preview 或 events")
+
+
+class StreamTicketResponse(BaseModel):
+    """单文档短期流式访问票据响应"""
+    ticket: str
+    doc_id: str
+    purpose: str
+    expires_in: int
 
 class PipelineSnapshotResponse(BaseModel):
     """流水线快照响应"""

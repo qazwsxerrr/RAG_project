@@ -58,7 +58,10 @@ class Settings(BaseSettings):
     JWT_JWKS_URL: Optional[str] = "http://127.0.0.1:8080/.well-known/jwks.json"
     JWT_ISSUER: str = "rag-admin"
     JWT_AUDIENCE: str = "rag-engine"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    STREAM_TICKET_TTL_SECONDS: int = 60
+    STREAM_TICKET_SLIDING_TTL_SECONDS: int = 60
+    STREAM_TICKET_MAX_LIFETIME_SECONDS: int = 3600
+    AUTH_REVOCATION_TTL_SECONDS: int = 86400
     DATA_PARSED_DIR: str = str(WORKSPACE_ROOT / "data" / "parsed")
     DEFAULT_TENANT_ID: str = "default_tenant"
 
@@ -155,14 +158,6 @@ class Settings(BaseSettings):
     @property
     def active_model_name(self) -> str:
         return self.MODEL_NAME.strip() or "grok-4.5"
-
-    @property
-    def active_llm_base_url(self) -> str:
-        return self.active_base_url
-
-    @property
-    def active_llm_model(self) -> str:
-        return self.active_model_name
 
     # ==================== 向量模型配置 (Dense & Sparse，API Key 统一由 Java 鉴权中心托管) ====================
     EMBEDDING_BASE_URL: str = "https://api.siliconflow.cn/v1"
@@ -292,12 +287,12 @@ def _parse_fallback_nodes_json(raw_json: Optional[str], env_name: str, default_v
 
 def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
     """从当前 settings 与环境变量动态组装高可用模型链 (Phase-6 §7.5: 节点仅声明 provider，运行时通过租约注入凭据)"""
-    primary_provider = derive_provider_from_url(cfg.active_llm_base_url)
-    primary_supports_vision = any(k in cfg.active_llm_model.lower() for k in ("vl", "grok", "vision", "4o"))
+    primary_provider = derive_provider_from_url(cfg.active_base_url)
+    primary_supports_vision = any(k in cfg.active_model_name.lower() for k in ("vl", "grok", "vision", "4o"))
     primary = ModelNodeConfig(
         name="primary-default",
-        model=cfg.active_llm_model,
-        base_url=cfg.active_llm_base_url,
+        model=cfg.active_model_name,
+        base_url=cfg.active_base_url,
         api_key="",
         provider=primary_provider,
         backend=cfg.active_llm_api_backend,

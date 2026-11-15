@@ -66,7 +66,7 @@
           </div>
           <!-- Mermaid 文本流程图预览 -->
           <div 
-            v-else-if="currentItem.type === 'flowchart' && currentItem.raw_content && (!currentItem.image_url && !currentItem.asset_url)" 
+            v-else-if="currentItem.type === 'flowchart' && currentItem.raw_content && !currentItem.asset_url" 
             class="border border-slate-200 rounded-xl overflow-hidden bg-slate-50 text-xs"
           >
             <div class="flex items-center justify-between px-3.5 py-1.5 bg-slate-100 border-b border-slate-200 text-[11px] text-slate-500 font-sans">
@@ -75,15 +75,16 @@
             <pre class="p-3.5 overflow-x-auto max-h-56 font-mono text-slate-700 leading-relaxed whitespace-pre text-[11px]">{{ currentItem.raw_content }}</pre>
           </div>
           <!-- 图片或切图预览 -->
-          <div v-else-if="currentItem.asset_proxy_url || currentItem.image_url || currentItem.asset_url" class="border border-slate-200 rounded-xl overflow-hidden bg-slate-50 flex flex-col items-center justify-center p-2 min-h-48">
+          <div v-else-if="currentItem.asset_url" class="border border-slate-200 rounded-xl overflow-hidden bg-slate-50 flex flex-col items-center justify-center p-2 min-h-48">
             <img 
-              v-show="!imageLoadError"
-              :src="withTokenUrl(currentItem.asset_proxy_url || currentItem.image_url || currentItem.asset_url)" 
+              v-if="currentBlobUrl && !imageLoadError"
+              :src="currentBlobUrl" 
               :alt="currentItem.title || '审核资产截图'" 
               class="max-h-56 object-contain rounded shadow-sm"
               @error="imageLoadError = true"
               @load="imageLoadError = false"
             />
+            <div v-else-if="!imageLoadError" class="text-xs text-slate-400 py-8">正在安全加载切图...</div>
             <div v-if="imageLoadError" class="text-xs text-amber-600 flex items-center gap-1.5 py-8">
               <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
               <span>图片加载失败，请检查服务连接</span>
@@ -182,9 +183,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue';
+import { ref, watch, computed, onUnmounted } from 'vue';
 import type { ReviewItem } from '../../types';
-import { withTokenUrl } from '../../stores/auth';
+import { createSecureBlobCache } from '../../utils/secureMedia';
 
 const props = withDefaults(defineProps<{
   visible: boolean;
@@ -205,23 +206,39 @@ const editableDescriptions = ref<Record<string, string>>({});
 const remarks = ref<Record<string, string>>({});
 const submitting = ref(false);
 const imageLoadError = ref(false);
+const blobCache = createSecureBlobCache();
+
+const currentItem = computed(() => {
+  return props.items[currentIndex.value] || null;
+});
+
+const currentBlobUrl = computed(() => blobCache.getUrl(currentItem.value?.asset_url));
+
+const loadCurrentAsset = async () => {
+  imageLoadError.value = false;
+  const targetUrl = currentItem.value?.asset_url;
+  if (!props.visible || !targetUrl) return;
+  try {
+    await blobCache.ensureLoaded(targetUrl);
+  } catch {
+    imageLoadError.value = true;
+  }
+};
 
 watch(
   () => props.visible,
   (v) => {
     if (v) {
       currentIndex.value = props.initialIndex || 0;
-      imageLoadError.value = false;
+      loadCurrentAsset();
+    } else {
+      blobCache.revokeAll();
     }
   }
 );
 
 watch(currentIndex, () => {
-  imageLoadError.value = false;
-});
-
-const currentItem = computed(() => {
-  return props.items[currentIndex.value] || null;
+  loadCurrentAsset();
 });
 
 // 初始化编辑内容
@@ -238,10 +255,17 @@ watch(
         }
       });
       currentIndex.value = 0;
+      if (props.visible) {
+        loadCurrentAsset();
+      }
     }
   },
   { immediate: true, deep: true }
 );
+
+onUnmounted(() => {
+  blobCache.revokeAll();
+});
 
 const handleCancel = () => {
   emit('close');

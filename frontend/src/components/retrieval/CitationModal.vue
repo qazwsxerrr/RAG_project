@@ -108,20 +108,22 @@
         <div v-if="citation.asset_proxy_url" class="bg-slate-50 border border-slate-200/80 rounded-xl p-3.5 space-y-2">
           <div class="flex items-center justify-between">
             <span class="text-xs font-semibold text-slate-700">原文图表截图</span>
-            <a 
-              :href="withTokenUrl(citation.asset_proxy_url)" 
-              target="_blank" 
-              class="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+            <button
+              type="button"
+              @click="openProtectedImageInNewTab(citationAssetBlobUrl || citation.asset_proxy_url)"
+              class="text-xs text-indigo-600 hover:text-indigo-800 font-medium cursor-pointer"
             >
               在新标签页查看原图 ↗
-            </a>
+            </button>
           </div>
           <div class="flex justify-center bg-white rounded-lg p-2.5 border border-slate-200 shadow-inner max-h-72 overflow-y-auto">
             <img 
-              :src="withTokenUrl(citation.asset_proxy_url)" 
+              v-if="citationAssetBlobUrl"
+              :src="citationAssetBlobUrl" 
               alt="原文图表截图" 
               class="max-h-64 max-w-full object-contain rounded"
             />
+            <span v-else class="text-xs text-slate-400 py-6">正在加载图表截图...</span>
           </div>
         </div>
 
@@ -194,14 +196,14 @@
         </span>
 
         <div class="flex items-center space-x-2.5">
-          <a 
-            :href="externalPreviewUrl" 
-            target="_blank" 
-            class="text-xs text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1 transition-colors"
+          <button
+            type="button"
+            @click="handleOpenExternalPreview"
+            class="text-xs text-blue-600 hover:text-blue-700 font-medium flex items-center gap-1 transition-colors cursor-pointer"
           >
             <span>{{ isPdfDoc ? `在新标签页打开 PDF (第 ${displayPage} 页)` : '查看原文档' }}</span>
             <span>&rarr;</span>
-          </a>
+          </button>
 
           <button 
             @click="$emit('close')" 
@@ -220,7 +222,12 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue';
 import type { CitationSource } from '../../types';
-import { useAuthStore, isTokenExpired, withTokenUrl } from '../../stores/auth';
+import { useAuthStore, isTokenExpired } from '../../stores/auth';
+import {
+  createSecureBlobCache,
+  openProtectedImageInNewTab,
+  openDocumentPreviewWithTicket,
+} from '../../utils/secureMedia';
 
 const props = defineProps<{
   visible: boolean;
@@ -240,6 +247,11 @@ const loadingPage = ref<boolean>(false);
 const pageRenderError = ref<string>('');
 const pageBlobUrl = ref<string>('');
 let pageAbortController: AbortController | null = null;
+const assetBlobCache = createSecureBlobCache();
+
+const citationAssetBlobUrl = computed(() =>
+  assetBlobCache.getUrl(props.citation?.asset_proxy_url)
+);
 
 const displayPage = computed(() => {
   if (!props.citation) return 1;
@@ -291,21 +303,13 @@ const loadPdfPageBlob = async () => {
     if (!currentToken || isTokenExpired(currentToken)) {
       currentToken = await authStore.refreshToken();
     }
-
-    const doFetch = (tk: string) => {
-      const headers: Record<string, string> = {};
-      if (tk) {
-        headers['Authorization'] = `Bearer ${tk}`;
-      }
-      return fetch(url, { headers, signal: controller.signal });
-    };
-
+    const doFetch = (tk: string) =>
+      fetch(url, { headers: { Authorization: `Bearer ${tk}` }, signal: controller.signal });
     let resp = await doFetch(currentToken);
     if (resp.status === 401) {
-      const refreshedToken = await authStore.refreshToken();
-      resp = await doFetch(refreshedToken);
+      const refreshed = await authStore.refreshToken();
+      resp = await doFetch(refreshed);
     }
-
     if (!resp.ok) {
       let detail = `HTTP ${resp.status}`;
       try {
@@ -350,12 +354,16 @@ watch(
   ([vis, newCit]) => {
     abortInflightPageLoad();
     revokeBlobUrl();
+    assetBlobCache.revokeAll();
     pageRenderError.value = '';
     if (newCit) {
       targetPage.value = displayPage.value;
       totalPages.value = typeof newCit.total_pages === 'number' && newCit.total_pages > 0 ? newCit.total_pages : null;
       zoomScale.value = 0.85;
       activeTab.value = 'snippet';
+      if (vis && newCit.asset_proxy_url) {
+        assetBlobCache.ensureLoaded(newCit.asset_proxy_url).catch(() => {});
+      }
     }
     if (!vis) {
       loadingPage.value = false;
@@ -370,11 +378,13 @@ watch(targetPage, () => {
   }
 });
 
-const externalPreviewUrl = computed(() => {
-  if (!props.citation) return '#';
-  const base = props.citation.preview_url || `/api/v1/documents/${props.citation.document_id}/preview`;
-  return isPdfDoc.value ? withTokenUrl(`${base}#page=${displayPage.value}`) : withTokenUrl(base);
-});
+const handleOpenExternalPreview = async () => {
+  if (!props.citation) return;
+  await openDocumentPreviewWithTicket(
+    props.citation.document_id,
+    isPdfDoc.value ? displayPage.value : undefined
+  );
+};
 
 const prevPage = () => {
   if (targetPage.value > 1) {
@@ -407,5 +417,6 @@ const resetZoom = () => {
 onUnmounted(() => {
   abortInflightPageLoad();
   revokeBlobUrl();
+  assetBlobCache.revokeAll();
 });
 </script>

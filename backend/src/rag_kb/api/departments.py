@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from rag_kb.api.schemas import DepartmentItemSchema
 from rag_kb.api.deps import UserContext, require_permission
+from rag_kb.core.constants import Permissions
 from rag_kb.db.models import Department
 from rag_kb.db.session import get_db
 
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/documents/departments", tags=["部门管理"])
 @router.get("", response_model=List[DepartmentItemSchema])
 async def list_departments(
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission("kb:retrieve"))
+    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
     """获取所有可用企业真实部门列表（只读数据库单一真实源，严禁伪造兜底）"""
     try:

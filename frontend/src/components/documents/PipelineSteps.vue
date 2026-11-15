@@ -305,15 +305,22 @@
                 </div>
 
                 <!-- 真实图元缩略图（若存在资源） -->
-                <div v-if="item.asset_url || item.raw_oss_url" class="flex items-start gap-3 bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
+                <div v-if="item.asset_url" class="flex items-start gap-3 bg-slate-50/70 p-2.5 rounded-lg border border-slate-100">
                   <img 
-                    :src="withTokenUrl(item.asset_url || item.raw_oss_url)" 
+                    v-if="getReviewThumbUrl(item.asset_url)"
+                    :src="getReviewThumbUrl(item.asset_url)" 
                     :alt="item.title"
                     class="h-16 w-auto max-w-[120px] object-contain rounded border border-slate-200/80 bg-white shrink-0 cursor-pointer"
                     loading="lazy"
                     @click="$emit('reviewRequired', pendingReviews, getReviewItemIndex(item.item_id))"
                     title="点击查看详情"
                   />
+                  <div
+                    v-else
+                    class="h-16 w-20 rounded border border-slate-200/80 bg-white shrink-0 flex items-center justify-center text-[10px] text-slate-400"
+                  >
+                    加载中
+                  </div>
                   <div class="flex-1 min-w-0">
                     <div 
                       :class="isItemExpanded(item.item_id) ? 'max-h-56 overflow-y-auto pr-1' : 'line-clamp-2'"
@@ -480,8 +487,8 @@ import { ref, computed, watch, onUnmounted, nextTick } from 'vue';
 import MarkdownIt from 'markdown-it';
 import type { PipelineStep, PipelineStepStatus, ReviewItem } from '../../types';
 import { DEFAULT_PIPELINE_STEPS } from '../../types';
-import { documentsApi } from '../../api/documents';
-import { withTokenUrl } from '../../stores/auth';
+import { documentsApi, type ManagedPipelineStream } from '../../api/documents';
+import { createSecureBlobCache } from '../../utils/secureMedia';
 
 const props = defineProps<{
   docId: string;
@@ -512,7 +519,23 @@ const errorMessage = ref<string>('');
 const copied = ref<boolean>(false);
 const pendingReviews = ref<ReviewItem[]>([]);
 const matchedDocId = ref<string | undefined>(undefined);
-let eventSource: EventSource | null = null;
+let eventSource: ManagedPipelineStream | null = null;
+let sseConnectToken = 0;
+const reviewThumbCache = createSecureBlobCache();
+
+const getReviewThumbUrl = (assetUrl?: string): string => reviewThumbCache.getUrl(assetUrl);
+
+watch(
+  pendingReviews,
+  (items) => {
+    for (const item of items) {
+      if (item.asset_url) {
+        reviewThumbCache.ensureLoaded(item.asset_url).catch(() => {});
+      }
+    }
+  },
+  { deep: true }
+);
 
 const md = new MarkdownIt({
   html: false,
@@ -883,8 +906,9 @@ const syncFromSnapshot = async (): Promise<string | null> => {
 };
 
 /** 连接或重新连接 SSE */
-const connectSSE = () => {
+const connectSSE = async () => {
   if (!props.docId) return;
+  const mySeq = ++sseConnectToken;
   if (eventSource) {
     eventSource.close();
     eventSource = null;
@@ -892,7 +916,9 @@ const connectSSE = () => {
 
   addLog('进度流', 'bg-blue-100 text-blue-700', '已连接实时进度通知');
 
-  eventSource = documentsApi.createPipelineEventSource(
+  let createdSource: ManagedPipelineStream;
+  try {
+    createdSource = await documentsApi.createPipelineEventSource(
     props.docId,
     (eventName, data) => {
       if (eventName === 'initial_state') {
@@ -1083,29 +1109,44 @@ const connectSSE = () => {
       }
     },
     (err) => {
-      // 若非活跃流水线（例如服务重启后历史文档返回 404），主动关闭 EventSource 杜绝无限自动重连刷 404
+      // 仅当自动换票重连耗尽或遇到致命鉴权/404 异常时进入此处关闭句柄
       if (eventSource) {
         eventSource.close();
         eventSource = null;
       }
       if (!isTerminalStatus(overallStatus.value)) {
-        console.warn('进度流连接已断开:', err);
+        console.warn('进度流连接已终止:', err);
+        addLog('异常', 'bg-rose-100 text-rose-700', `进度流重连失败: ${err?.message || '请点击刷新状态重试'}`);
       }
     }
   );
+  } catch (err: any) {
+    if (mySeq === sseConnectToken) {
+      addLog('异常', 'bg-rose-100 text-rose-700', `建立实时进度连接失败: ${err?.message || '请稍后刷新'}`);
+    }
+    return;
+  }
+
+  if (mySeq !== sseConnectToken) {
+    createdSource.close();
+    return;
+  }
+  eventSource = createdSource;
 };
 
 const reconnect = async () => {
   if (isReconnecting.value) return;
   isReconnecting.value = true;
+  sseConnectToken++;
   if (eventSource) {
     eventSource.close();
     eventSource = null;
   }
+  reviewThumbCache.revokeAll();
   const snapStatus = await syncFromSnapshot();
   // 仅在文档处于非终态（排队、处理中、待审核、待确认重复）时才建立 SSE 实时监听
   if (snapStatus && !isTerminalStatus(snapStatus)) {
-    connectSSE();
+    await connectSSE();
   }
   setTimeout(() => {
     isReconnecting.value = false;
@@ -1123,10 +1164,12 @@ watch(
 );
 
 onUnmounted(() => {
+  sseConnectToken++;
   if (eventSource) {
     eventSource.close();
     eventSource = null;
   }
+  reviewThumbCache.revokeAll();
 });
 
 defineExpose({
