@@ -1,0 +1,73 @@
+# 图片参考目录（实拍照资源不纳入版本库）
+image_eg/
+.playwright-mcp/
+
+# 运行与临时数据
+data/
+!backend/data/
+backend/data/parsed/
+!backend/data/sensitive_lexicon/
+!backend/data/sensitive_lexicon/**
+*.log
+
+# 环境变量与敏感配置
+.env
+.env.local
+.env.*.local
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+ENV/
+
+# Node / 前端构建产物
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+node_modules/
+dist/
+
+# 系统与 IDE 缓存
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+scratch/
+
+# 知识库原始样本与大文件 (本地留存，不纳入版本库)
+knowledge/
+
+# 架构研讨、规划、缺陷复盘与本地辅助脚本 (本地留存，不纳入版本库)
+docs/
+phases/
+phases2/
+bug/
+scripts/
+进度/
+plan.txt
+注意事项.txt
+企业级RAG架构研讨.md
+企业级RAG架构设计与实施方案.md
+
+# 本地旧代码归档备份 (仅本地留存，不纳入版本库)
+legacy_backup/
+code/
+
+# Java 构建产物与私钥/保险箱安全凭据 (严禁纳入版本库)
+java-admin-service/target/
+java-admin-service/.env.vault
+keys/
+
+# 本地测试套件与临时夹具 (本地留存，不纳入远端仓库)
+backend/tests/
+java-admin-service/src/test/
+
+# 统一入口网关配置显式纳入版本库
+!nginx/
+!nginx/**
