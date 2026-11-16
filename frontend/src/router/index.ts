@@ -28,7 +28,7 @@ const routes = [
     path: '/channels',
     name: 'ChannelStatus',
     component: () => import('../views/ChannelStatusView.vue'),
-    meta: { title: '渠道状态', requiredPermission: PERMISSIONS.SYSTEM_ADMIN },
+    meta: { title: '渠道状态' },
   },
   {
     path: '/auth/callback',

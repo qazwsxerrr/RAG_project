@@ -25,7 +25,6 @@ export interface ModelChannelItem {
   model: string;
   provider: string;
   base_url: string;
-  masked_key: string;
   backend: string;
   role: 'PRIMARY' | 'FALLBACK' | 'INFRA';
   weight: number;

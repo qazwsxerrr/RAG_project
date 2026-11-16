@@ -4,6 +4,7 @@
 - ERR_SECURITY: 输入注入 / 违规违禁拦截 (业务合规阻断，严禁热切换！立即向上抛出)
 - ERR_UPSTREAM_AUTH: 401/403 凭据未授权 / API Key 禁用 (致命凭据故障，0等待立即跳闸 OPEN 并热切换)
 - ERR_UPSTREAM_QUOTA: 429 配额耗尽 / 欠费 / Insufficient Quota (外部配额故障，立即热切换)
+- ERR_MODALITY_UNSUPPORTED: 400/422 模型不支持多模态视觉输入 (特性不匹配，允许自动热切换下一备选模型)
 - ERR_BAD_REQUEST: 400/404/413/422 请求参数非法 / 上下文超长 (客户端请求错误，不重试全部节点，不触发节点跳闸，直接抛出)
 - ERR_UPSTREAM_OUTAGE: 500/502/503/504/529 宕机与网关崩溃 (首字未出前允许单节点微重试 1 次后热切换)
 - ERR_NETWORK_TIMEOUT: 建连超时 / 首字响应超时 (热切换候选节点)
@@ -61,6 +62,8 @@ def classify_error(exc: Exception) -> str:
         if status in (400, 422):
             if any(k in search_str for k in ("prompt_injection", "content_filter", "data_inspection_failed", "sensitive_words", "jailbreak")):
                 return "ERR_SECURITY"
+            if any(k in search_str for k in ("image", "vision", "modality", "multimodal", "does not support", "not supported")):
+                return "ERR_MODALITY_UNSUPPORTED"
             return "ERR_BAD_REQUEST"
 
         if status in (401, 403):

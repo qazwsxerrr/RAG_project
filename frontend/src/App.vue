@@ -106,7 +106,6 @@
           </router-link>
 
           <router-link
-            v-if="authStore.hasPermission(PERMISSIONS.SYSTEM_ADMIN)"
             to="/channels"
             @click="isMobileMenuOpen = false"
             class="flex items-center px-2.5 py-2 rounded-lg text-xs transition-colors"

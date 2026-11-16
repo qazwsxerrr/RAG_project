@@ -6,7 +6,9 @@
 
 ## 一、系统架构与服务端口拓扑
 
-本地联调共需运行 6 个组件，服务启动顺序必须严格为：**PostgreSQL → Redis → Keycloak → Java → Python 后端 → 前端**。
+本地采用 **WSL 原生服务 + Nginx 统一入口**，腾讯云采用 **Docker Compose + Nginx 容器**。
+
+本地先确认 PostgreSQL 在线，再启动 Redis、Keycloak、Java 和 Python，构建前端后由 Nginx 托管。Nginx 负责请求路由，各服务进程仍需分别启动。
 
 | 启动顺序 | 服务组件 | 端口 | 核心职责 | 运行环境 |
 | :---: | :--- | :---: | :--- | :--- |
@@ -14,10 +16,11 @@
 | **0+** | **Redis 7+** | 6379 | Lua 原子滑动窗口限流、并发流护栏与 Streams 削峰队列 | WSL2 / 独立实例 |
 | **1** | **Keycloak (Dev IdP)** | 8180 | 企业统一单点登录与 OIDC 授权 | WSL2 / Java 21 |
 | **2** | **java-admin-service** | 8080 | 签发业务 JWT、提供 JWKS 动态验签与模型密钥短期租约 | WSL2 / Maven |
-| **3** | **FastAPI 业务后端** | **8001** | 多模态入库流水线、LangGraph 复合检索与动态容灾热切换 | WSL2 / Python `.venv` |
-| **4** | **Vue 3 前端工程** | 5173 | 现代化工作台交互界面，内置 Vite API 反代规则 | Node.js |
+| **3** | **FastAPI 业务后端** | **8001** | 多模态入库流水线、LangGraph 复合检索与流式问答 | WSL2 / Python `.venv` |
+| **4** | **Vue 3 前端构建** | — | 生成 `frontend/dist` 静态资源 | WSL2 / Node.js |
+| **5** | **Nginx** | 80 | 托管前端，统一代理 Java、Python 和 Keycloak | WSL2 |
 
-> ⚠️ **端口硬性约束**：Python 后端端口固定为 **8001**（前端 `/api/v1` 代理、Docker 容器与配置默认均绑定 8001）。
+> 当前代理配置使用 Python 8001、Java 8080。本地 Keycloak 使用 8180；修改端口时需同步代理及认证配置。Vite 5173 用于可选的前端热更新开发。
 
 ---
 
@@ -36,82 +39,132 @@
 
 ## 三、本地服务启动流程
 
-### 步骤 0：确认 PostgreSQL 16 与 Redis 7+ 在线
+以下命令统一在 WSL Ubuntu 中执行。Keycloak、Java、Python 分别占用一个终端。
 
-在 WSL2 终端中启动并验证本地 Redis 服务（Python 后端启动时执行真实 `PING` 强校验）：
+### 运行前准备
+
+- 配置根目录 `.env`、Java `.env.vault` 和 `keys/` 密钥文件，核对两端的数据库连接及内部服务凭据。
+- 确认真实 PostgreSQL 16 + pgvector 可连接，配置 OSS、MinerU、模型、Embedding 与 Rerank 服务。
+- 以下 Keycloak 命令要求已安装 `~/keycloak-26.0.0`。
+- **本地 Nginx 配置尚待适配**。仓库 `nginx/` 当前使用 Docker 上游名称。启用本地入口前，需将 Java、Python、Keycloak 上游分别配置为 `127.0.0.1:8080`、`127.0.0.1:8001`、`127.0.0.1:8180`，静态目录配置为 `/mnt/d/ai_code/RAG_project/frontend/dist`，并核对 Keycloak 回调白名单、Java 登录及退出跳转地址与本地入口一致。
+
+### 步骤 1 启动 Redis
 
 ```bash
-# 启动 WSL2 Redis 服务并验证连通性
 sudo service redis-server start
-redis-cli ping   # 预期输出 PONG
+redis-cli ping
 ```
 
----
+预期输出 `PONG`。数据库使用已配置实例。
 
-### 步骤 1：启动 Keycloak 8180（开发 IdP）
-
-在 WSL2 终端中执行（首次解压并导入 realm 定义）：
+### 步骤 2 启动 Keycloak 8180
 
 ```bash
-# 1. 复制仓库内置 realm 定义到 Keycloak 导入目录
+cd /mnt/d/ai_code/RAG_project
 mkdir -p ~/keycloak-26.0.0/data/import
-cp java-admin-service/keycloak/realm-enterprise-rag.json ~/keycloak-26.0.0/data/import/
+cp java-admin-service/keycloak/realm-enterprise-rag.json \
+  ~/keycloak-26.0.0/data/import/
 
-# 2. 启动服务（仅首次导入）
 ~/keycloak-26.0.0/bin/kc.sh start-dev --import-realm --http-port=8180
 ```
 
-* 验证：`curl -s http://localhost:8180/realms/enterprise-rag/.well-known/openid-configuration | head -c 120`
+realm 首次启动时导入，已有 realm 的配置变更需另行管理。
 
----
-
-### 步骤 2：启动 java-admin-service 8080（业务鉴权中心）
-
-在 WSL2 终端中执行：
+### 步骤 3 启动 Java 8080
 
 ```bash
-cd java-admin-service
-
-# 显式对齐本地 Keycloak 端点
-export OIDC_TOKEN_URI=http://localhost:8180/realms/enterprise-rag/protocol/openid-connect/token
-export OIDC_USERINFO_URI=http://localhost:8180/realms/enterprise-rag/protocol/openid-connect/userinfo
-export OIDC_JWK_SET_URI=http://localhost:8180/realms/enterprise-rag/protocol/openid-connect/certs
-
-mvn -q spring-boot:run
+cd /mnt/d/ai_code/RAG_project/java-admin-service
+~/.local/bin/mvn spring-boot:run
 ```
 
-* 验证：`curl -s http://localhost:8080/.well-known/jwks.json | head -c 120`
-* 数据库迁移：启动时由 Flyway 自动执行建表与角色播种；私钥位于 `keys/rsa_private.pem`。
+本地默认 OIDC 端点为 `localhost:8180`，数据库由 Flyway 执行迁移。
 
----
+### 步骤 4 启动 Python 8001
 
-### 步骤 3：启动 FastAPI 后端 8001（基于 .venv 虚拟环境）
-
-在 WSL2 终端、项目根目录下执行（**必须使用项目本地虚拟环境 `.venv`**）：
+首次初始化或依赖变更后同步依赖。
 
 ```bash
-# 依赖初始化/同步（推荐使用 uv 秒级安装，或 source .venv/bin/activate && pip install）
-uv pip install --python .venv -r backend/requirements.txt
-
-# 启动后端（热重载模式）
-.venv/bin/uvicorn rag_kb.api.main:app --app-dir backend/src --host 0.0.0.0 --port 8001 --reload
+cd /mnt/d/ai_code/RAG_project
+uv pip install --python .venv/bin/python -r backend/requirements.txt
 ```
 
-* 后端健康检查：[http://localhost:8001/health](http://localhost:8001/health)
-* 交互式文档 Swagger：[http://localhost:8001/docs](http://localhost:8001/docs)
-
----
-
-### 步骤 4：启动前端 5173（Vue 3 + Vite）
-
-在项目根目录下执行（WSL 或 Windows 终端均可）：
+启动后端，入库队列 worker 随应用启动。
 
 ```bash
-cd frontend
+cd /mnt/d/ai_code/RAG_project
+.venv/bin/uvicorn rag_kb.api.main:app \
+  --app-dir backend/src --host 127.0.0.1 --port 8001 --reload
+```
+
+### 步骤 5 构建前端
+
+首次安装或锁文件变更后执行 `npm ci`，修改前端代码后执行 `npm run build`。
+
+```bash
+cd /mnt/d/ai_code/RAG_project/frontend
+npm ci
+npm run build
+```
+
+### 步骤 6 启动 Nginx
+
+首次安装 Nginx。
+
+```bash
+sudo apt update
+sudo apt install -y nginx
+```
+
+**完成上述本地网关配置并加载到 Nginx 后**，检查配置并启动。
+
+```bash
+sudo nginx -t && sudo service nginx start
+```
+
+修改配置后检查并重载。
+
+```bash
+sudo nginx -t && sudo service nginx reload
+```
+
+本地网关配置为监听 80 后，浏览器统一访问 `http://localhost`。首次安装时的默认欢迎页只表示 Nginx 已启动。
+
+### 健康检查
+
+```bash
+curl -fsS http://localhost:8180/realms/enterprise-rag/.well-known/openid-configuration
+curl -fsS http://localhost:8080/.well-known/jwks.json
+curl -fsS http://localhost:8001/health
+# 完成本地网关配置后执行
+curl -fsS http://localhost/gateway/healthz
+curl -fsS http://localhost/health
+```
+
+网关自身健康检查仅验证 Nginx，完整链路还需实际验证登录、问答和文档上传。
+
+### 可选的前端热更新开发
+
+Vite 继续负责前端构建，也支持独立热更新开发。需要即时预览前端改动时执行以下命令，并访问 `http://localhost:5173`。当前 Vite 已配置 Java、Python 与 OIDC 回调代理，认证配置需允许此入口。
+
+```bash
+cd /mnt/d/ai_code/RAG_project/frontend
 npm run dev
 ```
 
-* 访问前端：[http://localhost:5173](http://localhost:5173)（未登录将自动无缝重定向至 Keycloak 登录页）。
+### 腾讯云 Docker 部署
+
+服务器部署目录为 `/var/www/RAG_project`，统一入口为 `https://rag.sakivo.com`。仓库 Compose 要求外部网络 `rag-net` 已存在，且数据库 `pg-rag:5432` 可在该网络访问；同时需要 `.env`、Java `.env.vault`、密钥及构建好的 `frontend/dist`。
+
+前置条件满足后，在服务器执行以下命令。
+
+```bash
+cd /var/www/RAG_project
+docker compose up -d --build
+docker compose ps
+docker compose logs -f rag-frontend rag-backend java-admin-service
+```
+
+当前仓库网关监听 80，HTTPS 需由外部 TLS 终结层提供。Java 的 Compose 启动依赖尚未包含 Keycloak 健康检查，启动后需检查认证链路。本节依据仓库配置编写，服务器实际运行状态需现场核验。
 
 ---
 

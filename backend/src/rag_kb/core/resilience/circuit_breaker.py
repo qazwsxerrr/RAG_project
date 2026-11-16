@@ -141,8 +141,8 @@ class ModelHealthTracker:
         3. 连续失败达到阈值 (consecutive_failures >= 3) 快速跳闸；
         4. 滑动窗口内样本 >= min_calls 且错误率 >= 阈值 (5%) 跳闸。
         """
-        # 业务合规阻断与请求参数错误不计入节点健康度
-        if err_category in ("ERR_SECURITY", "ERR_BAD_REQUEST"):
+        # 业务合规阻断、客户端请求参数错误与模型模态特性不匹配不计入节点硬件故障
+        if err_category in ("ERR_SECURITY", "ERR_BAD_REQUEST", "ERR_MODALITY_UNSUPPORTED"):
             self._probe_in_flight[node_name] = False
             return
 

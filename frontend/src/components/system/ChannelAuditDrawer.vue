@@ -92,9 +92,6 @@
       <div class="flex-1 overflow-y-auto p-4 space-y-2.5">
         <div class="flex items-center justify-between text-xs font-semibold text-slate-600 mb-2">
           <span>最近调用记录（{{ audits.length }} 条）</span>
-          <span v-if="channel?.masked_key" class="text-[10px] text-slate-400 font-mono font-normal truncate max-w-[220px]" :title="channel.masked_key">
-            凭据: {{ channel.masked_key }}
-          </span>
         </div>
 
         <div v-if="isLoading" class="text-center py-10 text-xs text-slate-400">

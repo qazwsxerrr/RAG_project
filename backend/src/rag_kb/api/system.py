@@ -14,13 +14,12 @@ from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlalchemy import select, desc, or_
 
-from rag_kb.api.deps import UserContext, require_permission
+from rag_kb.api.deps import UserContext, get_current_user, require_permission
 from rag_kb.core.config import settings, derive_provider_from_url
 from rag_kb.core.constants import Permissions
 from rag_kb.core.llm import llm_gateway
 from rag_kb.core.resilience.circuit_breaker import CallMetric
 from rag_kb.core.logging.context import get_request_id
-from rag_kb.core.model_credentials import get_cached_lease_info
 from rag_kb.db.session import AsyncSessionLocal
 from rag_kb.db.models import AuditLog
 
@@ -163,7 +162,7 @@ def _aggregate_logs_metrics(logs: List[AuditLog]) -> Dict[str, Any]:
 @router.get("/llm/channels")
 async def get_llm_channels_status(
     range: str = Query("90m", pattern="^(90m|24h|7d|30d)$"),
-    user: UserContext = Depends(require_permission(Permissions.SYSTEM_ADMIN))
+    user: UserContext = Depends(get_current_user)
 ):
     """获取所有模型渠道与检索基建组件的真实监控大盘数据 (基于 UTC 时间窗与 SSOT 审计表)"""
     tracker = llm_gateway.health_tracker
@@ -228,15 +227,12 @@ async def get_llm_channels_status(
         all_cluster_ttfts.extend(agg["ttfts"])
 
         node_provider = node.provider or derive_provider_from_url(node.base_url)
-        lease_info = get_cached_lease_info(node_provider, "model:llm")
 
         channel_list.append({
             "name": node.name,
             "model": node.model,
             "provider": node_provider,
             "base_url": node.base_url,
-            "masked_key": lease_info["masked_display"],
-            "lease_expires_at": lease_info["expires_at"],
             "backend": node.backend,
             "role": "PRIMARY" if node.name == cfg.primary.name else "FALLBACK",
             "weight": node.weight,
@@ -258,7 +254,6 @@ async def get_llm_channels_status(
         total_cluster_success += agg["success_count"]
 
         comp_provider = derive_provider_from_url(comp_url)
-        comp_lease = get_cached_lease_info(comp_provider, comp_scope)
 
         # 根据真实最近调用流水动态反映基建组件健康态，杜绝全部失败时仍绿灯显示 CLOSED
         recent_tail = comp_logs[-3:]
@@ -277,8 +272,6 @@ async def get_llm_channels_status(
             "model": comp_model,
             "provider": comp_provider,
             "base_url": comp_url,
-            "masked_key": comp_lease["masked_display"],
-            "lease_expires_at": comp_lease["expires_at"],
             "backend": comp_backend,
             "role": "INFRA",
             "weight": 100,
@@ -330,7 +323,7 @@ async def get_llm_channels_status(
 async def get_channel_audit_logs(
     node_name: str,
     limit: int = 30,
-    user: UserContext = Depends(require_permission(Permissions.SYSTEM_ADMIN))
+    user: UserContext = Depends(get_current_user)
 ):
     """查询指定模型或基建节点的近 30 次真实审计调用流水"""
     try:

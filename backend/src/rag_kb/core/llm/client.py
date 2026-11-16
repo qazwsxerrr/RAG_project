@@ -513,9 +513,6 @@ class ResilientLLMGateway(LLMGateway):
             except Exception:
                 eff_provider = self.config.primary.provider or "managed"
 
-            caller_supports_vision = require_vision or any(
-                k in (model or "").lower() for k in ("vl", "grok", "vision", "4o")
-            )
             caller_node = ModelNodeConfig(
                 name="caller-override",
                 model=model or self.config.primary.model,
@@ -525,7 +522,7 @@ class ResilientLLMGateway(LLMGateway):
                 backend=backend or self.config.primary.backend,
                 weight=999,
                 is_active=True,
-                supports_vision=caller_supports_vision
+                supports_vision=True
             )
             return [caller_node] + [f for f in filtered_fallbacks if f.name != caller_node.name]
 
@@ -575,7 +572,10 @@ class ResilientLLMGateway(LLMGateway):
             if sent:
                 self.health_tracker.mark_alert_sent(node.name)
 
-        if err_category in ("ERR_SECURITY", "ERR_BAD_REQUEST"):
+        if err_category == "ERR_MODALITY_UNSUPPORTED":
+            node.supports_vision = False
+            logger.warning(f"[{req_id}][LLM_FAILOVER] 节点 [{node.name}] 不支持多模态视觉输入，标记 supports_vision=False 并切换下一候选节点。")
+        elif err_category in ("ERR_SECURITY", "ERR_BAD_REQUEST"):
             raise exc
 
         if idx < len(candidate_nodes) - 1:
@@ -627,7 +627,10 @@ class ResilientLLMGateway(LLMGateway):
             if sent:
                 self.health_tracker.mark_alert_sent(node.name)
 
-        if err_category in ("ERR_SECURITY", "ERR_BAD_REQUEST"):
+        if err_category == "ERR_MODALITY_UNSUPPORTED":
+            node.supports_vision = False
+            logger.warning(f"[{req_id}][LLM_FAILOVER] 节点 [{node.name}] 不支持多模态视觉输入，标记 supports_vision=False 并切换下一候选节点。")
+        elif err_category in ("ERR_SECURITY", "ERR_BAD_REQUEST"):
             raise exc
 
         if idx < len(candidate_nodes) - 1:
@@ -659,6 +662,7 @@ class ResilientLLMGateway(LLMGateway):
         req_id = get_request_id()
         scope = "model:vlm" if require_vision else "model:llm"
         last_error: Optional[Exception] = None
+        node_errors: List[str] = []
 
         for idx, node in enumerate(candidate_nodes):
             if not self.health_tracker.acquire_execution_permit(node.name):
@@ -741,6 +745,7 @@ class ResilientLLMGateway(LLMGateway):
                     last_error = exc
                     total_ms = int((time.perf_counter() - t0) * 1000)
                     err_category = classify_error(exc)
+                    node_errors.append(f"[{node.name} (model={node.model})]: ({err_category}) {exc}")
 
                     if token_yielded:
                         self.health_tracker.release_execution_permit(node.name)
@@ -756,7 +761,8 @@ class ResilientLLMGateway(LLMGateway):
                     await self._handle_node_failure_async(req_id, node, idx, candidate_nodes, total_ms, exc, err_category)
                     break
 
-        raise RuntimeError(f"【LLM 网关灾难性故障】所有候选模型均不可用或处于熔断隔离！最后错误: {last_error}")
+        err_details = "\n".join(f"  - {err}" for err in node_errors) if node_errors else f"  - {last_error}"
+        raise RuntimeError(f"【LLM 网关灾难性故障】所有候选模型均无法处理此请求（全链路失败）！各节点报错详情汇总:\n{err_details}")
 
     async def chat(
         self,
@@ -777,6 +783,7 @@ class ResilientLLMGateway(LLMGateway):
         req_id = get_request_id()
         scope = "model:vlm" if require_vision else "model:llm"
         last_error: Optional[Exception] = None
+        node_errors: List[str] = []
 
         for idx, node in enumerate(candidate_nodes):
             if not self.health_tracker.acquire_execution_permit(node.name):
@@ -827,6 +834,7 @@ class ResilientLLMGateway(LLMGateway):
                     last_error = exc
                     total_ms = int((time.perf_counter() - t0) * 1000)
                     err_category = classify_error(exc)
+                    node_errors.append(f"[{node.name} (model={node.model})]: ({err_category}) {exc}")
 
                     if not node_retried and err_category == "ERR_UPSTREAM_OUTAGE":
                         node_retried = True
@@ -837,7 +845,8 @@ class ResilientLLMGateway(LLMGateway):
                     await self._handle_node_failure_async(req_id, node, idx, candidate_nodes, total_ms, exc, err_category)
                     break
 
-        raise RuntimeError(f"【LLM 网关灾难性故障】所有候选模型均不可用或处于熔断隔离！最后错误: {last_error}")
+        err_details = "\n".join(f"  - {err}" for err in node_errors) if node_errors else f"  - {last_error}"
+        raise RuntimeError(f"【LLM 网关灾难性故障】所有候选模型均无法处理此请求（全链路失败）！各节点报错详情汇总:\n{err_details}")
 
     def chat_sync(
         self,
@@ -857,6 +866,7 @@ class ResilientLLMGateway(LLMGateway):
 
         scope = "model:vlm" if require_vision else "model:llm"
         last_error: Optional[Exception] = None
+        node_errors: List[str] = []
 
         for idx, node in enumerate(candidate_nodes):
             if not self.health_tracker.acquire_execution_permit(node.name):
@@ -913,6 +923,7 @@ class ResilientLLMGateway(LLMGateway):
                     last_error = exc
                     total_ms = int((time.perf_counter() - t0) * 1000)
                     err_category = classify_error(exc)
+                    node_errors.append(f"[{node.name} (model={node.model})]: ({err_category}) {exc}")
 
                     if not node_retried and err_category == "ERR_UPSTREAM_OUTAGE":
                         node_retried = True
@@ -923,7 +934,8 @@ class ResilientLLMGateway(LLMGateway):
                     self._handle_node_failure_sync(node, idx, candidate_nodes, total_ms, exc, err_category)
                     break
 
-        raise RuntimeError(f"【LLM 网关灾难性故障】所有候选模型均不可用或处于熔断隔离！最后错误: {last_error}")
+        err_details = "\n".join(f"  - {err}" for err in node_errors) if node_errors else f"  - {last_error}"
+        raise RuntimeError(f"【LLM 网关灾难性故障】所有候选模型均无法处理此请求（全链路失败）！各节点报错详情汇总:\n{err_details}")
 
 
 # 全局单例导出

@@ -288,7 +288,6 @@ def _parse_fallback_nodes_json(raw_json: Optional[str], env_name: str, default_v
 def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
     """从当前 settings 与环境变量动态组装高可用模型链 (Phase-6 §7.5: 节点仅声明 provider，运行时通过租约注入凭据)"""
     primary_provider = derive_provider_from_url(cfg.active_base_url)
-    primary_supports_vision = any(k in cfg.active_model_name.lower() for k in ("vl", "grok", "vision", "4o"))
     primary = ModelNodeConfig(
         name="primary-default",
         model=cfg.active_model_name,
@@ -298,7 +297,7 @@ def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
         backend=cfg.active_llm_api_backend,
         weight=100,
         is_active=True,
-        supports_vision=primary_supports_vision
+        supports_vision=True
     )
 
     fallbacks: List[ModelNodeConfig] = _parse_fallback_nodes_json(cfg.LLM_FALLBACKS_JSON, "LLM_FALLBACKS_JSON")
