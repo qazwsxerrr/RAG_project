@@ -24,7 +24,6 @@ from rag_kb.services.parser.code_flowchart_service import (
 )
 from rag_kb.services.parser.table_service import table_stitching_service, ParsedTableBlock
 from rag_kb.services.parser.vlm_service import vlm_service
-from rag_kb.utils.oss import oss_service
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +69,13 @@ class TableNode(BaseNode):
                 "heading": f"第 {tbl.display_page} 页表格",
                 "title": tbl.title or f"第 {tbl.display_page} 页表格",
             }
-            tbl_img = tbl.image_url
-            if tbl_img and "aliyuncs.com" in tbl_img and "OSSAccessKeyId" not in tbl_img:
-                tbl_img = oss_service.signed_url(tbl_img, expires=3600)
-
             async with tbl_sem:
                 logger.info(f"▶ [表格处理] 正在提取表格语义 (第 {idx + 1}/{len(processed_tables)} 个, 页码: {tbl.display_page})...")
                 desc = await asyncio.to_thread(
                     vlm_service.describe_table,
                     tbl.html_content or tbl.raw_content,
                     ctx,
-                    tbl_img
+                    tbl.image_url
                 )
                 tbl.semantic_summary = desc
 

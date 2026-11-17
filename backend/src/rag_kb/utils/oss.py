@@ -9,6 +9,7 @@ import os
 import hashlib
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
+from urllib.parse import urlparse
 import oss2
 from rag_kb.core.config import settings
 from rag_kb.core.resilience import retry_on_transient
@@ -36,7 +37,12 @@ class AliyunOSSService:
             raise RuntimeError("【阿里云 OSS 错误】未配置有效的 OSS_BUCKET_NAME，严禁本地降级！")
 
         auth = oss2.Auth(self.access_key_id, self.access_key_secret)
-        self._bucket = oss2.Bucket(auth, self.endpoint, self.bucket_name)
+        normalized_endpoint = (
+            self.endpoint
+            if self.endpoint.startswith(("http://", "https://"))
+            else f"https://{self.endpoint}"
+        )
+        self._bucket = oss2.Bucket(auth, normalized_endpoint, self.bucket_name)
         return self._bucket
 
     @staticmethod
@@ -88,17 +94,31 @@ class AliyunOSSService:
         return self.upload_bytes(data, target_key, content_type)
 
     def normalize_key(self, target_key_or_url: str) -> str:
-        """统一剥离 OSS 完整 HTTP/HTTPS 域名前缀及前导 '/'，返回标准 Object Key"""
+        """统一剥离当前配置的存储完整 HTTP/HTTPS 域名前缀及前导 '/'，返回标准 Object Key"""
         clean_endpoint = self.endpoint.replace("https://", "").replace("http://", "").rstrip("/")
-        base_prefix = f"https://{self.bucket_name}.{clean_endpoint}/"
-        http_prefix = f"http://{self.bucket_name}.{clean_endpoint}/"
+        prefixes = (
+            f"https://{self.bucket_name}.{clean_endpoint}/",
+            f"http://{self.bucket_name}.{clean_endpoint}/",
+            f"https://{clean_endpoint}/",
+            f"http://{clean_endpoint}/",
+        )
 
         clean_key = target_key_or_url
-        if clean_key.startswith(base_prefix):
-            clean_key = clean_key[len(base_prefix):]
-        elif clean_key.startswith(http_prefix):
-            clean_key = clean_key[len(http_prefix):]
+        for prefix in prefixes:
+            if clean_key.startswith(prefix):
+                clean_key = clean_key[len(prefix):]
+                break
         return clean_key.lstrip("/")
+
+    def _is_own_bucket_url(self, url: str) -> bool:
+        """基于 .env 动态配置的 bucket_name 与 endpoint 判断 URL 是否指向当前实例私有桶（零厂商域名硬编码）"""
+        if not self.bucket_name or not self.endpoint:
+            return False
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        clean_endpoint = self.endpoint.replace("https://", "").replace("http://", "").rstrip("/").lower()
+        expected_bucket_host = f"{self.bucket_name.lower()}.{clean_endpoint}"
+        return host in (expected_bucket_host, clean_endpoint)
 
     def signed_url(self, target_key_or_url: str, expires: Optional[int] = None) -> str:
         """为指定的 OSS Object Key 生成带有效期的临时访问 URL（默认 2 小时）"""
@@ -106,6 +126,24 @@ class AliyunOSSService:
         clean_key = self.normalize_key(target_key_or_url)
         exp = expires or settings.OSS_SIGNED_URL_EXPIRES
         return bucket.sign_url("GET", clean_key, exp)
+
+    def ensure_signed_url(self, target_key_or_url: str, expires: Optional[int] = None) -> str:
+        """统一将未签名的自家私有桶 URL 或相对 Object Key 转换为带有效期的临时 HTTPS 签名链接"""
+        raw = (target_key_or_url or "").strip()
+        if not raw:
+            raise ValueError("【OSS 签名错误】待签名的路径或链接不能为空！")
+        if raw.startswith("data:"):
+            return raw
+        if raw.startswith(("http://", "https://")):
+            query_lower = (urlparse(raw).query or "").lower()
+            already_signed = any(
+                k in query_lower
+                for k in ("ossaccesskeyid=", "x-oss-signature=", "signature=")
+            )
+            if self._is_own_bucket_url(raw) and not already_signed:
+                return self.signed_url(raw, expires=expires)
+            return raw
+        return self.signed_url(raw, expires=expires)
 
     def get_object_stream(
         self,
@@ -180,3 +218,6 @@ def upload_bytes(file_bytes: bytes, target_key: str, content_type: Optional[str]
 
 def signed_url(target_key_or_url: str, expires: Optional[int] = None) -> str:
     return oss_service.signed_url(target_key_or_url, expires)
+
+def ensure_signed_url(target_key_or_url: str, expires: Optional[int] = None) -> str:
+    return oss_service.ensure_signed_url(target_key_or_url, expires)

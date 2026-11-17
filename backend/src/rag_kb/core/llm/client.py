@@ -11,6 +11,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import AsyncGenerator, Dict, Any, List, Optional, Tuple, Type, TypeVar
 from pydantic import BaseModel
@@ -81,6 +82,7 @@ class LLMGateway:
         **kwargs
     ) -> Tuple[str, Dict[str, str], Dict[str, Any], str]:
         """纯协议组装与出网 SSRF 安全校验（无网络 I/O 副作用）"""
+        reasoning_effort = kwargs.pop("reasoning_effort", None)
         effective_backend = (backend or settings.active_llm_api_backend).strip().lower()
         effective_backend = "responses" if effective_backend in ("responses", "response") else "chat_completions"
 
@@ -165,7 +167,9 @@ class LLMGateway:
             if temperature is not None:
                 payload["temperature"] = temperature
             if max_tokens is not None:
-                payload["max_tokens"] = max_tokens
+                payload["max_output_tokens"] = max_tokens
+            if reasoning_effort and str(reasoning_effort).strip() and "reasoning" not in payload:
+                payload["reasoning"] = {"effort": str(reasoning_effort).strip().lower()}
         else:
             endpoint = f"{final_base_url}/chat/completions"
             payload = {
@@ -195,11 +199,11 @@ class LLMGateway:
         **kwargs
     ) -> Tuple[str, Dict[str, str], Dict[str, Any], str]:
         """同步请求组装（未显式传 api_key 时同步向鉴权中心换取短期租约）"""
-        final_api_key = api_key or ""
+        final_api_key = (api_key or "").strip()
         final_base_url = (base_url if base_url is not None else settings.active_base_url).rstrip("/")
         final_model = model if model is not None else settings.active_model_name
 
-        if not final_api_key or final_api_key.startswith("your_") or "*" in final_api_key:
+        if not final_api_key:
             try:
                 from rag_kb.core.model_credentials import get_credential_sync
                 eff_provider = derive_provider_from_url(final_base_url, explicit_provider=provider)
@@ -237,11 +241,11 @@ class LLMGateway:
         **kwargs
     ) -> Tuple[str, Dict[str, str], Dict[str, Any], str]:
         """异步请求组装（全程异步向鉴权中心换取短期租约，绝不阻塞事件循环）"""
-        final_api_key = api_key or ""
+        final_api_key = (api_key or "").strip()
         final_base_url = (base_url if base_url is not None else settings.active_base_url).rstrip("/")
         final_model = model if model is not None else settings.active_model_name
 
-        if not final_api_key or final_api_key.startswith("your_") or "*" in final_api_key:
+        if not final_api_key:
             try:
                 from rag_kb.core.model_credentials import get_credential
                 eff_provider = derive_provider_from_url(final_base_url, explicit_provider=provider)
@@ -265,28 +269,70 @@ class LLMGateway:
         )
 
     @staticmethod
-    def _extract_content(data: Dict[str, Any], backend: str) -> str:
-        """从非流式响应中自适应提取纯净回答文本"""
+    def _strip_thinking_tags(text: str) -> str:
+        """剥离非流式回答中可能内嵌的 <think>...</think> 推理草稿块，仅保留正式结论"""
+        if not text:
+            return ""
+        cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+        if "</think>" in cleaned.lower():
+            cleaned = re.split(r"</think>", cleaned, flags=re.IGNORECASE)[-1]
+        return cleaned.strip()
+
+    @classmethod
+    def _extract_message_parts_text(cls, content_parts: Any) -> str:
+        """从 message.content 中仅提取正式输出文本分片，过滤 reasoning_text / thought 等思考分片"""
+        if isinstance(content_parts, str):
+            return cls._strip_thinking_tags(content_parts)
+        if isinstance(content_parts, list):
+            text_list: List[str] = []
+            for part in content_parts:
+                if isinstance(part, str):
+                    text_list.append(part)
+                elif isinstance(part, dict):
+                    p_type = (part.get("type") or "").lower()
+                    if p_type in ("reasoning", "reasoning_text", "thought", "thinking", "summary_text"):
+                        continue
+                    if "text" in part and isinstance(part["text"], str):
+                        text_list.append(part["text"])
+            return cls._strip_thinking_tags("".join(text_list))
+        return ""
+
+    @classmethod
+    def _extract_content(cls, data: Dict[str, Any], backend: str) -> str:
+        """从非流式响应中自适应提取纯净正式回答文本（优先 final_answer，彻底过滤推理思考内容）"""
         if backend == "responses":
-            for item in data.get("output", []):
-                if item.get("type") == "message":
-                    content_parts = item.get("content", [])
-                    if isinstance(content_parts, list):
-                        text_list = [
-                            part["text"] if isinstance(part, dict) and "text" in part else (part if isinstance(part, str) else "")
-                            for part in content_parts
-                        ]
-                        return "".join(text_list).strip()
-                    if isinstance(content_parts, str):
-                        return content_parts.strip()
+            msg_items = [
+                item for item in data.get("output", [])
+                if isinstance(item, dict) and item.get("type") == "message"
+            ]
+            # 1. 优先提取显式标记为 final_answer 的最后一个非空正式回答节点
+            for item in reversed(msg_items):
+                if item.get("phase") == "final_answer":
+                    extracted = cls._extract_message_parts_text(item.get("content", []))
+                    if extracted:
+                        return extracted
+            # 2. 若上游未标注 phase，跳过 commentary 过程帧，取最后一个非空 message 节点
+            for item in reversed(msg_items):
+                if item.get("phase") == "commentary":
+                    continue
+                extracted = cls._extract_message_parts_text(item.get("content", []))
+                if extracted:
+                    return extracted
+
             if "output_text" in data and isinstance(data["output_text"], str):
-                return data["output_text"].strip()
+                cleaned_out = cls._strip_thinking_tags(data["output_text"])
+                if cleaned_out:
+                    return cleaned_out
             raise RuntimeError(f"【LLM 异常响应】Responses 协议返回未包含有效的 message/output 节点: {data}")
 
         choices = data.get("choices")
         if not choices:
             raise RuntimeError(f"【LLM 异常响应】服务返回未包含 choices 节点: {data}")
-        return choices[0].get("message", {}).get("content", "") or ""
+        msg_obj = choices[0].get("message", {}) or {}
+        raw_content = msg_obj.get("content", "")
+        if isinstance(raw_content, list):
+            return cls._extract_message_parts_text(raw_content)
+        return cls._strip_thinking_tags(raw_content or "")
 
     @retry_on_transient(service_name="LLMGateway.chat")
     async def chat(
@@ -598,11 +644,12 @@ class ResilientLLMGateway(LLMGateway):
         err_category: str
     ) -> None:
         """统一处理同步/工作线程链路节点失败：跨线程安全落库与同步 Webhook 推送 + 频控冷却标记"""
+        req_id = get_request_id()
         immediate_trip = (err_category == "ERR_UPSTREAM_QUOTA" and is_fatal_quota_exhausted(exc))
         self.health_tracker.release_execution_permit(node.name)
         self.health_tracker.record_failure(node.name, total_ms, err_category, immediate_trip=immediate_trip)
 
-        logger.error(f"[LLM_FAILOVER] 节点 [{node.name}] 同步调用故障 ({err_category}): {exc} | 耗时: {total_ms}ms")
+        logger.error(f"[{req_id}][LLM_FAILOVER] 节点 [{node.name}] 同步调用故障 ({err_category}): {exc} | 耗时: {total_ms}ms")
 
         record_audit_log_sync(
             action="LLM_INFERENCE",
@@ -635,7 +682,7 @@ class ResilientLLMGateway(LLMGateway):
 
         if idx < len(candidate_nodes) - 1:
             next_node = candidate_nodes[idx + 1]
-            logger.warning(f"[LLM_FAILOVER] 同步调用热切换: [{node.name}] -> [{next_node.name}] (原因: {err_category})")
+            logger.warning(f"[{req_id}][LLM_FAILOVER] 同步调用热切换: [{node.name}] -> [{next_node.name}] (原因: {err_category})")
             record_audit_log_sync(
                 action="LLM_FAILOVER",
                 resource_id=f"{node.name}->{next_node.name}",

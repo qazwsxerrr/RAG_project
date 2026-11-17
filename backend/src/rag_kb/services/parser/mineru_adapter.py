@@ -93,11 +93,8 @@ class MinerUParserAdapter:
             target_oss_path = f"rag_storage/temp_parse/{sha256[:8]}_{Path(file_name).name}"
             file_url = oss_service.upload_file(content_bytes, target_oss_path)
 
-        # 若 Bucket 为私有访问，生成带有签名的临时下载 URL（2 小时有效），确保 MinerU 云端集群能够直接下载
-        if "aliyuncs.com" in file_url and "OSSAccessKeyId" not in file_url:
-            signed_file_url = oss_service.signed_url(file_url, expires=7200)
-        else:
-            signed_file_url = file_url
+        # 若 Bucket 为私有访问或传入的是 OSS Object Key，统一生成带有签名的临时下载 URL（2 小时有效），确保 MinerU 云端集群能够直接下载
+        signed_file_url = oss_service.ensure_signed_url(file_url, expires=7200)
 
         api_base = settings.MINERU_API_URL.rstrip("/")
         task_endpoint = f"{api_base}/extract/task"
@@ -281,11 +278,8 @@ class MinerUParserAdapter:
             target_oss_path = f"rag_storage/temp_parse/{sha256[:8]}_{Path(file_name).name}"
             file_url = oss_service.upload_file(content_bytes, target_oss_path)
 
-        # 私有 OSS 生成签名 URL
-        if "aliyuncs.com" in file_url and "OSSAccessKeyId" not in file_url:
-            signed_file_url = oss_service.signed_url(file_url, expires=7200)
-        else:
-            signed_file_url = file_url
+        # 私有 OSS 或 Object Key 统一生成签名 URL
+        signed_file_url = oss_service.ensure_signed_url(file_url, expires=7200)
 
         agent_base = getattr(settings, "MINERU_AGENT_BASE_URL", "https://mineru.net/api/v1/agent").rstrip("/")
         task_endpoint = f"{agent_base}/parse/url"

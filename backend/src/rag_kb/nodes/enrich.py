@@ -15,7 +15,6 @@ from rag_kb.graph.state import IngestState
 from rag_kb.nodes.base import BaseNode
 from rag_kb.services.parser.code_flowchart_service import code_flowchart_service
 from rag_kb.services.parser.vlm_service import vlm_service
-from rag_kb.utils.oss import oss_service
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +51,6 @@ class EnrichNode(BaseNode):
                 img_el["vlm_description"] = img_el.get("alt", "") or "文档配图"
                 return
 
-            signed_img_url = (
-                oss_service.signed_url(raw_url, expires=3600)
-                if ("aliyuncs.com" in raw_url and "OSSAccessKeyId" not in raw_url)
-                else raw_url
-            )
             is_flowchart = code_flowchart_service.is_flowchart_image(img_el)
             img_el["is_flowchart"] = is_flowchart
 
@@ -70,9 +64,9 @@ class EnrichNode(BaseNode):
             async with img_sem:
                 logger.info(f"▶ [VLM] 正在分析第 {idx + 1}/{len(image_elements)} 张配图 (页码: {img_el.get('page_idx', 0) + 1})...")
                 if is_flowchart:
-                    desc = await asyncio.to_thread(vlm_service.describe_flowchart, signed_img_url, ctx)
+                    desc = await asyncio.to_thread(vlm_service.describe_flowchart, raw_url, ctx)
                 else:
-                    desc = await asyncio.to_thread(vlm_service.describe_image, signed_img_url, ctx)
+                    desc = await asyncio.to_thread(vlm_service.describe_image, raw_url, ctx)
                 img_el["vlm_description"] = desc
 
         if image_elements:

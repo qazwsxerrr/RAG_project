@@ -27,18 +27,22 @@ class MultimodalVLMService:
     def _call_gateway(
         self,
         messages: List[Dict[str, Any]],
-        max_tokens: int = 800,
+        max_tokens: int = 4096,
         temperature: float = 0.1,
         action_name: str = "多模态视觉 API",
         backend: Optional[str] = None
     ) -> str:
         """统一通过全局弹性大模型网关执行同步推理，遇到主节点故障自动切换至可用候选节点"""
         try:
+            extra_kwargs: Dict[str, Any] = {}
+            if settings.VLM_REASONING_EFFORT and settings.VLM_REASONING_EFFORT.strip():
+                extra_kwargs["reasoning_effort"] = settings.VLM_REASONING_EFFORT.strip()
             content = llm_gateway.chat_sync(
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                backend=backend
+                backend=backend,
+                **extra_kwargs
             )
             if not content or not str(content).strip():
                 raise ValueError(f"【{action_name}错误】: 模型返回内容为空！")
@@ -78,7 +82,7 @@ class MultimodalVLMService:
                 ],
             }
         ]
-        content = self._call_gateway(messages, max_tokens=800, temperature=0.1, action_name="多模态视觉 API")
+        content = self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="多模态视觉 API")
         return self._strip_heading_hashes(content)
 
     def describe_flowchart(self, image_url_or_path: str, context: Dict[str, Any]) -> str:
@@ -108,7 +112,7 @@ class MultimodalVLMService:
                 ],
             }
         ]
-        content = self._call_gateway(messages, max_tokens=1200, temperature=0.1, action_name="多模态流程图 API")
+        content = self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="多模态流程图 API")
         return self._strip_heading_hashes(content)
 
     def describe_table(self, table_content: str, context: Dict[str, Any], table_image_url: Optional[str] = None) -> str:
@@ -158,16 +162,12 @@ class MultimodalVLMService:
 是否有溯源：可引用来源文档；无
 """
         content_payload: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
-        if table_image_url:
-            from rag_kb.core.config import WORKSPACE_ROOT as BASE_DIR
-            is_remote = table_image_url.startswith("http://") or table_image_url.startswith("https://")
-            is_local = Path(table_image_url).exists() or (BASE_DIR / table_image_url).exists()
-            if is_remote or is_local:
-                formatted_url = self._format_image_payload(table_image_url)
-                content_payload.append({"type": "image_url", "image_url": {"url": formatted_url}})
+        if table_image_url and str(table_image_url).strip():
+            formatted_url = self._format_image_payload(str(table_image_url).strip())
+            content_payload.append({"type": "image_url", "image_url": {"url": formatted_url}})
 
         messages = [{"role": "user", "content": content_payload}]
-        return self._call_gateway(messages, max_tokens=800, temperature=0.1, action_name="表格描述 API")
+        return self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="表格描述 API")
 
     def describe_code(self, code_content: str, language: str, context: Dict[str, Any]) -> str:
         """调用大模型对代码块进行深度语义理解与业务逻辑提取"""
@@ -190,7 +190,7 @@ class MultimodalVLMService:
 - 纯文本直接输出技术事实，保持语言紧凑精炼。
 """
         messages = [{"role": "user", "content": prompt}]
-        content = self._call_gateway(messages, max_tokens=1500, temperature=0.1, action_name="代码块语义解析 API")
+        content = self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="代码块语义解析 API")
         return self._strip_heading_hashes(content)
 
     def describe_flowchart_text(self, mermaid_code: str, context: Dict[str, Any]) -> str:
@@ -215,13 +215,13 @@ class MultimodalVLMService:
 - 纯文本直接陈述流转事实，保持高信息密度与语言紧凑。
 """
         messages = [{"role": "user", "content": prompt}]
-        content = self._call_gateway(messages, max_tokens=1500, temperature=0.1, action_name="流程图语义解析 API")
+        content = self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="流程图语义解析 API")
         return self._strip_heading_hashes(content)
 
     def probe_model_connection(self) -> Dict[str, Any]:
         """测试并验证网关候选池连通性与响应"""
         messages = [{"role": "user", "content": "请回复'API Connection OK'"}]
-        reply = self._call_gateway(messages, max_tokens=30, temperature=0.1, action_name="模型连通性探测")
+        reply = self._call_gateway(messages, max_tokens=512, temperature=0.1, action_name="模型连通性探测")
         return {
             "status": "success",
             "model": self.model,
@@ -230,31 +230,31 @@ class MultimodalVLMService:
         }
 
     def _format_image_payload(self, image_url_or_path: str) -> str:
-        """处理图片链接：支持云端 OSS HTTP(S) URL（私有桶自动临时授权签名）或本地 Base64 编码注入"""
-        if image_url_or_path.startswith("http://") or image_url_or_path.startswith("https://"):
-            if "aliyuncs.com" in image_url_or_path and "OSSAccessKeyId" not in image_url_or_path:
-                from rag_kb.utils.oss import oss_service
-                return oss_service.signed_url(image_url_or_path, expires=3600)
-            return image_url_or_path
+        """处理图片链接：支持 Base64 Data URI、本地物理文件编码、外部 HTTP(S) URL 或 OSS Object Key 自动临时授权签名"""
+        raw = (image_url_or_path or "").strip()
+        if not raw:
+            raise ValueError("【多模态视觉 API 错误】图片路径或链接不能为空！")
 
-        if image_url_or_path.startswith("data:image"):
-            return image_url_or_path
+        if raw.startswith("data:image"):
+            return raw
 
-        from rag_kb.core.config import WORKSPACE_ROOT as BASE_DIR
-        local_path = Path(image_url_or_path)
-        if not local_path.exists():
-            candidate = BASE_DIR / image_url_or_path
-            if candidate.exists():
-                local_path = candidate
+        if not raw.startswith(("http://", "https://")):
+            from rag_kb.core.config import WORKSPACE_ROOT as BASE_DIR
+            local_path = Path(raw)
+            if not local_path.exists():
+                candidate = BASE_DIR / raw
+                if candidate.exists():
+                    local_path = candidate
 
-        if local_path.exists() and local_path.is_file():
-            with open(local_path, "rb") as f:
-                encoded = base64.b64encode(f.read()).decode("utf-8")
-            suffix = local_path.suffix.lower().replace(".", "")
-            mime = "jpeg" if suffix in ["jpg", "jpeg"] else suffix
-            return f"data:image/{mime};base64,{encoded}"
+            if local_path.exists() and local_path.is_file():
+                with open(local_path, "rb") as f:
+                    encoded = base64.b64encode(f.read()).decode("utf-8")
+                suffix = local_path.suffix.lower().replace(".", "")
+                mime = "jpeg" if suffix in ["jpg", "jpeg"] else suffix
+                return f"data:image/{mime};base64,{encoded}"
 
-        return image_url_or_path
+        from rag_kb.utils.oss import oss_service
+        return oss_service.ensure_signed_url(raw, expires=3600)
 
 
 vlm_service = MultimodalVLMService()

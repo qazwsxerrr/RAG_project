@@ -141,8 +141,9 @@ class Settings(BaseSettings):
 
     # ==================== 通用 LLM & VLM 配置 (OpenAI 协议，API Key 统一由 Java 鉴权中心托管) ====================
     BASE_URL: str = "https://kedaya.ai/v1"
-    MODEL_NAME: str = "grok-4.5"
+    MODEL_NAME: str = "deepseek-v4.1-flash"
     LLM_API_BACKEND: str = "responses"
+    VLM_REASONING_EFFORT: Optional[str] = "low"
 
     @property
     def active_llm_api_backend(self) -> str:
@@ -157,7 +158,7 @@ class Settings(BaseSettings):
 
     @property
     def active_model_name(self) -> str:
-        return self.MODEL_NAME.strip() or "grok-4.5"
+        return self.MODEL_NAME.strip() or "deepseek-v4.1-flash"
 
     # ==================== 向量模型配置 (Dense & Sparse，API Key 统一由 Java 鉴权中心托管) ====================
     EMBEDDING_BASE_URL: str = "https://api.siliconflow.cn/v1"
@@ -329,8 +330,18 @@ def load_resilient_llm_config(cfg: Settings) -> ResilientLLMConfig:
                 supports_vision=False
             ),
             ModelNodeConfig(
-                name="fallback-siliconflow-qwen-vl",
-                model="Qwen/Qwen2.5-VL-72B-Instruct",
+                name="fallback-siliconflow-qwen3-vl-32b",
+                model="Qwen/Qwen3-VL-32B-Instruct",
+                base_url=sf_base_url,
+                provider=sf_provider,
+                backend="chat_completions",
+                weight=75,
+                is_active=True,
+                supports_vision=True
+            ),
+            ModelNodeConfig(
+                name="fallback-siliconflow-qwen3-vl-8b",
+                model="Qwen/Qwen3-VL-8B-Instruct",
                 base_url=sf_base_url,
                 provider=sf_provider,
                 backend="chat_completions",

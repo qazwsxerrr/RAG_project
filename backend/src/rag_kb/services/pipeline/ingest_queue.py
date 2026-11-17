@@ -20,12 +20,12 @@ import socket
 import asyncio
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Tuple
 from langgraph.types import Command
 from sqlalchemy import select
 
 from rag_kb.core.config import settings
-from rag_kb.core.constants import IngestStatus
+from rag_kb.core.constants import IngestStatus, STEP_NAMES
 from rag_kb.core.logging.context import set_trace_context, reset_trace_context, get_request_id
 from rag_kb.core.redis_client import get_redis_client
 from rag_kb.db.session import AsyncSessionLocal
@@ -504,6 +504,7 @@ class RedisIngestQueueService:
             config = {"configurable": {"thread_id": doc_id}}
             graph = get_ingest_graph()
             latest_graph_state: Optional[Dict[str, Any]] = None
+            interrupted_state: Optional[Tuple[str, int, str]] = None
             async for mode, chunk in graph.astream(
                 Command(resume=resume_payload),
                 config=config,
@@ -511,6 +512,10 @@ class RedisIngestQueueService:
             ):
                 if mode == "custom" and isinstance(chunk, dict):
                     evt_name = chunk.get("event", "message")
+                    if evt_name == "duplicate_warning":
+                        interrupted_state = (IngestStatus.DUPLICATE_WARNING.value, 11, STEP_NAMES[10])
+                    elif evt_name == "pipeline_completed":
+                        interrupted_state = None
                     await pipeline_manager.broadcast(doc_id, evt_name, chunk)
                 elif mode == "values" and isinstance(chunk, dict):
                     latest_graph_state = chunk
@@ -519,6 +524,10 @@ class RedisIngestQueueService:
                 for preserve_key in ("doc_id", "file_name", "department", "category", "tags", "raw_oss_url", "file_hash"):
                     if not latest_graph_state.get(preserve_key) and state.get(preserve_key):
                         latest_graph_state[preserve_key] = state[preserve_key]
+                if interrupted_state:
+                    latest_graph_state["overall_status"] = interrupted_state[0]
+                    latest_graph_state["current_step_index"] = interrupted_state[1]
+                    latest_graph_state["current_step_name"] = interrupted_state[2]
                 pipeline_manager.update_state(doc_id, latest_graph_state)
             await self._finalize_post_graph_state(doc_id, latest_graph_state or state)
         except Exception as err:
@@ -712,6 +721,7 @@ class RedisIngestQueueService:
 
             try:
                 latest_graph_state: Optional[Dict[str, Any]] = None
+                interrupted_state: Optional[Tuple[str, int, str]] = None
                 async for mode, chunk in graph.astream(
                     state,
                     config=config,
@@ -719,6 +729,12 @@ class RedisIngestQueueService:
                 ):
                     if mode == "custom" and isinstance(chunk, dict):
                         evt_name = chunk.get("event", "message")
+                        if evt_name == "review_required":
+                            interrupted_state = (IngestStatus.REVIEW.value, 7, STEP_NAMES[6])
+                        elif evt_name == "duplicate_warning":
+                            interrupted_state = (IngestStatus.DUPLICATE_WARNING.value, 11, STEP_NAMES[10])
+                        elif evt_name in ("review_completed", "pipeline_completed"):
+                            interrupted_state = None
                         await pipeline_manager.broadcast(doc_id, evt_name, chunk)
                     elif mode == "values" and isinstance(chunk, dict):
                         latest_graph_state = chunk
@@ -726,6 +742,10 @@ class RedisIngestQueueService:
                 state["resume_from_step"] = None
                 if latest_graph_state:
                     latest_graph_state["resume_from_step"] = None
+                    if interrupted_state:
+                        latest_graph_state["overall_status"] = interrupted_state[0]
+                        latest_graph_state["current_step_index"] = interrupted_state[1]
+                        latest_graph_state["current_step_name"] = interrupted_state[2]
                     pipeline_manager.update_state(doc_id, latest_graph_state)
 
                 # 检查图结束后的最新态（BaseNode 捕获节点异常时会把 state["overall_status"] 置为 "failed" 并短路至 END）

@@ -62,8 +62,40 @@ def classify_error(exc: Exception) -> str:
         if status in (400, 422):
             if any(k in search_str for k in ("prompt_injection", "content_filter", "data_inspection_failed", "sensitive_words", "jailbreak")):
                 return "ERR_SECURITY"
-            if any(k in search_str for k in ("image", "vision", "modality", "multimodal", "does not support", "not supported")):
-                return "ERR_MODALITY_UNSUPPORTED"
+            payload_param_errors = (
+                "image_url format",
+                "unsupported format",
+                "invalid image format",
+                "invalid_image_format",
+                "must be larger than",
+                "must be smaller than",
+                "dimension",
+                "height(",
+                "width(",
+                "failed to download",
+                "unable to download",
+                "image size",
+                "context_length_exceeded",
+                "maximum context length",
+            )
+            if not any(p in search_str for p in payload_param_errors):
+                has_modality_term = any(
+                    m in search_str for m in ("image", "vision", "modality", "multimodal", "visual")
+                )
+                has_unsupported_term = any(
+                    u in search_str for u in (
+                        "does not support",
+                        "not support",
+                        "not supported",
+                        "unsupported modality",
+                        "invalid modality",
+                        "not available",
+                        "text-only",
+                        "only supports text",
+                    )
+                )
+                if has_modality_term and has_unsupported_term:
+                    return "ERR_MODALITY_UNSUPPORTED"
             return "ERR_BAD_REQUEST"
 
         if status in (401, 403):

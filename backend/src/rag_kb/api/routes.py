@@ -947,7 +947,7 @@ async def get_review_item_asset(
         if rev_item:
             target_url = rev_item.asset_url
 
-    if not target_url or not target_url.startswith("http"):
+    if not target_url or not str(target_url).strip():
         raise HTTPException(status_code=404, detail="未找到该待审核图元或该项无关联切图")
 
     try:
