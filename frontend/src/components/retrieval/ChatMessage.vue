@@ -133,18 +133,13 @@
         <!-- 引用来源卡片条：仅在正文中确实引用了该角标时展示，避免“回答未找到依据却列出参考来源”的矛盾 -->
         <div v-if="displayCitations.length > 0 && (message.content || !message.isStreaming)" class="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100 text-xs">
           <span class="text-[11px] text-slate-400 font-medium">参考来源：</span>
-          <button
+          <CitationCard
             v-for="cit in displayCitations"
             :key="cit.citation_id"
-            @click="$emit('citationClick', cit)"
-            class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] text-slate-600 hover:text-blue-600 hover:bg-slate-100 transition-colors font-mono cursor-pointer"
-            :title="`查看原文: ${cit.document_title} 第 ${cit.page_idx + 1} 页`"
-          >
-            <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-            <span class="font-bold text-slate-700">[{{ cit.citation_id }}]</span>
-            <span class="truncate max-w-[200px]">{{ cit.document_title }}</span>
-            <span class="text-slate-400 text-[10px]">P.{{ (cit.page_idx || 0) + 1 }}</span>
-          </button>
+            :citation="cit"
+            variant="inline"
+            @select="$emit('citationClick', $event)"
+          />
         </div>
 
       </div>
@@ -157,6 +152,7 @@ import { ref, computed, watch } from 'vue';
 import MarkdownIt from 'markdown-it';
 import type { ChatMessage as ChatMessageType, CitationSource } from '../../types';
 import ThoughtTimeline from './ThoughtTimeline.vue';
+import CitationCard from '../common/CitationCard.vue';
 
 const props = defineProps<{
   message: ChatMessageType;

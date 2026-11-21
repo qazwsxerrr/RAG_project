@@ -46,8 +46,13 @@ async def lifespan(app: FastAPI):
     from rag_kb.api.system import hydrate_llm_health_tracker_from_db
     await hydrate_llm_health_tracker_from_db()
 
+    # 6. Phase-9: 协同启动 FastMCP StreamableHTTP 会话管理生命周期
+    from rag_kb.services.mcp import get_mcp_http_app
+    mcp_http_app = get_mcp_http_app()
+
     try:
-        yield
+        async with mcp_http_app.lifespan(app):
+            yield
     finally:
         await ingest_queue_service.stop_worker()
         await close_redis_clients()
@@ -87,6 +92,10 @@ def create_app() -> FastAPI:
     app.include_router(chunks_router, prefix=prefix)
     app.include_router(sessions_router, prefix=prefix)
     app.include_router(system_router, prefix=prefix)
+
+    # 3.1 Phase-9: 将 FastMCP 标准协议服务挂载至 /mcp 路径
+    from rag_kb.services.mcp import get_mcp_http_app
+    app.mount("/mcp", get_mcp_http_app())
 
     # 4. 健康检查与根路由
     @app.get("/health", tags=["监控"])

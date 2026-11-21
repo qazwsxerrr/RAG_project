@@ -23,6 +23,7 @@ PyJWT>=2.8.0
 cryptography>=41.0.0
 redis[hiredis]>=5.0.0
 pypdfium2>=4.30.0
+fastmcp>=4.1.0
 
 # 测试与开发依赖
 pytest>=8.0.0

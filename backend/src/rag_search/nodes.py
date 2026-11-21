@@ -103,9 +103,16 @@ async def prepare_node(
             except Exception as e:
                 logger.warning(f"【指代消除跳过】LLM 改写异常: {e}")
 
-    # 2. 提取特征
-    dense_vec = await embedding_service.embed_query(rewritten_query)
-    sparse_vec = tokenize.extract_sparse_vector(rewritten_query)
+    # 2. 委托 MCP 向量特征单一事实源 (SSOT) 提取 1024 维稠密向量与 L2 归一化稀疏特征
+    from rag_kb.services.mcp.server import execute_core_embeddings_extraction
+
+    dense_list, sparse_list = await execute_core_embeddings_extraction(
+        texts=[rewritten_query],
+        include_sparse=True,
+        batch_size=1,
+    )
+    dense_vec = dense_list[0]
+    sparse_vec = sparse_list[0] if sparse_list else {}
     tsquery_tokens = tokenize.cut_for_index(rewritten_query)
 
     cost_ms = int((time.perf_counter() - t0) * 1000)
@@ -417,10 +424,12 @@ async def mmr_node(
     t0 = time.perf_counter()
 
     reranked = state.get("reranked_chunks", [])
+    requested_top_k = state.get("top_k")
+    effective_top_k = max(1, min(20, int(requested_top_k))) if requested_top_k else settings.FINAL_TOP_K
     final_chunks = mmr.mmr_select(
         query_dense=state["dense_vec"],
         chunks=reranked,
-        top_k=settings.FINAL_TOP_K,
+        top_k=effective_top_k,
         lambda_param=settings.MMR_LAMBDA,
         strip_vector=True
     )

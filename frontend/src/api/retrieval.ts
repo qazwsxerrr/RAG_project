@@ -15,14 +15,6 @@ export interface ChatQueryPayload {
 }
 
 export const retrievalApi = {
-  /** 纯检索接口 (阶段 1 ~ 阶段 6)：获取经过多阶段漏斗精选的切片与思考流 */
-  async search(payload: ChatQueryPayload) {
-    return apiClient.post('/retrieval/search', {
-      ...payload,
-      stream: false,
-    });
-  },
-
   /** 阶段 1 ~ 阶段 8 全流程智能问答流式打字机接口 (POST SSE 协议) */
   async streamChat(
     payload: ChatQueryPayload,

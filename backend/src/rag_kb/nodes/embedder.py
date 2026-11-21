@@ -14,8 +14,8 @@ from langgraph.types import StreamWriter
 from rag_kb.core.constants import IngestStatus
 from rag_kb.graph.state import IngestState
 from rag_kb.nodes.base import BaseNode
-from rag_kb.utils.embedding import embedding_service
-from rag_kb.utils.tokenize import extract_sparse_vector, cut_for_index
+from rag_kb.services.mcp.server import execute_core_embeddings_extraction
+from rag_kb.utils.tokenize import cut_for_index
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +45,14 @@ class EmbedderNode(BaseNode):
 
         chunk_texts = [c.content for c in raw_chunks]
 
-        # 1. 批量计算 1024 维稠密特征向量
-        dense_embeddings = await embedding_service.embed_texts(chunk_texts, batch_size=16)
+        # 1. 委托 MCP 向量特征单一事实源 (SSOT) 批量计算 1024 维稠密特征与 L2 归一化稀疏特征向量
+        dense_embeddings, sparse_vectors = await execute_core_embeddings_extraction(
+            texts=chunk_texts,
+            include_sparse=True,
+            batch_size=16,
+        )
 
-        # 2. 计算 L2 归一化稀疏特征向量
-        sparse_vectors = [extract_sparse_vector(c.content) for c in raw_chunks]
-
-        # 3. 计算用于 PostgreSQL GIN to_tsvector('simple', text) 的中文切词序列
+        # 2. 计算用于 PostgreSQL GIN to_tsvector('simple', text) 的中文切词序列
         tsv_strings = [cut_for_index(c.content) for c in raw_chunks]
 
         # 确保每个切片的分词序列和稀疏字典非空，防止校验拦截

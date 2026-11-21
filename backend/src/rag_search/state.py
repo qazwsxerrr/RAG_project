@@ -19,6 +19,7 @@ class RetrievalState(TypedDict):
     tags_scope: Optional[List[str]]
     scene_type: str
     enable_hyde: bool
+    top_k: Optional[int]
 
     # 阶段 1：预处理中间产物
     rewritten_query: str
@@ -53,6 +54,7 @@ def get_default_state(
     tags_scope: Optional[List[str]] = None,
     scene_type: str = "general",
     enable_hyde: bool = True,
+    top_k: Optional[int] = None,
 ) -> RetrievalState:
     """构造初始检索图状态字典"""
     state: RetrievalState = {
@@ -64,6 +66,7 @@ def get_default_state(
         "tags_scope": list(tags_scope) if tags_scope else None,
         "scene_type": scene_type or "general",
         "enable_hyde": enable_hyde,
+        "top_k": top_k,
 
         "rewritten_query": query.strip(),
         "dense_vec": [],

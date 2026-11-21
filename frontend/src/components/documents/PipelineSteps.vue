@@ -9,9 +9,7 @@
           <div>
             <div class="flex items-center gap-2">
               <h3 class="text-sm font-bold text-slate-900 tracking-tight">文档处理进度</h3>
-              <span class="text-xs px-2.5 py-0.5 rounded-full font-medium border" :class="statusBadgeClass">
-                {{ currentStatusText }}
-              </span>
+              <StatusTag :status="overallStatus" :custom-text="currentStatusText" variant="pill" />
             </div>
             <div v-if="docId" class="text-[11px] text-slate-400 font-mono mt-0.5 flex items-center gap-2">
               <span>文档 ID: <span class="text-slate-700 font-medium">{{ docId }}</span></span>
@@ -489,6 +487,7 @@ import type { PipelineStep, PipelineStepStatus, ReviewItem } from '../../types';
 import { DEFAULT_PIPELINE_STEPS } from '../../types';
 import { documentsApi, type ManagedPipelineStream } from '../../api/documents';
 import { createSecureBlobCache } from '../../utils/secureMedia';
+import StatusTag from './StatusTag.vue';
 
 const props = defineProps<{
   docId: string;
@@ -787,19 +786,6 @@ const currentStatusText = computed(() => {
     case 'failed': return String(errorMessage.value).includes('FORMAT_INVALID') ? '格式校验未通过（请整理后重传）' : '处理异常';
     case 'cancelled': return '已取消入库';
     default: return overallStatus.value;
-  }
-});
-
-const statusBadgeClass = computed(() => {
-  switch (overallStatus.value) {
-    case 'completed': return 'bg-emerald-50 text-emerald-700 border-emerald-200/80';
-    case 'queued':
-    case 'pending': return 'bg-indigo-50 text-indigo-700 border-indigo-200/80 animate-pulse';
-    case 'pending_review': return 'bg-amber-50 text-amber-800 border-amber-200/80 animate-pulse';
-    case 'duplicate_warning': return 'bg-orange-50 text-orange-800 border-orange-200/80 animate-pulse';
-    case 'running': return 'bg-blue-50 text-blue-700 border-blue-200/80';
-    case 'failed': return 'bg-rose-50 text-rose-700 border-rose-200/80';
-    default: return 'bg-slate-100 text-slate-600 border-slate-200';
   }
 });
 

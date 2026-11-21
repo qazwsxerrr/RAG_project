@@ -46,6 +46,9 @@ class TraceLoggingMiddleware(BaseHTTPMiddleware):
     """企业级统一请求追踪与错误掩码中间件"""
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if request.scope.get("path") == "/mcp":
+            request.scope["path"] = "/mcp/"
+
         incoming_req_id = request.headers.get("x-request-id")
         incoming_tenant_id = request.headers.get("x-tenant-id") or settings.DEFAULT_TENANT_ID
         incoming_user_id = request.headers.get("x-user-id")

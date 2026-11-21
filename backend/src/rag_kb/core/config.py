@@ -106,6 +106,11 @@ class Settings(BaseSettings):
     PIPELINE_MEMORY_HISTORY_LIMIT: int = 200
     PDF_RENDER_CONCURRENCY: int = 4
 
+    # ==================== Phase-9: FastMCP 公共能力网关与 Agent 白名单配置 ====================
+    RATE_LIMIT_MCP_PER_MINUTE: int = 60
+    MCP_MAX_TOKENS_LIMIT: int = 4096
+    MCP_AGENT_TOOL_POLICIES_JSON: Optional[str] = None
+
     @property
     def async_database_url(self) -> str:
         """SQLAlchemy 异步连接串 (postgresql+asyncpg)"""

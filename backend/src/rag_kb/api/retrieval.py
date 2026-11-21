@@ -133,38 +133,26 @@ async def search_endpoint(
         )
 
     history_dicts = [h.model_dump() for h in request.history] if request.history else []
-    initial_state = get_default_state(
-        query=request.query,
-        conversation_id=request.conversation_id,
-        history=history_dicts,
-        department_scope=effective_dept_scope,
-        category_scope=request.category_scope,
-        tags_scope=request.tags_scope,
-        scene_type=request.scene_type,
-        enable_hyde=request.enable_hyde
-    )
-
     builder = ThinkingProcessBuilder()
-    graph = get_retrieval_graph()
-    citations_raw = []
 
     try:
-        latest_state = initial_state
-        # 流式跑图以捕获全部阶段的思考动画帧，并从 values 模式获取最终状态，避免重复执行图
-        async for mode, chunk in graph.astream(initial_state, stream_mode=["custom", "values"]):
-            if mode == "custom" and isinstance(chunk, dict):
-                if chunk.get("type") == "thinking_step" and "step" in chunk:
-                    builder.update_step(chunk["step"])
-                elif chunk.get("type") == "citations" and "citations" in chunk:
-                    citations_raw = chunk["citations"]
-            elif mode == "values" and isinstance(chunk, dict):
-                latest_state = chunk
+        from rag_kb.services.mcp.server import execute_core_hybrid_retrieval
 
-        builder.retrieve_ms = int((time.perf_counter() - builder.start_time) * 1000)
+        latest_state, thinking_steps, citations_raw, retrieve_ms = await execute_core_hybrid_retrieval(
+            query=request.query,
+            effective_department_scope=effective_dept_scope,
+            conversation_id=request.conversation_id,
+            history=history_dicts,
+            category_scope=request.category_scope,
+            tags_scope=request.tags_scope,
+            scene_type=request.scene_type,
+            enable_hyde=request.enable_hyde,
+        )
+        for st in thinking_steps:
+            builder.update_step(st)
+        builder.retrieve_ms = retrieve_ms
         thinking_process = builder.to_thinking_process()
 
-        if not citations_raw:
-            citations_raw = latest_state.get("citations", [])
         citations = [CitationSource(**c) for c in citations_raw]
 
         final_chunks_raw = latest_state.get("results") or latest_state.get("final_chunks", [])

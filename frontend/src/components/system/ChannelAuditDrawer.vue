@@ -18,12 +18,7 @@
           <div class="min-w-0">
             <h2 class="text-sm font-bold text-slate-900 flex items-center gap-2">
               <span class="truncate">{{ channel?.name }}</span>
-              <span 
-                class="text-[10px] px-1.5 py-0.5 rounded font-sans font-medium shrink-0"
-                :class="getStateBadgeClass(channel?.state)"
-              >
-                {{ formatStateText(channel?.state) }}
-              </span>
+              <StatusTag :status="channel?.state" variant="pill" />
               <span v-if="channel?.weight" class="text-[10px] text-slate-400 font-normal shrink-0">
                 权重 {{ channel.weight }}
               </span>
@@ -139,6 +134,7 @@
 import { ref, watch, computed } from 'vue';
 import { systemApi, type ModelChannelItem, type AuditLogItem } from '../../api/system';
 import { useAuthStore, PERMISSIONS } from '../../stores/auth';
+import StatusTag from '../documents/StatusTag.vue';
 
 const props = defineProps<{
   isOpen: boolean;
@@ -167,13 +163,6 @@ watch(
   { immediate: true }
 );
 
-function formatStateText(state?: string): string {
-  if (state === 'CLOSED') return '正常';
-  if (state === 'HALF_OPEN') return '恢复探测';
-  if (state === 'OPEN') return '已隔离';
-  return state || '就绪';
-}
-
 function formatActionLabel(action?: string): string {
   switch (action) {
     case 'LLM_INFERENCE':
@@ -189,12 +178,6 @@ function formatActionLabel(action?: string): string {
     default:
       return action || '服务调用';
   }
-}
-
-function getStateBadgeClass(state?: string): string {
-  if (state === 'CLOSED') return 'bg-emerald-50 text-emerald-600 border border-emerald-200/60';
-  if (state === 'HALF_OPEN') return 'bg-amber-50 text-amber-600 border border-amber-200/60';
-  return 'bg-rose-50 text-rose-600 border border-rose-200/60';
 }
 
 async function fetchAudits(nodeName: string) {

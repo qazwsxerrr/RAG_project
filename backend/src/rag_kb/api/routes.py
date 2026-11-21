@@ -132,29 +132,6 @@ async def _authenticate_bearer_or_ticket(
         )
     return user
 
-async def _resolve_or_create_department(db: AsyncSession, department_path: str) -> Department:
-    """根据已校验的合法部门路径查找或建档 Department 记录，保障 rag_documents 外键完整"""
-    clean_path = "/" + department_path.strip("/") if department_path != "/" else "/public"
-    res = await db.execute(select(Department).where(Department.path == clean_path))
-    dept_obj = res.scalar_one_or_none()
-    if dept_obj:
-        return dept_obj
-
-    pure_name = "公共知识库" if clean_path == "/public" else clean_path.strip("/").split("/")[-1]
-    res_by_name = await db.execute(select(Department).where(Department.name == pure_name))
-    existing_by_name = res_by_name.scalar_one_or_none()
-    if existing_by_name:
-        return existing_by_name
-
-    dept_obj = Department(
-        id=uuid.uuid4(),
-        name=pure_name,
-        path=clean_path,
-    )
-    db.add(dept_obj)
-    await db.flush()
-    return dept_obj
-
 
 async def _stream_read_upload_with_limit(
     upload_file: UploadFile,
@@ -246,33 +223,12 @@ async def upload_document(
     except Exception:
         parsed_tags = [t.strip() for t in tags.split(",") if t.strip()]
 
-    # 解析并严格校验目标归属部门路径 (防止跨部门伪造与根路径 "/" 空部门名脏数据)
-    default_dept = "/public" if user.dept_path == "/" else user.dept_path
-    raw_dept = department.strip() if (department and department.strip()) else default_dept
-    if raw_dept == "/":
-        raw_dept = "/public"
+    from rag_kb.services.mcp.server import (
+        resolve_authorized_department_path,
+        execute_core_document_ingest_from_temp_file,
+    )
 
-    if not raw_dept.startswith("/"):
-        dept_res = await db.execute(select(Department).where(Department.name == raw_dept))
-        matched_dept = dept_res.scalar_one_or_none()
-        if matched_dept:
-            department_path = matched_dept.path
-        elif user.data_scope == "ALL":
-            department_path = f"/总公司/{raw_dept}"
-        else:
-            base_dept = user.dept_path.rstrip("/")
-            if base_dept.endswith("/" + raw_dept) or base_dept == "/" + raw_dept:
-                department_path = base_dept
-            else:
-                department_path = f"{base_dept}/{raw_dept}"
-    else:
-        department_path = "/" + raw_dept.strip("/")
-
-    if not any(is_path_under_prefix(department_path, prefix) for prefix in user.allowed_department_prefixes):
-        raise HTTPException(
-            status_code=403,
-            detail=f"【越权访问拦截】您当前无权将文档上传至该部门目录: {department_path}"
-        )
+    department_path = await resolve_authorized_department_path(db, user, department)
 
     doc_id = str(uuid.uuid4())
     temp_dir = Path(settings.DATA_PARSED_DIR) / "tmp"
@@ -282,117 +238,19 @@ async def upload_document(
     max_bytes = max(1, int(settings.MAX_UPLOAD_SIZE_MB)) * 1024 * 1024
     file_size, file_hash = await _stream_read_upload_with_limit(file, temp_file_path, max_bytes)
 
-    # Redis 分布式短时幂等锁：拦截前端连点重复提交同一文件
-    try:
-        async with upload_dedup_lock(department_path=department_path, file_sha256=file_hash):
-            clean_dept_key = department_path.strip("/").replace("/", "_") or "public"
-            target_oss_key = f"rag_storage/raw/{clean_dept_key}/{file_hash[:8]}_{actual_file_name}"
-
-            try:
-                # 1. 真实上传至阿里云 OSS（按需读取文件后立即由局部作用域释放，不驻留 State）
-                def _upload_local_to_oss() -> str:
-                    uploaded_key = oss_service.upload_file(str(temp_file_path), target_oss_key)
-                    if str(uploaded_key).startswith("http"):
-                        return str(uploaded_key)
-                    clean_ep = oss_service.endpoint.replace("https://", "").replace("http://", "").rstrip("/")
-                    return f"https://{oss_service.bucket_name}.{clean_ep}/{str(uploaded_key).lstrip('/')}"
-
-                real_oss_url = await asyncio.to_thread(_upload_local_to_oss)
-
-                # 2. 构造无二进制内存占用的轻量状态并写入数据库初始排队态 (overall_status='queued', is_active=False)
-                initial_state = get_default_state(
-                    doc_id=doc_id,
-                    file_name=actual_file_name,
-                    file_bytes=None,
-                    temp_file_path=str(temp_file_path),
-                    department=department_path,
-                    category=category,
-                    tags=parsed_tags,
-                    skip_review=skip_review,
-                )
-                initial_state["raw_oss_url"] = real_oss_url
-                initial_state["file_hash"] = file_hash
-                initial_state["overall_status"] = IngestStatus.QUEUED.value
-
-                dept_obj = await _resolve_or_create_department(db, department_path)
-                queued_doc = Document(
-                    id=uuid.UUID(doc_id),
-                    title=actual_file_name,
-                    file_hash=file_hash,
-                    raw_oss_url=real_oss_url,
-                    department_id=dept_obj.id,
-                    department_path=department_path,
-                    category=category,
-                    tags=parsed_tags,
-                    overall_status=IngestStatus.QUEUED.value,
-                    current_step_index=1,
-                    pipeline_steps=initial_state["steps"],
-                    version=1,
-                    is_active=False,
-                )
-                db.add(queued_doc)
-                await db.flush()
-
-                # 3. 推入真实 Redis Streams 异步消费队列（削峰填谷）
-                stream_msg_id = await ingest_queue_service.enqueue_ingest_task(
-                    doc_id=doc_id,
-                    file_name=actual_file_name,
-                    raw_oss_url=real_oss_url,
-                    file_hash=file_hash,
-                    department=department_path,
-                    category=category,
-                    tags=parsed_tags,
-                    skip_review=skip_review,
-                    temp_file_path=str(temp_file_path),
-                    user_id=user.user_id,
-                    tenant_id=user.tenant_id,
-                    request_id=get_request_id(),
-                )
-
-                await db.commit()
-                pipeline_manager.register_pipeline(doc_id, initial_state)
-            except Exception:
-                raise
-    except Exception:
-        # 捕获所有上传阶段异常（包括 HTTPException 与未预期的 OSS/DB 异常），彻底清理临时文件与半成品状态
-        if temp_file_path.exists():
-            try:
-                temp_file_path.unlink()
-            except OSError:
-                pass
-        pipeline_manager.remove_pipeline(doc_id)
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-        raise
-
-    await record_audit_log(
-        action="DOCUMENT_UPLOAD",
-        resource_id=doc_id,
-        status="SUCCESS",
-        details={
-            "file_name": actual_file_name,
-            "file_size": file_size,
-            "file_hash": file_hash,
-            "department": department_path,
-            "category": category,
-            "stream_msg_id": stream_msg_id,
-        }
-    )
-
-    return DocumentUploadResponse(
+    return await execute_core_document_ingest_from_temp_file(
+        db=db,
+        user=user,
         doc_id=doc_id,
-        task_id=stream_msg_id,
-        file_name=actual_file_name,
+        actual_file_name=actual_file_name,
+        temp_file_path=temp_file_path,
         file_size=file_size,
         file_hash=file_hash,
-        department=department_path,
+        department_path=department_path,
         category=category,
-        tags=parsed_tags,
-        status=IngestStatus.QUEUED.value,
-        message="文档已成功存入云端并加入后台异步解析队列，可实时查看进度；若解析异常可一键重试。",
-        oss_url=real_oss_url
+        parsed_tags=parsed_tags,
+        skip_review=skip_review,
+        queue_service=ingest_queue_service,
     )
 
 # ==================== 2. 文档列表与删除 ====================
@@ -564,127 +422,9 @@ async def get_pipeline_status(
     db: AsyncSession = Depends(get_db),
     user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
 ):
-    """获取流水线静态快照 (Phase-6: 校验权限并做 assert_doc_visible)"""
-    snapshot = pipeline_manager.to_snapshot(doc_id)
-    if snapshot:
-        mem_state = pipeline_manager.get_state(doc_id) or {}
-        mem_dept = mem_state.get("department", "")
-        if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权查看其他部门的文档处理进度")
-
-        if snapshot.pending_reviews or snapshot.overall_status != "completed":
-            return snapshot
-        try:
-            doc_uuid = uuid.UUID(doc_id)
-            review_stmt = select(DocumentReviewItem).where(DocumentReviewItem.document_id == doc_uuid)
-            review_res = await db.execute(review_stmt)
-            db_reviews = review_res.scalars().all()
-            if db_reviews:
-                snapshot.pending_reviews = [
-                    ReviewItem(
-                        item_id=r.item_key,
-                        doc_id=str(r.document_id),
-                        type=r.type,
-                        title=r.title,
-                        page_idx=r.page_idx,
-                        display_page=r.display_page,
-                        line_number=r.line_number,
-                        asset_url=f"/api/v1/documents/{doc_id}/review-items/{r.item_key}/asset" if r.asset_url else "",
-                        raw_oss_url=r.asset_url,
-                        raw_content=r.raw_content,
-                        vlm_description=r.vlm_description,
-                        user_description=r.user_description,
-                        remark=r.remark,
-                        status=r.status
-                    )
-                    for r in db_reviews
-                ]
-                if len(snapshot.steps) >= 7 and snapshot.steps[6].status == "skipped":
-                    snapshot.steps[6].detail = "已跳过人工审核"
-        except Exception:
-            pass
-        return snapshot
-
-    try:
-        doc_uuid = uuid.UUID(doc_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="未找到该文档的流水线快照")
-
-    stmt = select(Document).where(Document.id == doc_uuid)
-    res = await db.execute(stmt)
-    doc = res.scalar_one_or_none()
-    if not doc:
-        raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id}")
-    assert_doc_visible(user, doc)
-
-    review_stmt = select(DocumentReviewItem).where(DocumentReviewItem.document_id == doc_uuid)
-    review_res = await db.execute(review_stmt)
-    db_reviews = review_res.scalars().all()
-    was_human_reviewed = any(r.status in ("approved", "modified") for r in db_reviews)
-    skipped_detail_text = "已跳过人工审核" if len(db_reviews) > 0 else "无图表项，无需审核"
-
-    if doc.pipeline_steps and isinstance(doc.pipeline_steps, list) and len(doc.pipeline_steps) == len(STEP_NAMES):
-        steps = []
-        for i, s in enumerate(doc.pipeline_steps):
-            raw_st = s.get("status", "waiting")
-            detail_val = s.get("detail")
-            if i == 6 and doc.overall_status == "active" and raw_st == "waiting" and not was_human_reviewed:
-                raw_st = "skipped"
-                detail_val = skipped_detail_text
-            steps.append(PipelineStepStatus(
-                step_index=s.get("step_index", i + 1),
-                name=s.get("name", STEP_NAMES[i]),
-                status=raw_st,
-                duration_ms=int(s.get("duration_ms") or 0),
-                error=s.get("error"),
-                detail=detail_val,
-            ))
-    else:
-        steps = []
-        for i, name in enumerate(STEP_NAMES):
-            if doc.overall_status == "active":
-                st_val = "skipped" if (i == 6 and not was_human_reviewed) else "completed"
-            else:
-                st_val = "waiting"
-            steps.append(PipelineStepStatus(
-                step_index=i + 1,
-                name=name,
-                status=st_val,
-                duration_ms=0,
-                detail=skipped_detail_text if st_val == "skipped" else None,
-            ))
-
-    pending_review_items = [
-        ReviewItem(
-            item_id=r.item_key,
-            doc_id=str(r.document_id),
-            type=r.type,
-            title=r.title,
-            page_idx=r.page_idx,
-            display_page=r.display_page,
-            line_number=r.line_number,
-            asset_url=f"/api/v1/documents/{doc_id}/review-items/{r.item_key}/asset" if r.asset_url else "",
-            raw_oss_url=r.asset_url,
-            raw_content=r.raw_content,
-            vlm_description=r.vlm_description,
-            user_description=r.user_description,
-            remark=r.remark,
-            status=r.status
-        )
-        for r in db_reviews
-    ]
-
-    eff_step_idx = 11 if doc.overall_status == "active" else max(1, min(len(STEP_NAMES), int(doc.current_step_index or 1)))
-    return PipelineSnapshotResponse(
-        doc_id=doc_id,
-        file_name=doc.title,
-        overall_status="completed" if doc.overall_status == "active" else doc.overall_status,
-        current_step_index=eff_step_idx,
-        current_step_name=STEP_NAMES[eff_step_idx - 1],
-        steps=steps,
-        requires_review=(doc.overall_status == IngestStatus.REVIEW.value and len(pending_review_items) > 0),
-        pending_reviews=pending_review_items
-    )
+    """获取流水线静态快照 (委托 FastMCP 核心状态服务 build_core_document_status_snapshot 单一事实源)"""
+    from rag_kb.services.mcp.server import build_core_document_status_snapshot
+    return await build_core_document_status_snapshot(db=db, user=user, doc_id=doc_id)
 
 @router.post("/{doc_id}/stream-ticket", response_model=StreamTicketResponse)
 async def create_document_stream_ticket(

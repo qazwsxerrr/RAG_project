@@ -45,6 +45,7 @@ class UserContext(BaseModel):
     cv: int = 1
     token_iat_ms: int = 0
     token_exp: int = 0
+    delegated_agent_id: Optional[str] = None
 
     @computed_field
     @property
@@ -460,6 +461,18 @@ async def get_current_user(authorization: Optional[str] = Header(None, alias="Au
         )
     await assert_token_not_revoked_or_stale(user_id_str, token_iat_ms=token_iat_ms)
 
+    # 提取 RS256 签名保护的受托 Agent 身份声明 (RFC 8693 act.sub / agent_id / azp / client_id)
+    delegated_agent_id: Optional[str] = None
+    act_claim = payload.get("act")
+    if isinstance(act_claim, dict) and act_claim.get("sub"):
+        delegated_agent_id = str(act_claim["sub"]).strip() or None
+    elif payload.get("agent_id"):
+        delegated_agent_id = str(payload["agent_id"]).strip() or None
+    elif payload.get("azp"):
+        delegated_agent_id = str(payload["azp"]).strip() or None
+    elif payload.get("client_id"):
+        delegated_agent_id = str(payload["client_id"]).strip() or None
+
     # Phase-7 §1.2: 将验签通过的真实员工与租户身份回写至全链路追踪上下文，确保审计日志严格穿透
     from rag_kb.core.logging.context import get_trace_context
     trace_ctx = get_trace_context()
@@ -478,6 +491,7 @@ async def get_current_user(authorization: Optional[str] = Header(None, alias="Au
         cv=cv,
         token_iat_ms=token_iat_ms,
         token_exp=token_exp,
+        delegated_agent_id=delegated_agent_id,
     )
 
 

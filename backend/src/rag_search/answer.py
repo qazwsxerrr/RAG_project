@@ -79,15 +79,3 @@ async def stream_answer(
 
     async for event_type, token in default_stream_moderator.filter_chat_stream(raw_stream):
         yield (event_type, token)
-
-async def generate_answer(
-    query: str,
-    hits: List[Dict[str, Any]],
-    citations: Optional[List[Dict[str, Any]]] = None
-) -> str:
-    """非流式一次性生成解答全文（仅提取正式答案部分）"""
-    tokens = []
-    async for evt_type, token in stream_answer(query, hits, citations):
-        if evt_type == "message":
-            tokens.append(token)
-    return "".join(tokens)

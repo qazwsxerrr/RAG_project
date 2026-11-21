@@ -1,15 +1,13 @@
-"""src/rag_search/build.py —— 检索 LangGraph 的组装层，提供编译后的图单例与便捷入口 run_search。
+"""src/rag_search/build.py —— 检索 LangGraph 的组装层，提供编译后的图单例。
 
-把 nodes 的 8 个节点连成 START → prepare → {四路并行} → fuse → rerank → mmr → END，
-run_search 构造初始状态、流式跑图并返回最终状态。
+把 nodes 的 8 个节点连成 START → prepare → {四路并行} → fuse → rerank → mmr → END。
 图无状态、可被多请求高并发调用；get_retrieval_graph 用 lru_cache 做进程内编译单例。
 """
 
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
 from langgraph.graph import StateGraph, START, END
 from rag_search import edges, nodes
-from rag_search.state import RetrievalState, get_default_state
+from rag_search.state import RetrievalState
 
 @lru_cache(maxsize=1)
 def get_retrieval_graph():
@@ -47,30 +45,3 @@ def get_retrieval_graph():
     builder.add_edge(edges.NODE_MMR, END)
 
     return builder.compile()
-
-async def run_search(
-    query: str,
-    conversation_id: Optional[str] = None,
-    history: Optional[List[Dict[str, str]]] = None,
-    department_scope: Optional[List[str]] = None,
-    category_scope: Optional[str] = None,
-    tags_scope: Optional[List[str]] = None,
-    scene_type: str = "general",
-    enable_hyde: bool = True,
-    config: Optional[dict] = None
-) -> RetrievalState:
-    """便捷统一检索入口：构造初始状态、执行 LangGraph 并返回最终状态"""
-    initial_state = get_default_state(
-        query=query,
-        conversation_id=conversation_id,
-        history=history,
-        department_scope=department_scope,
-        category_scope=category_scope,
-        tags_scope=tags_scope,
-        scene_type=scene_type,
-        enable_hyde=enable_hyde
-    )
-
-    graph = get_retrieval_graph()
-    final_state = await graph.ainvoke(initial_state, config=config)
-    return final_state

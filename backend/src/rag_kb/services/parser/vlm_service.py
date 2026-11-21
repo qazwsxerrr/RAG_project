@@ -16,14 +16,6 @@ class MultimodalVLMService:
     全程委托全局弹性网关 llm_gateway.chat_sync 执行，自动共享视觉模态候选池筛选、短期租约换票与毫秒级热切换 (Phase-7)。
     """
 
-    @property
-    def base_url(self) -> str:
-        return settings.active_base_url
-
-    @property
-    def model(self) -> str:
-        return settings.active_model_name
-
     def _call_gateway(
         self,
         messages: List[Dict[str, Any]],
@@ -217,17 +209,6 @@ class MultimodalVLMService:
         messages = [{"role": "user", "content": prompt}]
         content = self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="流程图语义解析 API")
         return self._strip_heading_hashes(content)
-
-    def probe_model_connection(self) -> Dict[str, Any]:
-        """测试并验证网关候选池连通性与响应"""
-        messages = [{"role": "user", "content": "请回复'API Connection OK'"}]
-        reply = self._call_gateway(messages, max_tokens=512, temperature=0.1, action_name="模型连通性探测")
-        return {
-            "status": "success",
-            "model": self.model,
-            "base_url": self.base_url,
-            "response": reply.strip()
-        }
 
     def _format_image_payload(self, image_url_or_path: str) -> str:
         """处理图片链接：支持 Base64 Data URI、本地物理文件编码、外部 HTTP(S) URL 或 OSS Object Key 自动临时授权签名"""

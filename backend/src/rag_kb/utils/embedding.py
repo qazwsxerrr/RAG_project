@@ -132,12 +132,3 @@ class EmbeddingService:
         return await self.embed_query(title_feature)
 
 embedding_service = EmbeddingService()
-
-async def embed_texts(texts: List[str], batch_size: int = 16) -> List[List[float]]:
-    return await embedding_service.embed_texts(texts, batch_size)
-
-async def embed_query(text: str) -> List[float]:
-    return await embedding_service.embed_query(text)
-
-async def embed_title(file_name: str, h1: str = "", h2: str = "") -> List[float]:
-    return await embedding_service.embed_title(file_name, h1, h2)

@@ -12,26 +12,7 @@
       
       <!-- 弹窗顶栏 -->
       <div class="flex items-center justify-between pb-3.5 border-b border-slate-100">
-        <div class="min-w-0">
-          <div class="flex items-center space-x-2">
-            <span class="text-xs font-mono font-semibold text-slate-800 bg-slate-100 px-2 py-0.5 rounded shrink-0">
-              [{{ citation.citation_id }}]
-            </span>
-            <h4 class="text-sm font-semibold text-slate-900 truncate max-w-lg" :title="citation.document_title">
-              {{ citation.document_title }}
-            </h4>
-          </div>
-          <p class="text-xs text-slate-500 mt-1 font-medium flex items-center gap-1.5 flex-wrap">
-            <span class="text-slate-700">{{ citation.chunk_label || '引用片段' }}</span>
-            <template v-if="isPdfDoc">
-              <span class="text-slate-300">·</span>
-              <span class="text-slate-600">第 {{ displayPage }} 页</span>
-            </template>
-            <span v-if="citation.score" class="text-slate-400">
-              · 相关度 {{ (citation.score * 100).toFixed(1) }}%
-            </span>
-          </p>
-        </div>
+        <CitationCard :citation="citation" variant="header" />
 
         <button 
           @click="$emit('close')" 
@@ -223,6 +204,7 @@
 import { ref, computed, watch, onUnmounted } from 'vue';
 import type { CitationSource } from '../../types';
 import { useAuthStore, isTokenExpired } from '../../stores/auth';
+import CitationCard from '../common/CitationCard.vue';
 import {
   createSecureBlobCache,
   openProtectedImageInNewTab,

@@ -70,10 +70,7 @@
 
     <!-- 卡片底部元信息 -->
     <div class="pt-3 mt-3 border-t border-slate-100/70 flex items-center justify-between text-[10px] text-slate-400 font-mono">
-      <div class="flex items-center gap-1.5">
-        <span class="w-1.5 h-1.5 rounded-full" :class="getStateDotClass(channel.state)"></span>
-        <span class="font-sans text-[11px] text-slate-600">{{ formatStateName(channel.state) }}</span>
-      </div>
+      <StatusTag :status="channel.state" variant="plain" />
       <div class="text-[11px] font-sans text-slate-400 group-hover/card:text-blue-600 transition-colors">
         查看调用记录 &rarr;
       </div>
@@ -83,6 +80,7 @@
 
 <script setup lang="ts">
 import UptimeBar from './UptimeBar.vue';
+import StatusTag from '../documents/StatusTag.vue';
 import type { ModelChannelItem } from '../../api/system';
 
 const props = defineProps<{
@@ -146,19 +144,5 @@ function formatLatency(ms: number): string {
     return (ms / 1000).toFixed(1) + 's';
   }
   return `${ms}ms`;
-}
-
-function getStateDotClass(state: string): string {
-  if (state === 'CLOSED') return 'bg-emerald-500';
-  if (state === 'OPEN') return 'bg-rose-500 animate-pulse';
-  if (state === 'HALF_OPEN') return 'bg-amber-400';
-  return 'bg-slate-300';
-}
-
-function formatStateName(state: string): string {
-  if (state === 'CLOSED') return '运行正常';
-  if (state === 'OPEN') return '熔断隔离';
-  if (state === 'HALF_OPEN') return '恢复探测中';
-  return '就绪';
 }
 </script>

@@ -65,6 +65,41 @@ def is_private_or_restricted_ip(ip_str: str) -> bool:
     except ValueError:
         return True
 
+def resolve_and_validate_host_ips(hostname: str, port: int) -> List[str]:
+    """
+    解析目标主机名并对所有解析出的 IP 执行私网/回环/链路本地/元数据地址黑名单核验。
+    任何单条解析结果命中受限 IP 或 DNS 解析失败，均立即抛出 SSRFSecurityError (Fail-Fast)。
+    """
+    hostname_clean = (hostname or "").strip().lower()
+    if not hostname_clean:
+        raise SSRFSecurityError("【出网安全拦截】目标主机名为空")
+
+    if is_ip_address(hostname_clean):
+        if is_private_or_restricted_ip(hostname_clean):
+            raise SSRFSecurityError(f"【SSRF 拦截】严禁直接请求私有/内网 IP 地址: {hostname_clean}")
+        return [hostname_clean]
+
+    try:
+        addr_info = socket.getaddrinfo(hostname_clean, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise SSRFSecurityError(f"【出网安全拦截】目标主机 DNS 解析失败: {hostname_clean} ({e})") from e
+
+    resolved_ips: List[str] = []
+    for item in addr_info:
+        ip_str = str(item[4][0])
+        if is_private_or_restricted_ip(ip_str):
+            raise SSRFSecurityError(
+                f"【SSRF 拦截】域名 {hostname_clean} 解析为内部私有 IP ({ip_str})，触发安全熔断！"
+            )
+        if ip_str not in resolved_ips:
+            resolved_ips.append(ip_str)
+
+    if not resolved_ips:
+        raise SSRFSecurityError(f"【出网安全拦截】域名 {hostname_clean} 未解析出任何有效公网 IP")
+
+    return resolved_ips
+
+
 def validate_outbound_url(
     url: str,
     allowed_domains: Optional[Set[str]] = None,
@@ -101,20 +136,11 @@ def validate_outbound_url(
         hostname_clean == d or hostname_clean.endswith(f".{d}")
         for d in whitelist
     )
+    if not allow_custom_domains and not is_whitelisted:
+        raise SSRFSecurityError(f"【出网安全拦截】目标域名不在受信任白名单内: {hostname_clean}")
 
-    # 3. DNS Resolve 校验 (防御 DNS 重新绑定攻击 DNS Rebinding)
-    try:
-        # 获取所有解析的 IP 地址
-        addr_info = socket.getaddrinfo(hostname_clean, parsed.port or (443 if scheme == "https" else 80))
-        resolved_ips = {item[4][0] for item in addr_info}
-        
-        for ip in resolved_ips:
-            if is_private_or_restricted_ip(ip):
-                raise SSRFSecurityError(
-                    f"【SSRF 拦截】域名 {hostname_clean} 解析为内部私有 IP ({ip})，触发安全熔断！"
-                )
-    except socket.gaierror as e:
-        logger.warning(f"[EgressGuard] DNS 解析目标主机失败: {hostname_clean} ({e})")
-        # DNS 无法解析交由后续网络层快速失败
+    # 3. DNS Resolve 校验 (防御私网解析)
+    port = parsed.port or (443 if scheme == "https" else 80)
+    resolve_and_validate_host_ips(hostname_clean, port)
 
     return url
