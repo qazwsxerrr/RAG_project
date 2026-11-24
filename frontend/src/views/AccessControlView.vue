@@ -285,8 +285,8 @@ const tabs = computed<Array<{ key: GovernanceTabKey; label: string }>>(() => {
   ];
   if (isSystemAdmin.value) {
     list.push(
-      { key: 'policy', label: '职级密级与角色策略' },
-      { key: 'audit', label: '安全审计与应急停用' }
+      { key: 'policy', label: '权限策略' },
+      { key: 'audit', label: '账号与审计' }
     );
   }
   return list;
