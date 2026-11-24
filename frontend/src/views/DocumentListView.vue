@@ -112,6 +112,14 @@
       @close="chunksModalVisible = false"
     />
 
+    <!-- Markdown 文档页内排版预览模态框 -->
+    <MarkdownPreviewModal
+      :visible="mdPreviewModalVisible"
+      :docId="mdPreviewDocId"
+      :fileName="mdPreviewFileName"
+      @close="mdPreviewModalVisible = false"
+    />
+
     <!-- 单篇文档在线改密模态框 -->
     <div
       v-if="reclassifyModalVisible && reclassifyTargetDoc"
@@ -197,6 +205,7 @@ import type { AccessibleKnowledgeBase, DocumentItem } from '../types';
 import DocumentFilters from '../components/documents/DocumentFilters.vue';
 import DocumentTable from '../components/documents/DocumentTable.vue';
 import DocumentChunksModal from '../components/documents/DocumentChunksModal.vue';
+import MarkdownPreviewModal from '../components/documents/MarkdownPreviewModal.vue';
 import ClassificationBadge from '../components/common/ClassificationBadge.vue';
 
 const router = useRouter();
@@ -222,6 +231,11 @@ const currentPage = ref(1);
 const chunksModalVisible = ref(false);
 const selectedDocId = ref('');
 const selectedDocFileName = ref('');
+
+// Markdown 页内预览弹窗
+const mdPreviewModalVisible = ref(false);
+const mdPreviewDocId = ref('');
+const mdPreviewFileName = ref('');
 
 // 调密弹窗
 const reclassifyModalVisible = ref(false);
@@ -303,6 +317,12 @@ const handleFilterChange = (filters: typeof activeFilters.value) => {
 };
 
 const handlePreviewDoc = async (doc: DocumentItem) => {
+  if (/\.(md|markdown)$/i.test(doc.file_name || '')) {
+    mdPreviewDocId.value = doc.doc_id;
+    mdPreviewFileName.value = doc.file_name;
+    mdPreviewModalVisible.value = true;
+    return;
+  }
   await openDocumentPreviewWithTicket(doc.doc_id);
 };
 

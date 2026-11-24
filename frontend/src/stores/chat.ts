@@ -13,6 +13,9 @@ export const useChatStore = defineStore('chat', () => {
   const isLoadingMessages = ref<boolean>(false);
   const isGenerating = ref<boolean>(false);
   let abortController: AbortController | null = null;
+  let sessionListSeq = 0;
+  let messageLoadSeq = 0;
+  let activeGeneratingSessionId = '';
 
   const currentSession = computed(() => {
     return sessions.value.find((s) => s.id === currentSessionId.value) || sessions.value[0];
@@ -24,11 +27,23 @@ export const useChatStore = defineStore('chat', () => {
    */
   const loadSessionMessages = async (sessionId: string) => {
     if (!sessionId) return;
-    const target = sessions.value.find((s) => s.id === sessionId);
+    if (isGenerating.value && activeGeneratingSessionId === sessionId) {
+      return;
+    }
 
+    const reqSeq = ++messageLoadSeq;
     isLoadingMessages.value = true;
     try {
       const msgs = await sessionsApi.getSessionMessages(sessionId, 100);
+      // 若期间发生新建会话、切换会话或该会话已进入流式生成，立即丢弃过期结果防止覆盖界面
+      if (
+        reqSeq !== messageLoadSeq ||
+        currentSessionId.value !== sessionId ||
+        (isGenerating.value && activeGeneratingSessionId === sessionId)
+      ) {
+        return;
+      }
+      const target = sessions.value.find((s) => s.id === sessionId);
       if (target) {
         target.messages = msgs.map((m) => ({
           id: m.id,
@@ -42,10 +57,15 @@ export const useChatStore = defineStore('chat', () => {
         target.messageCount = target.messages.length;
       }
     } catch (e) {
+      if (reqSeq !== messageLoadSeq) {
+        return;
+      }
       console.error(`加载会话 ${sessionId} 消息失败:`, e);
       throw e;
     } finally {
-      isLoadingMessages.value = false;
+      if (reqSeq === messageLoadSeq) {
+        isLoadingMessages.value = false;
+      }
     }
   };
 
@@ -56,19 +76,42 @@ export const useChatStore = defineStore('chat', () => {
       return;
     }
 
+    const reqSeq = ++sessionListSeq;
     isLoadingSessions.value = true;
     try {
       const list = await sessionsApi.listSessions(50, 0);
       if (list && list.length > 0) {
-        sessions.value = list.map((item) => ({
-          id: item.id,
-          title: item.title,
-          messageCount: item.message_count ?? 0,
-          updatedAt: new Date(item.updated_at || item.created_at).getTime(),
-          messages: [],
-          scene_type: 'general',
-          enable_hyde: false,
-        }));
+        const existingById = new Map(sessions.value.map((s) => [s.id, s]));
+        const mergedList: ChatSession[] = list.map((item) => {
+          const prev = existingById.get(item.id);
+          if (prev && (prev.id === activeGeneratingSessionId || (reqSeq !== sessionListSeq && prev.id === currentSessionId.value))) {
+            // 保留正在流式生成或期间新建的响应式会话对象，避免 sendMessage 闭包脱离数组
+            prev.title = prev.title || item.title;
+            return prev;
+          }
+          return {
+            id: item.id,
+            title: item.title,
+            messageCount: item.message_count ?? 0,
+            updatedAt: new Date(item.updated_at || item.created_at).getTime(),
+            messages: prev ? prev.messages : [],
+            scene_type: prev?.scene_type || 'general',
+            enable_hyde: prev?.enable_hyde ?? false,
+          };
+        });
+
+        // 若期间前端刚刚创建了新会话但尚未出现在本次旧 list 响应中，保留在列表头部
+        for (const localSess of sessions.value) {
+          if (!mergedList.some((m) => m.id === localSess.id)) {
+            mergedList.unshift(localSess);
+          }
+        }
+        sessions.value = mergedList;
+
+        // 若加载期间用户已经点击了「+ 新建」或切换了会话，绝不回退覆盖 currentSessionId 或拉旧历史
+        if (reqSeq !== sessionListSeq || isGenerating.value) {
+          return;
+        }
 
         const lastActiveId = localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
         const matched = sessions.value.find((s) => s.id === lastActiveId);
@@ -78,7 +121,13 @@ export const useChatStore = defineStore('chat', () => {
 
         await loadSessionMessages(targetId);
       } else {
+        if (reqSeq !== sessionListSeq || sessions.value.length > 0 || isGenerating.value) {
+          return;
+        }
         const created = await sessionsApi.createSession('新会话');
+        if (reqSeq !== sessionListSeq) {
+          return;
+        }
         const newSession: ChatSession = {
           id: created.id,
           title: created.title || '新会话',
@@ -96,11 +145,17 @@ export const useChatStore = defineStore('chat', () => {
       console.error('初始化云端会话列表失败:', e);
       throw e;
     } finally {
-      isLoadingSessions.value = false;
+      if (reqSeq === sessionListSeq) {
+        isLoadingSessions.value = false;
+      }
     }
   };
 
   const createNewSession = async (title: string = '新会话'): Promise<string> => {
+    // 立即作废在途的会话列表初始化与历史消息加载，复位 loading 状态
+    sessionListSeq++;
+    messageLoadSeq++;
+    isLoadingMessages.value = false;
     if (isGenerating.value) {
       stopGeneration();
     }
@@ -114,7 +169,9 @@ export const useChatStore = defineStore('chat', () => {
       scene_type: 'general',
       enable_hyde: false,
     };
-    sessions.value.unshift(newSession);
+    if (!sessions.value.some((s) => s.id === created.id)) {
+      sessions.value.unshift(newSession);
+    }
     currentSessionId.value = created.id;
     localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, created.id);
     return created.id;
@@ -126,13 +183,17 @@ export const useChatStore = defineStore('chat', () => {
     const target = sessions.value.find((s) => s.id === id);
     if (target && target.title === trimmed) return;
     const updated = await sessionsApi.updateSession(id, trimmed);
-    if (target) {
-      target.title = updated.title || trimmed;
-      target.updatedAt = Date.now();
+    const liveTarget = sessions.value.find((s) => s.id === id) || target;
+    if (liveTarget) {
+      liveTarget.title = updated.title || trimmed;
+      liveTarget.updatedAt = Date.now();
     }
   };
 
   const switchSession = async (id: string) => {
+    sessionListSeq++;
+    messageLoadSeq++;
+    isLoadingMessages.value = false;
     if (isGenerating.value) {
       stopGeneration();
     }
@@ -166,6 +227,7 @@ export const useChatStore = defineStore('chat', () => {
       abortController = null;
     }
     isGenerating.value = false;
+    activeGeneratingSessionId = '';
   };
 
   const clearCurrentMessages = async () => {
@@ -186,17 +248,26 @@ export const useChatStore = defineStore('chat', () => {
   ) => {
     if (!query.trim() || isGenerating.value) return;
 
+    // 取消任何在途的旧会话初始化/历史加载，防止竞态覆盖新消息
+    sessionListSeq++;
+    messageLoadSeq++;
+    isLoadingMessages.value = false;
+
     if (!currentSession.value) {
       await createNewSession();
     }
-    const session = currentSession.value;
-    if (!session) return;
+    const initialSession = currentSession.value;
+    if (!initialSession) return;
+    const sessionId = initialSession.id;
+
+    const getLiveSession = () => sessions.value.find((s) => s.id === sessionId) || initialSession;
+    const session = getLiveSession();
 
     const priorUserMessages = session.messages.filter((m) => m.role === 'user');
     if (priorUserMessages.length === 0) {
       const derivedTitle = query.length > 22 ? query.slice(0, 22) + '...' : query;
       session.title = derivedTitle;
-      sessionsApi.updateSession(session.id, derivedTitle).catch((err) => {
+      sessionsApi.updateSession(sessionId, derivedTitle).catch((err) => {
         console.warn('异步更新会话标题警告:', err);
       });
     }
@@ -223,13 +294,23 @@ export const useChatStore = defineStore('chat', () => {
     session.updatedAt = Date.now();
 
     isGenerating.value = true;
+    activeGeneratingSessionId = sessionId;
     abortController = new AbortController();
+
+    const getLiveAssistant = () => {
+      const liveSess = getLiveSession();
+      const found = liveSess.messages.find((m) => m.id === assistantMsgId);
+      if (found) return found;
+      // 极端情况保护：若消息意外缺失，重新挂载到活跃会话末尾确保界面可见
+      liveSess.messages.push(assistantMessage);
+      return assistantMessage;
+    };
 
     try {
       await retrievalApi.streamChat(
         {
           query,
-          conversation_id: session.id,
+          conversation_id: sessionId,
           kb_ids: options?.kb_ids && options.kb_ids.length > 0 ? options.kb_ids : undefined,
           category_scope: options?.category_scope,
           tags_scope: options?.tags_scope,
@@ -238,53 +319,53 @@ export const useChatStore = defineStore('chat', () => {
         },
         {
           onThinking: (thinking: ThinkingProcess) => {
-            const target = session.messages.find((m) => m.id === assistantMsgId);
-            (target || assistantMessage).thinking = thinking;
+            getLiveAssistant().thinking = thinking;
           },
           onCitations: (citations: CitationSource[]) => {
-            const target = session.messages.find((m) => m.id === assistantMsgId);
-            (target || assistantMessage).citations = citations;
+            getLiveAssistant().citations = citations;
           },
           onReasoning: (token: string) => {
-            const target = session.messages.find((m) => m.id === assistantMsgId);
-            const t = target || assistantMessage;
+            const t = getLiveAssistant();
             t.reasoning_content = (t.reasoning_content || '') + token;
             t.isReasoning = true;
           },
           onMessage: (token: string) => {
-            const target = session.messages.find((m) => m.id === assistantMsgId);
-            const t = target || assistantMessage;
+            const t = getLiveAssistant();
             t.isReasoning = false;
             t.content += token;
           },
           onDone: (meta) => {
-            const target = session.messages.find((m) => m.id === assistantMsgId);
-            const t = target || assistantMessage;
+            const liveSess = getLiveSession();
+            const t = getLiveAssistant();
             t.isStreaming = false;
             t.isReasoning = false;
             if (t.thinking) {
               t.thinking.total_overall_ms = meta.total_overall_ms;
             }
-            session.messageCount = session.messages.length;
-            session.updatedAt = Date.now();
+            liveSess.messageCount = liveSess.messages.length;
+            liveSess.updatedAt = Date.now();
             isGenerating.value = false;
+            activeGeneratingSessionId = '';
           },
           onError: (err: Error) => {
             console.error('[Chat Error]', err);
-            const target = session.messages.find((m) => m.id === assistantMsgId);
-            const t = target || assistantMessage;
+            const t = getLiveAssistant();
             t.isStreaming = false;
             t.isReasoning = false;
             t.error = err.message;
             isGenerating.value = false;
+            activeGeneratingSessionId = '';
           },
         },
         abortController.signal
       );
     } catch (e: any) {
-      assistantMessage.isStreaming = false;
-      assistantMessage.error = e.message || '请求发生异常';
+      const t = getLiveAssistant();
+      t.isStreaming = false;
+      t.isReasoning = false;
+      t.error = e.message || '请求发生异常';
       isGenerating.value = false;
+      activeGeneratingSessionId = '';
     }
   };
 

@@ -50,7 +50,7 @@ class StoreNode(BaseNode):
         sparse_vectors = state.get("sparse_vectors", [])
         tsv_strings = state.get("tsv_strings", [])
         force_overwrite = bool(state.get("force_overwrite", False))
-        skip_review = bool(state.get("skip_review", False))
+        allow_duplicate = bool(state.get("allow_duplicate", False))
 
         if not raw_chunks:
             raise ValueError(f"【入库错误】待入库切片数量为 0 (doc_id={doc_id})")
@@ -170,9 +170,13 @@ class StoreNode(BaseNode):
                     "【越权覆盖拦截】命中了高于您当前访问密级的存量文档，严禁执行 overwrite 覆盖更新！"
                 )
 
-            if is_dup and not force_overwrite and not skip_review:
-                logger.warning(f"【防重预警】文档《{file_name}》命中同库相似文档，已记录预警信息")
+            if is_dup and not force_overwrite and not allow_duplicate:
+                logger.warning(f"【防重预警】文档《{file_name}》命中同库相似文档，已暂停入库等待用户确认")
                 sim_val = float(dedup_res.get("similarity") or 0.0)
+                state["kb_id"] = str(kb_obj.id)
+                state["kb_name"] = kb_obj.name
+                state["classification_level"] = eff_doc_level
+                state["overall_status"] = IngestStatus.DUPLICATE_WARNING.value
                 if writer and callable(writer):
                     writer({
                         "event": "duplicate_warning",
@@ -184,6 +188,7 @@ class StoreNode(BaseNode):
                         "is_higher_classification": True,
                         "message": f"检测到知识库内存在高度相似文档 (相似度 {sim_val:.2%})，请确认处理方式。",
                     })
+                return state
 
             target_version = (dedup_res.get("matched_version", 1) + 1) if (is_dup and force_overwrite) else 1
             old_doc_id = (

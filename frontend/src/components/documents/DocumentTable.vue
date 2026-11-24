@@ -4,13 +4,13 @@
       <table class="w-full text-left text-xs text-slate-700">
         <thead class="bg-slate-50/90 text-slate-500 font-semibold border-b border-slate-200 uppercase tracking-wider text-[11px] whitespace-nowrap">
           <tr>
-            <th class="py-3.5 px-4">文档名称</th>
-            <th class="py-3.5 px-4">所属知识库</th>
-            <th class="py-3.5 px-4">密级</th>
-            <th class="py-3.5 px-4">分类</th>
-            <th class="py-3.5 px-4">状态</th>
-            <th class="py-3.5 px-4">入库时间</th>
-            <th class="py-3.5 px-4 text-right">操作</th>
+            <th class="py-3 px-2.5 xl:px-3.5">文档名称</th>
+            <th class="py-3 px-2.5 xl:px-3.5">所属知识库</th>
+            <th class="py-3 px-2 xl:px-3">密级</th>
+            <th class="py-3 px-2 xl:px-3">分类</th>
+            <th class="py-3 px-2 xl:px-3">状态</th>
+            <th class="py-3 px-2 xl:px-3">入库时间</th>
+            <th class="py-3 px-2.5 xl:px-3.5 text-right sticky right-0 bg-slate-50/95 z-10">操作</th>
           </tr>
         </thead>
 
@@ -35,8 +35,8 @@
             class="hover:bg-slate-50/80 transition-colors group"
           >
             <!-- 文档名称 -->
-            <td class="py-3.5 px-4 whitespace-nowrap">
-              <div class="flex items-center space-x-2.5 min-w-0 max-w-xs md:max-w-sm">
+            <td class="py-3 px-2.5 xl:px-3.5 whitespace-nowrap">
+              <div class="flex items-center space-x-2 min-w-0 max-w-[175px] xl:max-w-[260px]">
                 <svg v-if="doc.file_name.endsWith('.pdf')" class="w-4 h-4 text-rose-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
                 <svg v-else-if="doc.file_name.endsWith('.md')" class="w-4 h-4 text-sky-600 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
                 <svg v-else class="w-4 h-4 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -55,52 +55,54 @@
             </td>
 
             <!-- 所属知识库 -->
-            <td class="py-3.5 px-4 whitespace-nowrap">
-              <div class="text-slate-700 font-medium text-xs">{{ doc.kb_name || '-' }}</div>
-              <div v-if="doc.department" class="text-[10px] text-slate-400 font-mono">{{ doc.department }}</div>
+            <td class="py-3 px-2.5 xl:px-3.5 whitespace-nowrap">
+              <div class="min-w-0 max-w-[115px] xl:max-w-[165px]">
+                <div class="text-slate-700 font-medium text-xs truncate" :title="doc.kb_name || '-'">{{ doc.kb_name || '-' }}</div>
+                <div v-if="doc.department" class="text-[10px] text-slate-400 font-mono truncate" :title="doc.department">{{ doc.department }}</div>
+              </div>
             </td>
 
             <!-- 文档有效密级 -->
-            <td class="py-3.5 px-4 whitespace-nowrap">
-              <ClassificationBadge :level="doc.effective_classification_level ?? doc.classification_level" />
+            <td class="py-3 px-2 xl:px-3 whitespace-nowrap">
+              <ClassificationBadge :level="doc.effective_classification_level ?? doc.classification_level" compact />
             </td>
 
             <!-- 分类 -->
-            <td class="py-3.5 px-4 whitespace-nowrap text-slate-500 text-xs">
-              {{ doc.category || '默认' }}
+            <td class="py-3 px-2 xl:px-3 whitespace-nowrap text-slate-500 text-xs">
+              <span class="block max-w-[72px] xl:max-w-[96px] truncate" :title="doc.category || '默认'">{{ doc.category || '默认' }}</span>
             </td>
 
             <!-- 状态 -->
-            <td class="py-3.5 px-4 whitespace-nowrap">
+            <td class="py-3 px-2 xl:px-3 whitespace-nowrap">
               <StatusTag :status="doc.status" />
             </td>
 
             <!-- 入库时间 -->
-            <td class="py-3.5 px-4 whitespace-nowrap text-slate-400 font-mono text-xs">
+            <td class="py-3 px-2 xl:px-3 whitespace-nowrap text-slate-400 font-mono text-[11px]" :title="formatFullDate(doc.created_at)">
               {{ formatDate(doc.created_at) }}
             </td>
 
             <!-- 操作 -->
-            <td class="py-3.5 px-4 whitespace-nowrap text-right">
-              <div class="flex items-center justify-end space-x-1">
+            <td class="py-3 px-2.5 xl:px-3.5 whitespace-nowrap text-right sticky right-0 bg-white group-hover:bg-slate-50 transition-colors z-10 shadow-[-6px_0_8px_-6px_rgba(15,23,42,0.1)]">
+              <div class="flex items-center justify-end space-x-0.5">
                 <button
                   @click="$emit('previewDoc', doc)"
-                  class="text-slate-600 hover:text-blue-600 px-2 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors cursor-pointer"
-                  title="在新标签页打开原文档"
+                  class="text-slate-600 hover:text-blue-600 px-1.5 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors cursor-pointer"
+                  :title="/\.(md|markdown)$/i.test(doc.file_name) ? '页内排版预览 Markdown 文档' : '在新标签页打开原文档'"
                 >
                   预览
                 </button>
                 <span class="text-slate-200">|</span>
                 <button
                   @click="$emit('viewChunks', doc)"
-                  class="text-slate-600 hover:text-blue-600 px-2 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors cursor-pointer"
+                  class="text-slate-600 hover:text-blue-600 px-1.5 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors cursor-pointer"
                 >
                   切片
                 </button>
                 <span class="text-slate-200">|</span>
                 <button
                   @click="$emit('viewProgress', doc)"
-                  class="text-slate-600 hover:text-slate-900 px-2 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors cursor-pointer"
+                  class="text-slate-600 hover:text-slate-900 px-1.5 py-1 rounded-md text-xs font-medium hover:bg-slate-100 transition-colors cursor-pointer"
                 >
                   进度
                 </button>
@@ -108,7 +110,7 @@
                   <span class="text-slate-200">|</span>
                   <button
                     @click="$emit('reclassifyDoc', doc)"
-                    class="text-indigo-600 hover:text-indigo-800 px-2 py-1 rounded-md text-xs font-medium hover:bg-indigo-50 transition-colors cursor-pointer"
+                    class="text-indigo-600 hover:text-indigo-800 px-1.5 py-1 rounded-md text-xs font-medium hover:bg-indigo-50 transition-colors cursor-pointer"
                     title="调整单篇文档密级"
                   >
                     调密
@@ -118,7 +120,7 @@
                   <span class="text-slate-200">|</span>
                   <button
                     @click="$emit('deleteDoc', doc)"
-                    class="text-slate-400 hover:text-rose-600 p-1.5 rounded-md transition-colors cursor-pointer"
+                    class="text-slate-400 hover:text-rose-600 p-1 rounded-md transition-colors cursor-pointer"
                     title="删除文档"
                   >
                     <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -162,11 +164,23 @@ const formatDate = (isoStr: string) => {
   if (!isoStr) return '-';
   const d = new Date(isoStr);
   return d.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+const formatFullDate = (isoStr: string) => {
+  if (!isoStr) return '-';
+  const d = new Date(isoStr);
+  return d.toLocaleString('zh-CN', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+    second: '2-digit',
   });
 };
 </script>

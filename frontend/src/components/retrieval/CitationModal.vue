@@ -124,7 +124,7 @@
           </label>
           <div 
             class="border border-slate-200 rounded-xl overflow-x-auto p-4 bg-white text-xs markdown-body shadow-sm max-h-60"
-            v-html="citation.table_html"
+            v-html="renderedTableHtml"
           ></div>
         </div>
 
@@ -220,6 +220,7 @@ import {
   openProtectedImageInNewTab,
   openDocumentPreviewWithTicket,
 } from '../../utils/secureMedia';
+import { renderTableCellsMarkdown } from '../../utils/markdown';
 
 const props = defineProps<{
   visible: boolean;
@@ -249,6 +250,9 @@ const assetBlobCache = createSecureBlobCache();
 
 const citationAssetBlobUrl = computed(() =>
   assetBlobCache.getUrl(props.citation?.asset_proxy_url)
+);
+const renderedTableHtml = computed(() =>
+  renderTableCellsMarkdown(props.citation?.table_html)
 );
 const citationAssetError = computed(() =>
   assetBlobCache.getError(props.citation?.asset_proxy_url)

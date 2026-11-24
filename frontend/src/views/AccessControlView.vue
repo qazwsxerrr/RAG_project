@@ -122,7 +122,7 @@
 
     <!-- TAB 2: 职级密级与角色策略映射（仅 system:admin 可见） -->
     <div v-if="activeTab === 'policy' && isSystemAdmin" class="space-y-6">
-      <PositionLevelPanel :positions="positions" @changed="refreshAll" />
+      <PositionLevelPanel :positions="positions" @changed="refreshAfterPolicyChange" />
 
       <div class="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-3">
         <h3 class="text-sm font-bold text-slate-900">企业角色权限与数据范围</h3>
@@ -201,11 +201,17 @@
 
       <div class="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm space-y-3">
         <div class="flex flex-wrap items-center gap-3 text-xs">
-          <input v-model="auditFilter.action" type="text" placeholder="按操作类型过滤..." class="flex-1 min-w-[220px] p-2 rounded-lg border border-slate-200 outline-none" />
+          <input
+            v-model="auditFilter.action"
+            type="text"
+            placeholder="按操作类型过滤（支持模糊搜索，如 ADMIN_KB）..."
+            @keydown.enter="loadAuditLogs"
+            class="flex-1 min-w-[220px] p-2 rounded-lg border border-slate-200 outline-none"
+          />
           <select v-model="auditFilter.status" class="p-2 rounded-lg border border-slate-200 bg-white outline-none">
             <option value="">全部结果</option>
             <option value="SUCCESS">成功</option>
-            <option value="DENIED">已拒绝</option>
+            <option value="DENIED">已拒绝 / 拦截</option>
             <option value="FAILED">失败</option>
           </select>
           <button @click="loadAuditLogs" class="px-4 py-2 rounded-lg bg-slate-900 text-white font-semibold cursor-pointer">查询审计</button>
@@ -230,7 +236,7 @@
                 <td class="py-2.5 px-4 font-mono text-[11px] text-slate-500 whitespace-nowrap">{{ log.createdAt ? new Date(log.createdAt).toLocaleString('zh-CN') : '-' }}</td>
                 <td class="py-2.5 px-4 font-mono font-medium text-slate-800 whitespace-nowrap">{{ log.action }}</td>
                 <td class="py-2.5 px-4 text-[11px] text-slate-700 whitespace-nowrap" :title="log.userId || ''">{{ formatAuditOperator(log.userId) }}</td>
-                <td class="py-2.5 px-4 text-[11px] whitespace-nowrap" :class="log.status === 'SUCCESS' ? 'text-emerald-600' : log.status === 'DENIED' ? 'text-amber-600' : 'text-rose-600'">
+                <td class="py-2.5 px-4 text-[11px] font-medium whitespace-nowrap" :class="formatAuditStatusClass(log.status)">
                   {{ formatAuditStatus(log.status) }}
                 </td>
                 <td class="py-2.5 px-4 text-[11px] text-slate-500 max-w-md truncate" :title="log.errorMsg || log.detailsJson">{{ log.errorMsg || log.detailsJson }}</td>
@@ -248,7 +254,7 @@
       :users="users"
       :roles="roles"
       @close="aclDrawerVisible = false"
-      @changed="refreshAll"
+      @changed="refreshAfterPolicyChange"
     />
   </div>
 </template>
@@ -354,11 +360,31 @@ const formatAuditOperator = (userId?: string | null): string => {
   if (!userId) return '-';
   return userNameById.value.get(userId) || userId;
 };
+const AUDIT_STATUS_LABEL_MAP: Record<string, string> = {
+  SUCCESS: '成功',
+  DENIED: '已拒绝',
+  FORBIDDEN: '权限拒绝',
+  BLOCKED: '安全拦截',
+  UNAUTHORIZED: '未认证',
+  REVOKED: '已吊销',
+  RATE_LIMITED: '已限流',
+  SWITCHED: '渠道切换',
+  FAILED: '失败',
+};
+
 const formatAuditStatus = (s: string): string => {
-  if (s === 'SUCCESS') return '成功';
-  if (s === 'DENIED') return '已拒绝';
-  if (s === 'FAILED') return '失败';
-  return s;
+  const key = String(s || '').toUpperCase();
+  return AUDIT_STATUS_LABEL_MAP[key] || s;
+};
+
+const formatAuditStatusClass = (s: string): string => {
+  const key = String(s || '').toUpperCase();
+  if (key === 'SUCCESS') return 'text-emerald-600';
+  if (key === 'SWITCHED') return 'text-blue-600';
+  if (key === 'FORBIDDEN' || key === 'DENIED' || key === 'BLOCKED' || key === 'UNAUTHORIZED' || key === 'RATE_LIMITED') {
+    return 'text-amber-600';
+  }
+  return 'text-rose-600';
 };
 
 const isDeptUnderPrefix = (path: string, prefix: string): boolean =>
@@ -460,6 +486,15 @@ const refreshAll = async () => {
   }
 };
 
+const refreshAfterPolicyChange = async () => {
+  try {
+    await authStore.refreshToken();
+  } catch (err: any) {
+    console.warn('[AccessControl] 策略变更后预刷新业务令牌失败，将由接口拦截器兜底:', err?.message || err);
+  }
+  await refreshAll();
+};
+
 const handleCreateKb = async () => {
   if (!kbForm.name.trim()) return;
   creatingKb.value = true;
@@ -480,7 +515,7 @@ const handleCreateKb = async () => {
       reason: '治理中心创建知识库',
     });
     kbForm.name = '';
-    await refreshAll();
+    await refreshAfterPolicyChange();
   } catch (err: any) {
     globalError.value = err.message || '创建知识库失败';
   } finally {
@@ -492,7 +527,7 @@ const handleDeleteKb = async (kb: AdminKnowledgeBase) => {
   if (!confirm(`确认删除空知识库《${kb.name}》吗？`)) return;
   try {
     await accessControlApi.deleteKnowledgeBase(kb.id);
-    await refreshAll();
+    await refreshAfterPolicyChange();
   } catch (err: any) {
     globalError.value = err.message || '删除知识库失败';
   }

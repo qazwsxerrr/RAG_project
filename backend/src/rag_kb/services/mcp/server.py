@@ -460,6 +460,7 @@ async def build_core_document_status_snapshot(
         if doc.overall_status == "active"
         else max(1, min(len(STEP_NAMES), int(doc.current_step_index or 1)))
     )
+    top_error = next((s.error for s in steps if s.error), None)
     return PipelineSnapshotResponse(
         doc_id=doc_id,
         file_name=doc.title,
@@ -472,6 +473,8 @@ async def build_core_document_status_snapshot(
         steps=steps,
         requires_review=(doc.overall_status == IngestStatus.REVIEW.value and len(pending_review_items) > 0),
         pending_reviews=pending_review_items,
+        is_duplicate_warning=(doc.overall_status == IngestStatus.DUPLICATE_WARNING.value),
+        error=top_error,
     )
 
 

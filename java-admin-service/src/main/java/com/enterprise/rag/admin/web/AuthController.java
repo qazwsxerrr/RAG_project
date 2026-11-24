@@ -36,11 +36,14 @@ import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import java.io.IOException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 @RestController
 public class AuthController {
@@ -57,6 +60,13 @@ public class AuthController {
     private final OAuth2AuthorizedClientManager authorizedClientManager;
     private final OidcUserService oidcUserService;
     private final RedisRevocationSync redisRevocationSync;
+    private final ConcurrentHashMap<String, ReentrantLock> sessionRefreshLocks = new ConcurrentHashMap<>();
+
+    @Value("${rag.oidc.end-session-uri:http://localhost:8180/realms/enterprise-rag/protocol/openid-connect/logout}")
+    private String oidcEndSessionUri;
+
+    @Value("${spring.security.oauth2.client.registration.corp-sso.client-id:rag-admin-service}")
+    private String oidcClientId;
 
     @Value("${rag.model-vault.allowed-providers:kedaya,siliconflow,deepseek,dashscope,zhipu,openai,volces}")
     private String allowedProvidersConfig;
@@ -123,71 +133,98 @@ public class AuthController {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【鉴权失败】缺少 OIDC 会话身份");
         }
 
-        Set<String> previousIdpDepts = new LinkedHashSet<>(UserMappingService.extractDeptPaths(currentOidcUser));
-        Set<String> previousRoles = new LinkedHashSet<>(UserMappingService.extractRoleCodes(currentOidcUser));
+        HttpSession currentSession = request.getSession(false);
+        String lockKey = currentSession != null ? currentSession.getId() : null;
+        ReentrantLock sessionLock = lockKey != null
+                ? sessionRefreshLocks.computeIfAbsent(lockKey, k -> new ReentrantLock())
+                : null;
+        if (sessionLock != null) {
+            sessionLock.lock();
+        }
         try {
-            OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest
-                    .withClientRegistrationId(oauthToken.getAuthorizedClientRegistrationId())
-                    .principal(oauthToken)
-                    .attribute(HttpServletRequest.class.getName(), request)
-                    .attribute(HttpServletResponse.class.getName(), response)
-                    .build();
-
-            OAuth2AuthorizedClient authorizedClient = authorizedClientManager.authorize(authorizeRequest);
-            if (authorizedClient == null || authorizedClient.getAccessToken() == null) {
-                markExistingUserPermissionChanged(UserMappingService.extractTenantId(currentOidcUser), currentOidcUser.getSubject());
-                invalidateLocalSession(request, response);
-                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业 IdP 授权已过期或被撤销，请重新登录");
+            OidcUser effectiveOidcUser = currentOidcUser;
+            OAuth2AuthenticationToken effectiveOauthToken = oauthToken;
+            HttpSession activeSession = request.getSession(false);
+            if (activeSession != null) {
+                Object ctxObj = activeSession.getAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY);
+                if (ctxObj instanceof SecurityContext sc
+                        && sc.getAuthentication() instanceof OAuth2AuthenticationToken latestToken
+                        && latestToken.getPrincipal() instanceof OidcUser latestOidcUser) {
+                    effectiveOauthToken = latestToken;
+                    effectiveOidcUser = latestOidcUser;
+                }
             }
 
-            OidcUser refreshedUser = oidcUserService.loadUser(new OidcUserRequest(
-                    authorizedClient.getClientRegistration(),
-                    authorizedClient.getAccessToken(),
-                    currentOidcUser.getIdToken()
-            ));
+            Set<String> previousIdpDepts = new LinkedHashSet<>(UserMappingService.extractDeptPaths(effectiveOidcUser));
+            Set<String> previousRoles = new LinkedHashSet<>(UserMappingService.extractRoleCodes(effectiveOidcUser));
+            try {
+                OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest
+                        .withClientRegistrationId(effectiveOauthToken.getAuthorizedClientRegistrationId())
+                        .principal(effectiveOauthToken)
+                        .attribute(HttpServletRequest.class.getName(), request)
+                        .attribute(HttpServletResponse.class.getName(), response)
+                        .build();
 
-            OAuth2AuthenticationToken updatedAuth = new OAuth2AuthenticationToken(
-                    refreshedUser,
-                    refreshedUser.getAuthorities(),
-                    oauthToken.getAuthorizedClientRegistrationId()
-            );
-            SecurityContext context = SecurityContextHolder.createEmptyContext();
-            context.setAuthentication(updatedAuth);
-            SecurityContextHolder.setContext(context);
-            HttpSession session = request.getSession(false);
-            if (session != null) {
-                session.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, context);
-            }
+                OAuth2AuthorizedClient authorizedClient = authorizedClientManager.authorize(authorizeRequest);
+                if (authorizedClient == null || authorizedClient.getAccessToken() == null) {
+                    markExistingUserPermissionChanged(UserMappingService.extractTenantId(effectiveOidcUser), effectiveOidcUser.getSubject());
+                    invalidateLocalSession(request, response);
+                    throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业 IdP 授权已过期或被撤销，请重新登录");
+                }
 
-            Set<String> latestIdpDepts = new LinkedHashSet<>(UserMappingService.extractDeptPaths(refreshedUser));
-            boolean deptsChanged = !Objects.equals(previousIdpDepts, latestIdpDepts);
-            boolean rolesChanged = !Objects.equals(previousRoles, new LinkedHashSet<>(UserMappingService.extractRoleCodes(refreshedUser)));
-            return new RefreshedOidcSession(refreshedUser, deptsChanged, rolesChanged);
-        } catch (ResponseStatusException e) {
-            throw e;
-        } catch (OAuth2AuthorizationException | OAuth2AuthenticationException ex) {
-            String errorCode = (ex instanceof OAuth2AuthorizationException authzEx)
-                    ? authzEx.getError().getErrorCode()
-                    : ((OAuth2AuthenticationException) ex).getError().getErrorCode();
-            if (isTransientIdpError(ex, errorCode)) {
-                log.warn("[OIDC_SESSION_REFRESH] IdP 临时通信或服务异常 (code={})，Fail-Fast 拒绝本次换票但不写入全账号封禁: {}",
+                OidcUser refreshedUser = oidcUserService.loadUser(new OidcUserRequest(
+                        authorizedClient.getClientRegistration(),
+                        authorizedClient.getAccessToken(),
+                        effectiveOidcUser.getIdToken()
+                ));
+
+                OAuth2AuthenticationToken updatedAuth = new OAuth2AuthenticationToken(
+                        refreshedUser,
+                        refreshedUser.getAuthorities(),
+                        effectiveOauthToken.getAuthorizedClientRegistrationId()
+                );
+                SecurityContext context = SecurityContextHolder.createEmptyContext();
+                context.setAuthentication(updatedAuth);
+                SecurityContextHolder.setContext(context);
+                HttpSession session = request.getSession(false);
+                if (session != null) {
+                    session.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, context);
+                }
+
+                Set<String> latestIdpDepts = new LinkedHashSet<>(UserMappingService.extractDeptPaths(refreshedUser));
+                boolean deptsChanged = !Objects.equals(previousIdpDepts, latestIdpDepts);
+                boolean rolesChanged = !Objects.equals(previousRoles, new LinkedHashSet<>(UserMappingService.extractRoleCodes(refreshedUser)));
+                return new RefreshedOidcSession(refreshedUser, deptsChanged, rolesChanged);
+            } catch (ResponseStatusException e) {
+                throw e;
+            } catch (OAuth2AuthorizationException | OAuth2AuthenticationException ex) {
+                String errorCode = (ex instanceof OAuth2AuthorizationException authzEx)
+                        ? authzEx.getError().getErrorCode()
+                        : ((OAuth2AuthenticationException) ex).getError().getErrorCode();
+                if (isTransientIdpError(ex, errorCode)) {
+                    log.warn("[OIDC_SESSION_REFRESH] IdP 临时通信或服务异常 (code={})，Fail-Fast 拒绝本次换票但不写入全账号封禁: {}",
+                            errorCode, ex.getMessage());
+                    throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "【鉴权中台暂时不可用】企业 IdP 通信异常，请稍后重试", ex);
+                }
+                log.warn("[OIDC_SESSION_REFRESH] IdP 明确拒绝或撤销当前会话 (code={})，主动销毁本地会话并淘汰当前用户既有权限票据: {}",
                         errorCode, ex.getMessage());
-                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "【鉴权中台暂时不可用】企业 IdP 通信异常，请稍后重试", ex);
+                markExistingUserPermissionChanged(UserMappingService.extractTenantId(effectiveOidcUser), effectiveOidcUser.getSubject());
+                invalidateLocalSession(request, response);
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业身份授权已过期或被撤销，请重新登录", ex);
+            } catch (Exception ex) {
+                if (isTransientIdpError(ex, null)) {
+                    log.warn("[OIDC_SESSION_REFRESH] IdP 临时网络或服务端异常，Fail-Fast 拒绝本次换票但不封禁账号: {}", ex.getMessage());
+                    throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "【鉴权中台暂时不可用】企业 IdP 通信异常，请稍后重试", ex);
+                }
+                log.warn("[OIDC_SESSION_REFRESH] IdP 实时刷新身份失败，主动销毁本地会话: {}", ex.getMessage());
+                markExistingUserPermissionChanged(UserMappingService.extractTenantId(effectiveOidcUser), effectiveOidcUser.getSubject());
+                invalidateLocalSession(request, response);
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业身份状态已变更或停用，请重新登录", ex);
             }
-            log.warn("[OIDC_SESSION_REFRESH] IdP 明确拒绝或撤销当前会话 (code={})，主动销毁本地会话并淘汰当前用户既有权限票据: {}",
-                    errorCode, ex.getMessage());
-            markExistingUserPermissionChanged(UserMappingService.extractTenantId(currentOidcUser), currentOidcUser.getSubject());
-            invalidateLocalSession(request, response);
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业身份授权已过期或被撤销，请重新登录", ex);
-        } catch (Exception ex) {
-            if (isTransientIdpError(ex, null)) {
-                log.warn("[OIDC_SESSION_REFRESH] IdP 临时网络或服务端异常，Fail-Fast 拒绝本次换票但不封禁账号: {}", ex.getMessage());
-                throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "【鉴权中台暂时不可用】企业 IdP 通信异常，请稍后重试", ex);
+        } finally {
+            if (sessionLock != null) {
+                sessionLock.unlock();
             }
-            log.warn("[OIDC_SESSION_REFRESH] IdP 实时刷新身份失败，主动销毁本地会话: {}", ex.getMessage());
-            markExistingUserPermissionChanged(UserMappingService.extractTenantId(currentOidcUser), currentOidcUser.getSubject());
-            invalidateLocalSession(request, response);
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业身份状态已变更或停用，请重新登录", ex);
         }
     }
 
@@ -231,6 +268,7 @@ public class AuthController {
         if (request != null) {
             HttpSession session = request.getSession(false);
             if (session != null) {
+                sessionRefreshLocks.remove(session.getId());
                 session.invalidate();
             }
         }
@@ -341,10 +379,55 @@ public class AuthController {
         return me;
     }
 
+    private static String resolveClientOrigin(HttpServletRequest request) {
+        String origin = request != null ? request.getHeader("Origin") : null;
+        if (origin != null && (origin.startsWith("http://") || origin.startsWith("https://"))) {
+            return origin.endsWith("/") ? origin.substring(0, origin.length() - 1) : origin;
+        }
+        String proto = request != null ? request.getHeader("X-Forwarded-Proto") : null;
+        String host = request != null ? request.getHeader("X-Forwarded-Host") : null;
+        if (proto != null && !proto.isBlank() && host != null && !host.isBlank()) {
+            return proto.split(",")[0].trim() + "://" + host.split(",")[0].trim();
+        }
+        if (request == null) {
+            return "http://localhost:5173";
+        }
+        String scheme = request.getScheme();
+        int port = request.getServerPort();
+        boolean isDefault = ("http".equalsIgnoreCase(scheme) && port == 80)
+                || ("https".equalsIgnoreCase(scheme) && port == 443);
+        return scheme + "://" + request.getServerName() + (isDefault ? "" : ":" + port);
+    }
+
     @PostMapping("/api/admin/auth/logout")
-    public Map<String, Object> logout(HttpServletRequest request, HttpServletResponse response) {
+    public Map<String, Object> logout(
+            @AuthenticationPrincipal OidcUser oidcUser,
+            Authentication authentication,
+            HttpServletRequest request,
+            HttpServletResponse response
+    ) {
+        if (oidcEndSessionUri == null || oidcEndSessionUri.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "【鉴权配置错误】缺少 rag.oidc.end-session-uri");
+        }
+        OidcUser effectiveUser = oidcUser != null
+                ? oidcUser
+                : (authentication != null && authentication.getPrincipal() instanceof OidcUser u ? u : null);
+        String idToken = (effectiveUser != null && effectiveUser.getIdToken() != null)
+                ? effectiveUser.getIdToken().getTokenValue()
+                : null;
+
+        String postLogoutRedirectUri = resolveClientOrigin(request) + "/oauth2/authorization/corp-sso";
+        UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(oidcEndSessionUri.trim())
+                .queryParam("post_logout_redirect_uri", postLogoutRedirectUri);
+        if (idToken != null && !idToken.isBlank()) {
+            builder.queryParam("id_token_hint", idToken);
+        } else {
+            builder.queryParam("client_id", oidcClientId);
+        }
+        String logoutUrl = builder.build().encode().toUriString();
+
         invalidateLocalSession(request, response);
-        return Map.of("code", 200, "message", "Logged out successfully");
+        return Map.of("code", 200, "message", "Logged out successfully", "logout_url", logoutUrl);
     }
 
     public record ModelTokenRequest(String provider, List<String> scopes) {}

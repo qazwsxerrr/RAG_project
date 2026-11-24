@@ -146,6 +146,7 @@
   ],
   "users": [
     {
+      "id": "7353fb24-423b-4588-a3ed-b2b39e1181a5",
       "username": "admin",
       "enabled": true,
       "emailVerified": true,
@@ -160,6 +161,7 @@
       ]
     },
     {
+      "id": "f56eb2cf-5202-40dc-836f-a75ba90aa32d",
       "username": "developer",
       "enabled": true,
       "emailVerified": true,
@@ -174,6 +176,7 @@
       ]
     },
     {
+      "id": "2dfcced8-71d0-4b46-8a73-1f38be4c3c9f",
       "username": "accountant",
       "enabled": true,
       "emailVerified": true,
@@ -188,6 +191,7 @@
       ]
     },
     {
+      "id": "a8bc8ce0-8d67-40f0-925e-67dd428a082d",
       "username": "multi_dept_staff",
       "enabled": true,
       "emailVerified": true,
@@ -207,6 +211,7 @@
       ]
     },
     {
+      "id": "686b6044-1786-4e69-874c-ff444e41b1d1",
       "username": "tech_manager",
       "enabled": true,
       "emailVerified": true,
@@ -225,6 +230,7 @@
       ]
     },
     {
+      "id": "9ce8e6a8-baef-4705-a9f2-969c02a78828",
       "username": "corp_exec",
       "enabled": true,
       "emailVerified": true,

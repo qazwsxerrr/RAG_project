@@ -109,15 +109,9 @@ export const useAuthStore = defineStore('auth', () => {
     }
   };
 
-  const redirectToSso = (options?: { promptLogin?: boolean; redirectPath?: string }): boolean => {
+  const redirectToSso = (options?: { redirectPath?: string }): boolean => {
     if (options?.redirectPath && options.redirectPath !== '/auth/callback') {
       sessionStorage.setItem('rag_auth_redirect', options.redirectPath);
-    }
-    if (options?.promptLogin) {
-      clearSsoLoopGuard();
-      authError.value = null;
-      window.location.href = '/oauth2/authorization/corp-sso?prompt=login';
-      return true;
     }
 
     const recent = readRecentSsoRedirects();
@@ -188,10 +182,14 @@ export const useAuthStore = defineStore('auth', () => {
         }
         throw new Error('鉴权中心未返回有效 access_token');
       } catch (err: any) {
-        token.value = '';
-        currentUser.value = null;
         const { status, message } = extractAuthErrorInfo(err);
         authError.value = { status, message };
+        // 仅当明确为 401/403 认证或授权失效时清空内存态登录信息；
+        // 网络超时 (status === null) 或 5xx 临时故障保留当前用户视图，避免清空侧边栏与菜单。
+        if (status === 401 || status === 403) {
+          token.value = '';
+          currentUser.value = null;
+        }
         // 仅当明确为 401 会话缺失/失效且不在回调页时才跳向 SSO；
         // 403/5xx/网络异常绝不静默跳回 SSO，避免在 IdP 已登录态下触发毫秒级死循环。
         if (shouldRedirectOn401 && status === 401) {
@@ -210,8 +208,12 @@ export const useAuthStore = defineStore('auth', () => {
   };
 
   const logout = async () => {
+    let rpLogoutUrl = '';
     try {
-      await apiLogout();
+      const resp = await apiLogout();
+      if (resp && typeof resp.logout_url === 'string' && resp.logout_url.trim()) {
+        rpLogoutUrl = resp.logout_url.trim();
+      }
     } catch {
       // ignore
     } finally {
@@ -221,7 +223,12 @@ export const useAuthStore = defineStore('auth', () => {
       isPermissionDenied.value = false;
       localStorage.removeItem('rag_active_session_id');
       sessionStorage.removeItem('rag_auth_redirect');
-      redirectToSso({ promptLogin: true, redirectPath: '/documents' });
+      clearSsoLoopGuard();
+      if (rpLogoutUrl) {
+        window.location.href = rpLogoutUrl;
+      } else {
+        window.location.href = '/oauth2/authorization/corp-sso';
+      }
     }
   };
 

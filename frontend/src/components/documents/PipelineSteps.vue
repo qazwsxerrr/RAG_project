@@ -119,7 +119,7 @@
 
       <!-- 错误详情呈现面板 (支持复制与断点重试续跑) -->
       <div 
-        v-if="overallStatus === 'failed' && (errorMessage || currentFailedDetail)"
+        v-if="overallStatus === 'failed'"
         class="mt-4 p-4 rounded-xl bg-rose-50/90 border border-rose-200 text-xs text-rose-900 shadow-sm animate-in fade-in duration-200"
       >
         <div class="flex items-start gap-3">
@@ -166,7 +166,7 @@
               </div>
             </div>
             <p class="mt-2 font-mono text-[11px] leading-relaxed text-rose-700 bg-white/80 p-3 rounded-lg border border-rose-200/80 break-all whitespace-pre-wrap select-text">
-              {{ errorMessage || currentFailedDetail }}
+              {{ errorMessage || currentFailedDetail || '当前步骤执行异常，可尝试点击「重试当前步骤」从断点续跑。' }}
             </p>
           </div>
         </div>
@@ -515,7 +515,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted, nextTick } from 'vue';
-import MarkdownIt from 'markdown-it';
+import { createMarkdownRenderer } from '../../utils/markdown';
 import type { PipelineStep, PipelineStepStatus, ReviewItem } from '../../types';
 import { DEFAULT_PIPELINE_STEPS } from '../../types';
 import { documentsApi, type ManagedPipelineStream } from '../../api/documents';
@@ -576,11 +576,7 @@ watch(
   { deep: true }
 );
 
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-});
+const md = createMarkdownRenderer({ html: false });
 
 const renderItemMarkdown = (text?: string): string => {
   if (!text) return '';
@@ -893,12 +889,15 @@ const syncFromSnapshot = async (): Promise<string | null> => {
       snap.steps.forEach((s: any) => {
         const idx = s.step_index ?? s.index;
         const st = normalizeStatus(s.status);
-        const detail = s.error_message || s.detail;
+        const detail = s.error || s.detail;
         setStepStatus(idx, st, detail);
         if (st === 'error' && detail) {
           errorMessage.value = detail;
         }
       });
+    }
+    if (snap.overall_status === 'failed' && !errorMessage.value && snap.error) {
+      errorMessage.value = snap.error;
     }
     pendingReviews.value = Array.isArray(snap.pending_reviews) ? snap.pending_reviews : [];
     applySkippedStepNormalization(snap.overall_status);
@@ -957,12 +956,15 @@ const connectSSE = async () => {
           data.steps.forEach((s: any) => {
             const idx = s.step_index ?? s.index;
             const st = normalizeStatus(s.status);
-            const detail = s.error_message || s.detail;
+            const detail = s.error || s.detail;
             setStepStatus(idx, st, detail);
             if (st === 'error' && detail) {
               errorMessage.value = detail;
             }
           });
+        }
+        if (data.overall_status === 'failed' && !errorMessage.value && data.error) {
+          errorMessage.value = data.error;
         }
         if (data.pending_reviews) {
           pendingReviews.value = data.pending_reviews;

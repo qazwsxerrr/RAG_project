@@ -66,6 +66,7 @@ class IngestState(TypedDict):
     failed_step: Optional[int]
     resume_from_step: Optional[int]
     force_overwrite: Optional[bool]
+    allow_duplicate: Optional[bool]
     dedup_res: Optional[Dict[str, Any]]
 
 
@@ -152,6 +153,7 @@ def get_default_state(
         "failed_step": None,
         "resume_from_step": None,
         "force_overwrite": False,
+        "allow_duplicate": False,
         "dedup_res": {},
     }
     return state

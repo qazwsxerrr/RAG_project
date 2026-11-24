@@ -164,10 +164,10 @@
                 :ref="setRenameInputRef"
                 v-model="editingSessionTitle"
                 @click.stop
-                @keydown.enter.prevent="commitRename(session.id)"
-                @keydown.esc.prevent="cancelRename"
-                @blur="commitRename(session.id)"
-                class="flex-1 min-w-0 bg-white border border-blue-400 rounded px-1.5 py-0.5 text-xs text-slate-800 outline-none"
+                @keydown.enter.stop.prevent="commitRename(session.id, $event)"
+                @keydown.esc.stop.prevent="cancelRename"
+                @blur="commitRename(session.id, $event)"
+                class="flex-1 min-w-0 bg-white border border-blue-400 rounded px-1.5 py-0.5 text-xs text-slate-800 outline-none select-text"
               />
               <span
                 v-else
@@ -304,9 +304,14 @@ provide('openMobileMenu', () => {
 const editingSessionId = ref<string>('');
 const editingSessionTitle = ref<string>('');
 const renameInputEl = ref<HTMLInputElement | null>(null);
+let isCommittingRename = false;
 
 const setRenameInputRef = (el: unknown) => {
-  renameInputEl.value = el instanceof HTMLInputElement ? el : null;
+  if (el instanceof HTMLInputElement) {
+    renameInputEl.value = el;
+  } else if (!editingSessionId.value) {
+    renameInputEl.value = null;
+  }
 };
 
 const POSITION_LABEL_MAP: Record<string, string> = {
@@ -380,15 +385,24 @@ const cancelRename = () => {
   editingSessionTitle.value = '';
 };
 
-const commitRename = async (id: string) => {
-  if (editingSessionId.value !== id) return;
-  const nextTitle = editingSessionTitle.value.trim();
+const commitRename = async (id: string, event?: Event) => {
+  if (event instanceof KeyboardEvent && (event.isComposing || event.keyCode === 229)) {
+    return;
+  }
+  if (isCommittingRename || editingSessionId.value !== id) return;
+  isCommittingRename = true;
+  const domVal = event?.target instanceof HTMLInputElement
+    ? event.target.value
+    : renameInputEl.value?.value;
+  const nextTitle = (domVal ?? editingSessionTitle.value).trim();
   cancelRename();
-  if (!nextTitle) return;
   try {
+    if (!nextTitle) return;
     await chatStore.renameSession(id, nextTitle);
   } catch (err: any) {
     alert(`重命名会话失败: ${err.message || '请稍后重试'}`);
+  } finally {
+    isCommittingRename = false;
   }
 };
 

@@ -1081,6 +1081,10 @@ async def preview_document(
         media_type = "application/octet-stream"
 
     encoded_filename = quote(doc.title)
+    ascii_fallback = "".join(ch if (32 <= ord(ch) < 127 and ch not in {'"', "\\", ";"}) else "_" for ch in doc.title).strip()
+    if not ascii_fallback:
+        ascii_fallback = f"document{ext or ''}"
+    content_disposition = f'inline; filename="{ascii_fallback}"; filename*=utf-8\'\'{encoded_filename}'
     if range_header:
         try:
             bucket = oss_service.get_client()
@@ -1100,7 +1104,7 @@ async def preview_document(
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"拉取 OSS 分片失败: {e}")
             part_headers = {
-                "Content-Disposition": f"inline; filename*=utf-8''{encoded_filename}",
+                "Content-Disposition": content_disposition,
                 "Accept-Ranges": "bytes",
                 "Content-Range": f"bytes {start}-{end}/{total_len}",
                 "Content-Length": str(end - start + 1),
@@ -1119,7 +1123,7 @@ async def preview_document(
         raise HTTPException(status_code=500, detail=f"拉取 OSS 失败: {e}")
 
     headers = {
-        "Content-Disposition": f"inline; filename*=utf-8''{encoded_filename}",
+        "Content-Disposition": content_disposition,
         "Accept-Ranges": "bytes",
         "Cache-Control": PRIVATE_NO_STORE_CACHE,
     }
@@ -1245,7 +1249,7 @@ async def resolve_duplicate(
         state["uploader_clearance"] = user.effective_clearance
     elif request.action == "create_new":
         state["force_overwrite"] = False
-        state["skip_review"] = True
+        state["allow_duplicate"] = True
     elif request.action == "cancel":
         state["overall_status"] = "cancelled"
         doc = await db.get(Document, doc_uuid)

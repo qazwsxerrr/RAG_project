@@ -65,12 +65,19 @@ apiClient.interceptors.response.use(
       return Promise.reject(new Error(errorDetail));
     }
 
-    // 遇到 401 且尚未重试过时，触发静默换票并透明重试一次
+    // 遇到 401 且尚未重试过时，先比对是否已被并发请求换出新令牌，避免重复触发换票风暴
     if (status === 401 && originalRequest && !originalRequest._retry) {
       originalRequest._retry = true;
       try {
-        console.warn(`[API 鉴权拦截 401] 凭据失效 (${originalRequest.url})，执行静默换票重试...`);
-        const newToken = await authStore.refreshToken();
+        const sentAuth = String(originalRequest.headers?.Authorization || '');
+        const sentToken = sentAuth.startsWith('Bearer ') ? sentAuth.slice(7).trim() : '';
+        let newToken = authStore.token;
+        if (!newToken || newToken === sentToken) {
+          console.warn(`[API 鉴权拦截 401] 凭据失效 (${originalRequest.url})，执行静默换票重试...`);
+          newToken = await authStore.refreshToken();
+        } else {
+          console.info(`[API 鉴权拦截 401] 检测到并发请求已刷新令牌 (${originalRequest.url})，直接用最新令牌重放`);
+        }
         originalRequest.headers.Authorization = `Bearer ${newToken}`;
         return apiClient(originalRequest);
       } catch (refreshErr) {

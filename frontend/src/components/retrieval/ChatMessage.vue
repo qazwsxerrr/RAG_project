@@ -149,7 +149,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue';
-import MarkdownIt from 'markdown-it';
+import { createMarkdownRenderer } from '../../utils/markdown';
 import type { ChatMessage as ChatMessageType, CitationSource } from '../../types';
 import ThoughtTimeline from './ThoughtTimeline.vue';
 import CitationCard from '../common/CitationCard.vue';
@@ -162,11 +162,7 @@ const emit = defineEmits<{
   (e: 'citationClick', citation: CitationSource): void;
 }>();
 
-const md = new MarkdownIt({
-  html: true,
-  linkify: true,
-  breaks: true,
-});
+const md = createMarkdownRenderer({ html: true });
 
 const copied = ref(false);
 const contentRef = ref<HTMLElement | null>(null);

@@ -39,7 +39,14 @@ export async function fetchToken(): Promise<TokenResponse> {
   return resp.data;
 }
 
-/** 登出会话 */
-export async function logout(): Promise<void> {
-  await adminClient.post('/auth/logout');
+export interface LogoutResponse {
+  code?: number;
+  message?: string;
+  logout_url?: string;
+}
+
+/** 登出会话（返回 Keycloak RP-Initiated Logout 地址） */
+export async function logout(): Promise<LogoutResponse> {
+  const resp = await adminClient.post<LogoutResponse>('/auth/logout');
+  return resp.data || {};
 }

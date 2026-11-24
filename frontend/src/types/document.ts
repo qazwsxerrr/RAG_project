@@ -2,10 +2,12 @@ export type PipelineStepStatus = 'wait' | 'process' | 'finish' | 'error' | 'warn
 
 export interface PipelineStep {
   index: number;
+  step_index?: number;
   name: string;
   code: string;
   status: PipelineStepStatus;
   detail?: string;
+  error?: string;
   duration_ms?: number;
 }
 

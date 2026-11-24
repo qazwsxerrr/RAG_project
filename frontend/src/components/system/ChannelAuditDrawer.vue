@@ -7,7 +7,12 @@
     ></div>
 
     <!-- 右侧滑出抽屉容器 -->
-    <div class="relative w-full max-w-xl bg-white shadow-2xl flex flex-col h-full z-10 animate-in slide-in-from-right duration-200 border-l border-slate-200">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="渠道调用审计详情"
+      class="relative w-full max-w-xl bg-white shadow-2xl flex flex-col h-full z-10 animate-in slide-in-from-right duration-200 border-l border-slate-200"
+    >
       
       <!-- 抽屉头部 -->
       <div class="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
@@ -47,6 +52,9 @@
 
           <!-- 关闭抽屉按钮 -->
           <button 
+            type="button"
+            aria-label="关闭抽屉"
+            title="关闭抽屉 (Esc)"
             @click="$emit('close')" 
             class="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer"
           >
@@ -131,7 +139,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue';
+import { ref, watch, computed, onUnmounted } from 'vue';
 import { systemApi, type ModelChannelItem, type AuditLogItem } from '../../api/system';
 import { useAuthStore, PERMISSIONS } from '../../stores/auth';
 import StatusTag from '../documents/StatusTag.vue';
@@ -153,15 +161,30 @@ const audits = ref<AuditLogItem[]>([]);
 const isLoading = ref(false);
 const isResetting = ref(false);
 
+const handleKeydown = (e: KeyboardEvent) => {
+  if (e.key === 'Escape' && props.isOpen) {
+    emit('close');
+  }
+};
+
 watch(
   () => [props.isOpen, props.channel?.name] as const,
   async ([open, nodeName]) => {
-    if (open && nodeName) {
-      await fetchAudits(nodeName);
+    if (open) {
+      window.addEventListener('keydown', handleKeydown);
+      if (nodeName) {
+        await fetchAudits(nodeName);
+      }
+    } else {
+      window.removeEventListener('keydown', handleKeydown);
     }
   },
   { immediate: true }
 );
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeydown);
+});
 
 function formatActionLabel(action?: string): string {
   switch (action) {

@@ -57,6 +57,26 @@ class BaseNode:
             result_state = await self.process(state, config=config, writer=writer)
             duration_ms = int((time.perf_counter() - t0) * 1000)
 
+            if result_state.get("overall_status") == IngestStatus.DUPLICATE_WARNING.value:
+                if 0 <= idx < len(result_state.get("steps", [])):
+                    result_state["steps"][idx]["status"] = IngestStatus.DUPLICATE_WARNING.value
+                    result_state["steps"][idx]["duration_ms"] = duration_ms
+                    result_state["steps"][idx]["error"] = None
+                    result_state["steps"][idx]["detail"] = "命中同库相似文档，等待用户确认"
+
+                if writer and callable(writer):
+                    writer({
+                        "event": "step_progress",
+                        "step": self.step_index,
+                        "status": IngestStatus.DUPLICATE_WARNING.value,
+                        "duration_ms": duration_ms,
+                        "detail": "命中同库相似文档，等待用户确认",
+                    })
+                self.logger.info(
+                    f"[{req_id}] ⏸ [节点 {self.step_index}/11: {self.name}] 命中同库相似文档，暂停等待确认，耗时 {duration_ms}ms"
+                )
+                return result_state
+
             if 0 <= idx < len(result_state.get("steps", [])):
                 result_state["steps"][idx]["status"] = "completed"
                 result_state["steps"][idx]["duration_ms"] = duration_ms

@@ -312,11 +312,14 @@ const triggerFileInput = () => {
   fileInputRef.value?.click();
 };
 
+let lastAutoFileName = '';
+
 const handleFileChange = (e: Event) => {
   const target = e.target as HTMLInputElement;
   if (target.files && target.files[0]) {
     setFile(target.files[0]);
   }
+  target.value = '';
 };
 
 const handleDrop = (e: DragEvent) => {
@@ -328,9 +331,10 @@ const handleDrop = (e: DragEvent) => {
 
 const setFile = (file: File) => {
   selectedFile.value = file;
-  if (!form.customFileName) {
+  if (!form.customFileName || form.customFileName === lastAutoFileName) {
     form.customFileName = file.name;
   }
+  lastAutoFileName = file.name;
 };
 
 const addTag = () => {
@@ -363,6 +367,10 @@ const pickDefaultKb = () => {
 
 const resetForm = () => {
   selectedFile.value = null;
+  lastAutoFileName = '';
+  if (fileInputRef.value) {
+    fileInputRef.value.value = '';
+  }
   form.customFileName = '';
   pickDefaultKb();
   form.category = '技术规范';

@@ -219,8 +219,9 @@ class IngestPipelineManager:
             )
 
         dedup_info = state.get("dedup_res") or {}
-        is_dup = bool(dedup_info.get("is_duplicate"))
+        is_dup = bool(dedup_info.get("is_duplicate")) and overall_status == IngestStatus.DUPLICATE_WARNING.value
         matched_id = dedup_info.get("matched_doc_id")
+        top_error = state.get("error") or next((s.error for s in step_statuses if s.error), None)
 
         return PipelineSnapshotResponse(
             doc_id=doc_id,
@@ -232,7 +233,8 @@ class IngestPipelineManager:
             requires_review=bool(reviews and overall_status == IngestStatus.REVIEW.value),
             pending_reviews=reviews,
             is_duplicate_warning=is_dup,
-            matched_doc_id=matched_id
+            matched_doc_id=matched_id,
+            error=top_error,
         )
 
 # 全局单例管理器

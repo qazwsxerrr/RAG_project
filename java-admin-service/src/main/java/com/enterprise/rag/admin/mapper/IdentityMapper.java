@@ -8,6 +8,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 
@@ -158,6 +159,18 @@ public class IdentityMapper {
         return list.isEmpty() ? Optional.empty() : Optional.of(list.getFirst());
     }
 
+    public Optional<UserRecord> findUserByRealName(String tenantId, String idSource, String realName) {
+        if (realName == null || realName.isBlank()) {
+            return Optional.empty();
+        }
+        String sql = "SELECT id, tenant_id, external_id, id_source, real_name, dept_path, is_active, " +
+                     "position_code, authz_version, last_login_at, created_at " +
+                     "FROM sys_users WHERE tenant_id = ? AND id_source = ? AND LOWER(real_name) = LOWER(?) " +
+                     "ORDER BY last_login_at DESC NULLS LAST, created_at DESC LIMIT 1";
+        List<UserRecord> list = jdbcTemplate.query(sql, userRowMapper, tenantId, idSource, realName.trim());
+        return list.isEmpty() ? Optional.empty() : Optional.of(list.getFirst());
+    }
+
     /**
      * 企业 IdP 登录时自动建档并对齐姓名、展示部门与职级（企业人事/IdP 为身份单一事实源）。
      */
@@ -191,12 +204,35 @@ public class IdentityMapper {
             UserRecord u = existing.get();
             String nextPos = validIdpPosition != null ? validIdpPosition : u.positionCode();
             String nextDept = syncDisplayDeptPath ? safeDisplayDept : u.deptPath();
+            boolean nameChanged = !Objects.equals(u.realName(), realName);
+            boolean deptChanged = !Objects.equals(u.deptPath(), nextDept);
             boolean positionChanged = !Objects.equals(u.positionCode(), nextPos);
+            boolean lastLoginStale = u.lastLoginAt() == null
+                    || Duration.between(u.lastLoginAt(), Instant.now()).compareTo(Duration.ofMinutes(5)) >= 0;
+            if (!nameChanged && !deptChanged && !positionChanged && !lastLoginStale) {
+                return u;
+            }
             jdbcTemplate.update(
                     "UPDATE sys_users SET real_name = ?, dept_path = ?, position_code = ?, " +
                     "authz_version = authz_version + ?, last_login_at = NOW() " +
                     "WHERE tenant_id = ? AND id = ?",
                     realName, nextDept, nextPos, positionChanged ? 1 : 0, safeTenant, u.id()
+            );
+            return findUserById(safeTenant, u.id()).orElse(u);
+        }
+
+        // IdP 重建导致 sub 变化时按同源同用户名收敛重绑，防止产生同名影子账号
+        Optional<UserRecord> sameNameExisting = findUserByRealName(safeTenant, idSource, realName);
+        if (sameNameExisting.isPresent()) {
+            UserRecord u = sameNameExisting.get();
+            String nextPos = validIdpPosition != null ? validIdpPosition : u.positionCode();
+            String nextDept = syncDisplayDeptPath ? safeDisplayDept : u.deptPath();
+            boolean positionChanged = !Objects.equals(u.positionCode(), nextPos);
+            jdbcTemplate.update(
+                    "UPDATE sys_users SET external_id = ?, real_name = ?, dept_path = ?, position_code = ?, " +
+                    "authz_version = authz_version + ?, last_login_at = NOW() " +
+                    "WHERE tenant_id = ? AND id = ?",
+                    externalId, realName, nextDept, nextPos, positionChanged ? 1 : 0, safeTenant, u.id()
             );
             return findUserById(safeTenant, u.id()).orElse(u);
         }

@@ -1073,9 +1073,15 @@ async def list_audit_logs(
     _require_any_perm(user, Permissions.SYSTEM_ADMIN)
     stmt = select(AuditLog).where(AuditLog.tenant_id == user.tenant_id)
     if action and action.strip():
-        stmt = stmt.where(AuditLog.action == action.strip())
+        stmt = stmt.where(AuditLog.action.ilike(f"%{action.strip()}%"))
     if status_filter and status_filter.strip():
-        stmt = stmt.where(AuditLog.status == status_filter.strip())
+        normalized_status = status_filter.strip().upper()
+        if normalized_status == "DENIED":
+            stmt = stmt.where(
+                AuditLog.status.in_(["FORBIDDEN", "BLOCKED", "UNAUTHORIZED", "REVOKED"])
+            )
+        else:
+            stmt = stmt.where(AuditLog.status == normalized_status)
     rows = (await db.execute(stmt.order_by(desc(AuditLog.created_at)).limit(limit))).scalars().all()
     return [
         {

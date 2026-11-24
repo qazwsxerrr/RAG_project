@@ -77,7 +77,7 @@ const handleRetry = () => {
 };
 
 const handleRelogin = () => {
-  authStore.redirectToSso({ promptLogin: true });
+  void authStore.logout();
 };
 
 onMounted(() => {

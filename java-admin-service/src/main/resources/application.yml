@@ -55,6 +55,8 @@ spring:
 
 # Phase-6 业务 JWT 与模型租约配置
 rag:
+  oidc:
+    end-session-uri: ${OIDC_END_SESSION_URI:http://localhost:8180/realms/enterprise-rag/protocol/openid-connect/logout}
   redis:
     revocation-ttl-seconds: ${AUTH_REVOCATION_TTL_SECONDS:86400}
   jwt:

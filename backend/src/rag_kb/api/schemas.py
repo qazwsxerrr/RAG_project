@@ -166,6 +166,7 @@ class PipelineSnapshotResponse(BaseModel):
     pending_reviews: List[ReviewItem] = Field(default_factory=list)
     is_duplicate_warning: bool = False
     matched_doc_id: Optional[str] = None
+    error: Optional[str] = None
 
 
 class ReviewItemUpdate(BaseModel):

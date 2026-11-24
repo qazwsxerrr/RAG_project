@@ -21,7 +21,7 @@
                 文档切片详情
               </h3>
               <span class="text-xs text-slate-400 font-mono">
-                共 {{ chunks.length }} 个切片
+                {{ loading ? '加载中...' : `共 ${chunks.length} 个切片` }}
               </span>
             </div>
             <p class="text-xs text-slate-500 mt-1 font-mono truncate max-w-2xl" :title="fileName">
@@ -244,7 +244,7 @@
               <div 
                 v-if="chunk.table_html && getTab(chunk.chunk_index) === 'render'" 
                 class="rendered-table-container bg-white border border-slate-200 rounded-lg p-2.5 overflow-x-auto max-h-72" 
-                v-html="chunk.table_html"
+                v-html="renderTableCellsMarkdown(chunk.table_html)"
               ></div>
 
               <!-- 原版切图内容 (如果只有切图或切换到了原切图视图) -->
@@ -441,7 +441,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
-import MarkdownIt from 'markdown-it';
+import { createMarkdownRenderer, renderTableCellsMarkdown } from '../../utils/markdown';
 import type { ChunkItem } from '../../types';
 import { documentsApi } from '../../api/documents';
 import { createSecureBlobCache, openProtectedImageInNewTab } from '../../utils/secureMedia';
@@ -464,11 +464,7 @@ const pageSize = 20;
 const currentPage = ref(1);
 const selectedType = ref<'all' | 'table' | 'flowchart' | 'code' | 'image'>('all');
 
-const md = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-});
+const md = createMarkdownRenderer({ html: false });
 
 function renderMarkdownContent(text?: string): string {
   if (!text) return '';
@@ -738,16 +734,21 @@ onUnmounted(() => {
   assetBlobCache.revokeAll();
 });
 
+let chunkLoadSeq = 0;
+
 // 监听加载切片数据
 watch(
   () => [props.visible, props.docId] as const,
   async ([vis, newId]) => {
+    const seq = ++chunkLoadSeq;
     if (!vis) {
+      chunks.value = [];
       lightboxUrl.value = null;
       assetBlobCache.revokeAll();
       return;
     }
     if (vis && newId) {
+      chunks.value = [];
       loading.value = true;
       currentPage.value = 1;
       selectedType.value = 'all';
@@ -756,15 +757,21 @@ watch(
       activeTabs.value = {};
       assetBlobCache.revokeAll();
       try {
-        chunks.value = await documentsApi.getDocumentChunks(newId);
+        const res = await documentsApi.getDocumentChunks(newId);
+        if (seq !== chunkLoadSeq) return;
+        chunks.value = res;
         await nextTick();
+        if (seq !== chunkLoadSeq) return;
         preloadVisibleChunkAssets();
         await renderVisibleFlowcharts();
       } catch (err) {
+        if (seq !== chunkLoadSeq) return;
         console.warn('加载切片失败:', err);
         chunks.value = [];
       } finally {
-        loading.value = false;
+        if (seq === chunkLoadSeq) {
+          loading.value = false;
+        }
       }
     }
   },

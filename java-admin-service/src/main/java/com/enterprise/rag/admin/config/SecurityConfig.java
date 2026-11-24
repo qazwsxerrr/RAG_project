@@ -4,23 +4,29 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.converter.FormHttpMessageConverter;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClientManager;
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClientProvider;
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClientProviderBuilder;
+import org.springframework.security.oauth2.client.endpoint.RestClientRefreshTokenTokenResponseClient;
+import org.springframework.security.oauth2.client.http.OAuth2ErrorResponseErrorHandler;
 import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserService;
 import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
+import org.springframework.security.oauth2.client.userinfo.DefaultOAuth2UserService;
 import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizedClientManager;
 import org.springframework.security.oauth2.client.web.DefaultOAuth2AuthorizationRequestResolver;
 import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestCustomizers;
 import org.springframework.security.oauth2.client.web.OAuth2AuthorizationRequestResolver;
 import org.springframework.security.oauth2.client.web.OAuth2AuthorizedClientRepository;
+import org.springframework.security.oauth2.core.http.converter.OAuth2AccessTokenResponseHttpMessageConverter;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
-import org.springframework.security.web.authentication.logout.HttpStatusReturningLogoutSuccessHandler;
-import org.springframework.web.util.UriComponentsBuilder;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestTemplate;
 
 import java.time.Duration;
 
@@ -33,14 +39,35 @@ import java.time.Duration;
 @EnableWebSecurity
 public class SecurityConfig {
 
+    private static SimpleClientHttpRequestFactory createOidcRequestFactory() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(Duration.ofSeconds(5));
+        factory.setReadTimeout(Duration.ofSeconds(8));
+        return factory;
+    }
+
     @Bean
     public OAuth2AuthorizedClientManager authorizedClientManager(
             ClientRegistrationRepository clientRegistrationRepository,
             OAuth2AuthorizedClientRepository authorizedClientRepository
     ) {
+        RestClient refreshRestClient = RestClient.builder()
+                .requestFactory(createOidcRequestFactory())
+                .configureMessageConverters(converters -> {
+                    converters.addCustomConverter(new FormHttpMessageConverter());
+                    converters.addCustomConverter(new OAuth2AccessTokenResponseHttpMessageConverter());
+                })
+                .defaultStatusHandler(new OAuth2ErrorResponseErrorHandler())
+                .build();
+
+        RestClientRefreshTokenTokenResponseClient refreshTokenResponseClient = new RestClientRefreshTokenTokenResponseClient();
+        refreshTokenResponseClient.setRestClient(refreshRestClient);
+
         OAuth2AuthorizedClientProvider provider = OAuth2AuthorizedClientProviderBuilder.builder()
                 .authorizationCode()
-                .refreshToken(builder -> builder.clockSkew(Duration.ofSeconds(60)))
+                .refreshToken(builder -> builder
+                        .clockSkew(Duration.ofSeconds(60))
+                        .accessTokenResponseClient(refreshTokenResponseClient))
                 .build();
         DefaultOAuth2AuthorizedClientManager manager = new DefaultOAuth2AuthorizedClientManager(
                 clientRegistrationRepository,
@@ -52,7 +79,14 @@ public class SecurityConfig {
 
     @Bean
     public OidcUserService oidcUserService() {
+        RestTemplate userInfoRestTemplate = new RestTemplate(createOidcRequestFactory());
+        userInfoRestTemplate.setErrorHandler(new OAuth2ErrorResponseErrorHandler());
+
+        DefaultOAuth2UserService delegateUserService = new DefaultOAuth2UserService();
+        delegateUserService.setRestOperations(userInfoRestTemplate);
+
         OidcUserService service = new OidcUserService();
+        service.setOauth2UserService(delegateUserService);
         // 换票刷新时强制从标准 OIDC UserInfo 端点拉取最新多部门与角色组声明
         service.setRetrieveUserInfo(req -> {
             String uri = req.getClientRegistration().getProviderDetails().getUserInfoEndpoint().getUri();
@@ -87,13 +121,8 @@ public class SecurityConfig {
                     }
                     oauth2.defaultSuccessUrl("/auth/callback", true);
                 })
-                .logout(logout -> logout
-                        .logoutUrl("/api/admin/auth/logout")
-                        .invalidateHttpSession(true)
-                        .clearAuthentication(true)
-                        .deleteCookies("JSESSIONID")
-                        .logoutSuccessHandler(new HttpStatusReturningLogoutSuccessHandler(HttpStatus.OK))
-                )
+                // 由 AuthController#logout 接管登出，提取 id_token 构造 OIDC RP-Initiated Logout 地址后再销毁本地 Session
+                .logout(AbstractHttpConfigurer::disable)
                 .exceptionHandling(ex -> ex
                         .defaultAuthenticationEntryPointFor(
                                 new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED),
@@ -116,40 +145,6 @@ public class SecurityConfig {
         DefaultOAuth2AuthorizationRequestResolver resolver =
                 new DefaultOAuth2AuthorizationRequestResolver(repo, "/oauth2/authorization");
         resolver.setAuthorizationRequestCustomizer(OAuth2AuthorizationRequestCustomizers.withPkce());
-        return new OAuth2AuthorizationRequestResolver() {
-            @Override
-            public org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest resolve(
-                    jakarta.servlet.http.HttpServletRequest request) {
-                return customizePrompt(resolver.resolve(request), request);
-            }
-
-            @Override
-            public org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest resolve(
-                    jakarta.servlet.http.HttpServletRequest request, String clientRegistrationId) {
-                return customizePrompt(resolver.resolve(request, clientRegistrationId), request);
-            }
-
-            private org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest customizePrompt(
-                    org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest req,
-                    jakarta.servlet.http.HttpServletRequest httpReq) {
-                if (req == null) {
-                    return null;
-                }
-                String prompt = httpReq.getParameter("prompt");
-                if (prompt != null && !prompt.isBlank()) {
-                    String existingUri = req.getAuthorizationRequestUri();
-                    String newUri = UriComponentsBuilder
-                            .fromUriString(existingUri)
-                            .queryParam("prompt", prompt.trim())
-                            .build()
-                            .toUriString();
-                    return org.springframework.security.oauth2.core.endpoint.OAuth2AuthorizationRequest.from(req)
-                            .authorizationRequestUri(newUri)
-                            .additionalParameters(params -> params.put("prompt", prompt.trim()))
-                            .build();
-                }
-                return req;
-            }
-        };
+        return resolver;
     }
 }

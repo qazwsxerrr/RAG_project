@@ -14,12 +14,12 @@
 
         <!-- 当前文件标题 -->
         <h2 class="text-sm sm:text-base font-bold text-slate-900 tracking-tight truncate max-w-xs sm:max-w-md">
-          {{ currentFileName || (currentDocId ? '文档处理进度' : '提交文档入库') }}
+          {{ (currentDocId && !showFormAgain) ? (currentFileName || '文档处理进度') : '提交文档入库' }}
         </h2>
 
         <!-- 状态胶囊徽标 (动态联动当前最新执行状态) -->
         <span 
-          v-if="currentDocId" 
+          v-if="currentDocId && !showFormAgain" 
           class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium transition-all"
           :class="[
             currentStatus === 'queued' ? 'bg-amber-50 text-amber-700 border border-amber-200/70' :
@@ -57,7 +57,7 @@
 
         <!-- 文档 ID 胶囊卡片 -->
         <div 
-          v-if="currentDocId"
+          v-if="currentDocId && !showFormAgain"
           class="hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-slate-100 border border-slate-200/70 text-[11px] font-mono text-slate-600"
         >
           <span>UID {{ currentDocId.slice(0, 8) }}...</span>
