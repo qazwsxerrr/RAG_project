@@ -281,7 +281,7 @@ const canManageAllOrg = computed(
 
 const tabs = computed<Array<{ key: GovernanceTabKey; label: string }>>(() => {
   const list: Array<{ key: GovernanceTabKey; label: string }> = [
-    { key: 'kbs', label: '知识库与访问授权' },
+    { key: 'kbs', label: '知识库权限' },
   ];
   if (isSystemAdmin.value) {
     list.push(
