@@ -20,9 +20,9 @@ from rag_kb.services.mcp.server import (
     rag_get_embeddings,
     rag_hybrid_search,
     rag_resilient_llm,
-    resolve_authorized_department_path,
     resolve_or_create_department,
 )
+from rag_kb.core.authz import resolve_authorized_target_kb
 
 __all__ = [
     "MCPCallerContext",
@@ -39,7 +39,7 @@ __all__ = [
     "rag_document_ingest",
     "rag_document_status",
     "resolve_or_create_department",
-    "resolve_authorized_department_path",
+    "resolve_authorized_target_kb",
     "execute_core_embeddings_extraction",
     "execute_core_hybrid_retrieval",
     "execute_core_document_ingest_from_temp_file",

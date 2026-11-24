@@ -1,66 +1,53 @@
-"""src/rag_kb/api/retrieval.py —— 知识检索与智能问答 HTTP 端点层。
-
-支持：
-- POST /retrieval/search: 纯检索阶段接口（返回 8 阶段思考流元数据、引文卡片与黄金切片）
-- POST /retrieval/chat: 阶段 1~8 全流程智能问答流式打字机接口 (POST SSE 协议)
-"""
+"""src/rag_kb/api/retrieval.py —— 知识检索与智能问答 HTTP 端点层（全面接入多维权限 PDP 与高密交付前审计）。"""
 
 import time
-import json
+import uuid
 import logging
 from typing import AsyncGenerator, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from rag_kb.core.authz import (
+    EffectiveAuthzContext,
+    audit_high_classification_read,
+    validate_requested_kb_ids,
+)
 from rag_kb.core.config import settings
+from rag_kb.core.constants import KbAction, Permissions
+from rag_kb.core.logging.audit import record_audit_log
 from rag_kb.core.rate_limit import (
     enforce_user_rate_limit,
     acquire_chat_stream_slot,
     release_chat_stream_slot,
 )
+from rag_kb.core.security import validate_prompt_security
 from rag_kb.api.deps import (
-    UserContext,
     require_permission,
-    derive_secure_department_scope,
     get_session_auth_error,
     SESSION_AUTH_ERROR_DETAILS,
 )
-from rag_kb.core.constants import Permissions
-
 from rag_kb.api.schemas import (
     ChatQueryRequest,
     ChatQueryResponse,
     ThinkingProcess,
     ThinkingStep,
     CitationSource,
-    RetrievedChunk
+    RetrievedChunk,
 )
 from rag_kb.api.sse import format_sse
-from rag_kb.core.logging.audit import record_audit_log
-from rag_kb.core.security import validate_prompt_security
 from rag_kb.db.chat_store import chat_store
+from rag_kb.db.session import get_db
 from rag_search.build import get_retrieval_graph
 from rag_search.answer import stream_answer
-from rag_search.state import get_default_state, RetrievalState
+from rag_search.state import get_default_state
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["检索与智能问答"])
 
-STANDARD_RETRIEVAL_STEPS = [
-    "查询预处理",
-    "稠密召回",
-    "稀疏召回",
-    "关键词召回",
-    "假设性搜索",
-    "RRF 融合",
-    "重排",
-    "MMR 去重"
-]
 
 class ThinkingProcessBuilder:
-    """动态思考全流程时间线追踪构建器（仅动态记录已激活或已执行的阶段，实现逐行递增动效）"""
-
     def __init__(self):
         self.active_order: List[str] = []
         self.steps: Dict[str, ThinkingStep] = {}
@@ -78,7 +65,7 @@ class ThinkingProcessBuilder:
                 status=step_payload.get("status", "执行中..."),
                 duration_ms=step_payload.get("duration_ms", 0),
                 count_change=step_payload.get("count_change"),
-                summary=step_payload.get("summary")
+                summary=step_payload.get("summary"),
             )
         else:
             self.steps[name].status = step_payload.get("status", self.steps[name].status)
@@ -93,17 +80,41 @@ class ThinkingProcessBuilder:
         return ThinkingProcess(
             total_retrieve_ms=total_ret,
             total_overall_ms=total_overall_ms or total_ret,
-            steps=[self.steps[name] for name in self.active_order]
+            steps=[self.steps[name] for name in self.active_order],
         )
+
+
+async def _audit_retrieved_high_classification_docs(
+    ctx: EffectiveAuthzContext,
+    action: str,
+    final_chunks: List[dict],
+    query: str,
+) -> None:
+    """若检索/问答结果命中 L3/L4 高密文档，在向客户端交付首字节前持久化强制安全审计"""
+    seen_docs = set()
+    for c in final_chunks:
+        lvl = int(c.get("classification_level") or 0)
+        doc_id = str(c.get("document_id") or "")
+        if lvl >= 3 and doc_id and doc_id not in seen_docs:
+            seen_docs.add(doc_id)
+            await audit_high_classification_read(
+                ctx=ctx,
+                action=action,
+                doc_id=doc_id,
+                kb_id=str(c.get("kb_id") or ""),
+                effective_level=lvl,
+                extra_details={"query": query[:200], "document_title": c.get("document_title")},
+            )
+
 
 @router.post("/retrieval/search", response_model=ChatQueryResponse)
 async def search_endpoint(
     http_request: Request,
     request: ChatQueryRequest,
-    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
+    db: AsyncSession = Depends(get_db),
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
 ):
-    """纯检索接口 (阶段 1 ~ 阶段 6)：获取经过多阶段漏斗精选的切片与思考流"""
-    # Phase-8: Redis Lua 原子滑动窗口频率限流
+    """纯检索接口：接入多维权限 PDP、kb_ids 授权校验、高密交付前审计与 raw_oss_url 剥离"""
     await enforce_user_rate_limit(
         request=http_request,
         tenant_id=user.tenant_id,
@@ -112,12 +123,9 @@ async def search_endpoint(
         limit=settings.RATE_LIMIT_RETRIEVAL_PER_MINUTE,
     )
 
-    # 0. RBAC 鉴权与部门防越权拦截 (Phase-6: 服务端强制推导，绝不信任前端入参)
-    effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
-    if not effective_dept_scope:
-        raise HTTPException(status_code=403, detail="【权限不足】未配置有效的部门访问范围")
+    # 校验前端传入的 kb_ids（任一无权 kb_id 立即 403 拦截并记录拒绝审计）
+    authorized_kb_ids = await validate_requested_kb_ids(db, user, request.kb_ids, action=KbAction.READ.value)
 
-    # 前置安全熔断护栏：拦截涉黄、暴恐、涉枪涉爆违禁词与越狱注入
     is_safe, error_msg = validate_prompt_security(request.query)
     if not is_safe:
         await record_audit_log(
@@ -125,14 +133,19 @@ async def search_endpoint(
             resource_id=request.conversation_id,
             status="BLOCKED",
             error_msg=error_msg,
-            details={"query": request.query}
+            details={"query": request.query},
         )
-        raise HTTPException(
-            status_code=400,
-            detail=f"【安全合规拦截】{error_msg}"
-        )
+        raise HTTPException(status_code=400, detail=f"【安全合规拦截】{error_msg}")
 
-    history_dicts = [h.model_dump() for h in request.history] if request.history else []
+    # 仅使用经服务端复核的历史消息（不信任前端缓存历史）
+    if request.conversation_id:
+        sess = await chat_store.get_session(request.conversation_id, tenant_id=user.tenant_id, user_id=user.user_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="未找到该会话或无权访问他人会话")
+        history_dicts = await chat_store.build_authorized_history(request.conversation_id, user, max_messages=6, db=db)
+    else:
+        history_dicts = []
+
     builder = ThinkingProcessBuilder()
 
     try:
@@ -140,7 +153,8 @@ async def search_endpoint(
 
         latest_state, thinking_steps, citations_raw, retrieve_ms = await execute_core_hybrid_retrieval(
             query=request.query,
-            effective_department_scope=effective_dept_scope,
+            authz_ctx=user,
+            kb_ids=authorized_kb_ids,
             conversation_id=request.conversation_id,
             history=history_dicts,
             category_scope=request.category_scope,
@@ -153,27 +167,38 @@ async def search_endpoint(
         builder.retrieve_ms = retrieve_ms
         thinking_process = builder.to_thinking_process()
 
-        citations = [CitationSource(**c) for c in citations_raw]
-
         final_chunks_raw = latest_state.get("results") or latest_state.get("final_chunks", [])
+
+        # L3/L4 高密命中在返回前强制落盘审计，写入失败直接中止返回
+        await _audit_retrieved_high_classification_docs(
+            ctx=user,
+            action="HIGH_CLASSIFICATION_RETRIEVAL_READ",
+            final_chunks=final_chunks_raw,
+            query=request.query,
+        )
+
+        citations = [CitationSource(**{k: v for k, v in c.items() if k != "raw_oss_url"}) for c in citations_raw]
         final_chunks = [
             RetrievedChunk(
                 chunk_id=c["chunk_id"],
                 document_id=c["document_id"],
                 document_title=c.get("document_title", ""),
+                kb_id=c.get("kb_id"),
+                kb_name=c.get("kb_name"),
+                kb_full_path=c.get("kb_full_path"),
+                classification_level=c.get("classification_level"),
                 chunk_index=c.get("chunk_index", 0),
                 chunk_label=c.get("chunk_label", ""),
                 content=c.get("content", ""),
                 page_idx=c.get("page_idx", 0),
                 bbox=c.get("bbox", []),
                 breadcrumb=c.get("breadcrumb", []),
-                asset_url=c.get("asset_url"),
-                raw_oss_url=c.get("raw_oss_url"),
+                asset_url=f"/api/v1/chunks/{c['chunk_id']}/asset" if c.get("asset_url") else None,
                 department_path=c.get("department_path", ""),
                 score=c.get("score", 0.0),
                 channel_ranks=c.get("channel_ranks", {}),
                 dense_embedding=c.get("dense_embedding"),
-                remark=c.get("remark")
+                remark=c.get("remark"),
             )
             for c in final_chunks_raw
         ]
@@ -185,9 +210,10 @@ async def search_endpoint(
             status="SUCCESS",
             details={
                 "query": request.query,
+                "kb_ids": [str(k) for k in authorized_kb_ids] if authorized_kb_ids else None,
                 "chunks_count": len(final_chunks),
                 "citations_count": len(citations),
-            }
+            },
         )
 
         return ChatQueryResponse(
@@ -196,8 +222,10 @@ async def search_endpoint(
             answer="",
             thinking=thinking_process,
             citations=citations,
-            final_chunks=final_chunks
+            final_chunks=final_chunks,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"检索执行失败: {e}", exc_info=True)
         await record_audit_log(
@@ -205,24 +233,19 @@ async def search_endpoint(
             resource_id=request.conversation_id,
             status="FAILED",
             error_msg=str(e),
-            details={"query": request.query}
+            details={"query": request.query},
         )
         raise HTTPException(status_code=500, detail=f"检索服务异常: {str(e)}")
+
 
 @router.post("/retrieval/chat")
 async def chat_endpoint(
     http_request: Request,
     request: ChatQueryRequest,
-    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
+    db: AsyncSession = Depends(get_db),
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
 ):
-    """
-    阶段 1 ~ 阶段 8 全流程智能问答流式打字机接口 (POST SSE 协议)
-    - Phase-8: Redis Lua 频率限流 + 单用户并发流护栏
-    - 阶段 1~6: 执行 LangGraph 检索图，实时派发 event: thinking 思考流与 event: citations
-    - 阶段 7~8: 动态组装防幻觉 Prompt，调用云端大模型流式派发 event: message 打字机输出
-    - 结束: 派发 event: done
-    """
-    # Phase-8: Redis Lua 原子滑动窗口频率限制
+    """阶段 1 ~ 8 全流程智能问答流式接口（多维权限 PDP + 历史来源复核 + 高密交付前审计 + SSE 实时复核）"""
     await enforce_user_rate_limit(
         request=http_request,
         tenant_id=user.tenant_id,
@@ -231,36 +254,43 @@ async def chat_endpoint(
         limit=settings.RATE_LIMIT_RETRIEVAL_PER_MINUTE,
     )
 
-    # 0. RBAC 鉴权与部门防越权拦截 (Phase-6: 服务端强制推导，绝不信任前端入参)
-    effective_dept_scope = derive_secure_department_scope(user, request.department_scope)
-    if not effective_dept_scope:
-        raise HTTPException(status_code=403, detail="【权限不足】未配置有效的部门访问范围")
+    authorized_kb_ids = await validate_requested_kb_ids(db, user, request.kb_ids, action=KbAction.READ.value)
 
-    # Phase-8: 单用户活跃流式问答并发护栏（防止连续狂点并发拉爆大模型与数据库连接池）
     active_stream_slot = await acquire_chat_stream_slot(tenant_id=user.tenant_id, user_id=user.user_id)
 
     try:
-        history_dicts = [h.model_dump() for h in request.history] if request.history else []
+        # 严格由服务端基于当前 READ 权限复核构造多轮历史，严禁直接采信前端缓存的 history
+        history_dicts: List[Dict[str, str]] = []
+        if request.conversation_id:
+            existing_sess = await chat_store.get_session(
+                request.conversation_id, tenant_id=user.tenant_id, user_id=user.user_id
+            )
+            if existing_sess is not None:
+                history_dicts = await chat_store.build_authorized_history(
+                    request.conversation_id, user, max_messages=6, db=db
+                )
+
         initial_state = get_default_state(
             query=request.query,
             conversation_id=request.conversation_id,
             history=history_dicts,
-            department_scope=effective_dept_scope,
+            authz_filter_spec=user,
+            kb_ids=authorized_kb_ids,
             category_scope=request.category_scope,
             tags_scope=request.tags_scope,
             scene_type=request.scene_type,
-            enable_hyde=request.enable_hyde
+            enable_hyde=request.enable_hyde,
         )
 
-        # 记录用户消息至会话历史 (强制绑定当前员工 tenant_id 与 user_id，跨用户越权直接拦截)
         if request.conversation_id:
             try:
                 await chat_store.append_message(
                     request.conversation_id,
                     "user",
                     request.query,
+                    source_doc_ids=[],
                     tenant_id=user.tenant_id,
-                    user_id=user.user_id
+                    user_id=user.user_id,
                 )
             except PermissionError as pe:
                 await release_chat_stream_slot(user.tenant_id, user.user_id, active_stream_slot)
@@ -268,7 +298,6 @@ async def chat_endpoint(
             except Exception as e:
                 logger.warning(f"记录用户消息失败: {e}")
 
-        # 前置安全熔断护栏：拦截涉黄、暴恐、涉枪涉爆违禁词与越狱注入
         is_safe, error_msg = validate_prompt_security(request.query)
         if not is_safe:
             async def blocked_stream() -> AsyncGenerator[str, None]:
@@ -282,8 +311,9 @@ async def chat_endpoint(
                                 request.conversation_id,
                                 "assistant",
                                 block_reply,
+                                source_doc_ids=[],
                                 tenant_id=user.tenant_id,
-                                user_id=user.user_id
+                                user_id=user.user_id,
                             )
                         except Exception as e:
                             logger.warning(f"记录合规拒绝消息失败: {e}")
@@ -292,7 +322,7 @@ async def chat_endpoint(
                         resource_id=request.conversation_id,
                         status="BLOCKED",
                         error_msg=error_msg,
-                        details={"query": request.query}
+                        details={"query": request.query},
                     )
                 finally:
                     await release_chat_stream_slot(user.tenant_id, user.user_id, active_stream_slot)
@@ -303,31 +333,32 @@ async def chat_endpoint(
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no"
-                }
+                    "X-Accel-Buffering": "no",
+                },
             )
     except Exception:
-        # 若在进入 StreamingResponse 生成器前发生任何非合规拦截异常，立即释放已占用的并发槽位
         await release_chat_stream_slot(user.tenant_id, user.user_id, active_stream_slot)
         raise
 
     async def chat_event_stream() -> AsyncGenerator[str, None]:
         t0 = time.perf_counter()
-        citations = []
-        final_chunks = []
+        citations: List[dict] = []
+        final_chunks: List[dict] = []
+        watched_doc_uuids: List[uuid.UUID] = []
         builder = ThinkingProcessBuilder()
         last_revocation_check = t0
 
         async def _get_auth_error(force: bool = False) -> Optional[str]:
             nonlocal last_revocation_check
             now_mono = time.perf_counter()
-            if not force and (now_mono - last_revocation_check) < 1.0:
+            if not force and (now_mono - last_revocation_check) < 0.8:
                 return None
             last_revocation_check = now_mono
             return await get_session_auth_error(
-                user.user_id,
+                user,
                 token_iat_ms=user.token_iat_ms,
                 token_exp=user.token_exp,
+                watched_doc_ids=watched_doc_uuids or None,
             )
 
         try:
@@ -335,9 +366,11 @@ async def chat_endpoint(
             if auth_error:
                 yield format_sse(auth_error, {"detail": SESSION_AUTH_ERROR_DETAILS[auth_error]})
                 return
+
             graph = get_retrieval_graph()
             latest_state = initial_state
-            # 1. 跑检索图并派发思考流动画帧 (单次遍历 values+custom，彻底杜绝重复跑图延迟)
+            pending_citations_to_emit: Optional[List[dict]] = None
+
             async for mode, chunk in graph.astream(initial_state, stream_mode=["custom", "values"]):
                 auth_error = await _get_auth_error()
                 if auth_error:
@@ -356,37 +389,46 @@ async def chat_endpoint(
                         builder.update_step(chunk["step"])
                         yield format_sse("thinking", builder.to_thinking_process().model_dump())
                     elif chunk.get("type") == "citations" and "citations" in chunk:
-                        citations = chunk["citations"]
-                        yield format_sse("citations", citations)
+                        # 延后至高密审计持久化完成后再下发 citations，确保交付首字节前完成留痕
+                        pending_citations_to_emit = [
+                            {k: v for k, v in c.items() if k != "raw_oss_url"} for c in chunk["citations"]
+                        ]
                 elif mode == "values" and isinstance(chunk, dict):
                     latest_state = chunk
 
             builder.retrieve_ms = int((time.perf_counter() - t0) * 1000)
 
-            # 直接提取最终图状态
             final_chunks = latest_state.get("results") or latest_state.get("final_chunks", [])
-            if not citations:
-                citations = latest_state.get("citations", [])
-                if citations:
-                    yield format_sse("citations", citations)
+            citations = pending_citations_to_emit or [
+                {k: v for k, v in c.items() if k != "raw_oss_url"}
+                for c in (latest_state.get("citations") or [])
+            ]
 
-            # 进入大模型生成前强制复核一次吊销状态，杜绝停用账号继续消耗上游模型 Token
+            used_doc_ids = sorted({str(c["document_id"]) for c in final_chunks if c.get("document_id")})
+            for did in used_doc_ids:
+                try:
+                    watched_doc_uuids.append(uuid.UUID(did))
+                except ValueError:
+                    pass
+
+            # 交付 citations 与大模型首字前：先复核权限版本/自然到期 + 强制落盘 L3/L4 高密访问审计
             auth_error = await _get_auth_error(force=True)
             if auth_error:
-                await record_audit_log(
-                    action="RETRIEVAL_CHAT",
-                    resource_id=request.conversation_id,
-                    duration_ms=int((time.perf_counter() - t0) * 1000),
-                    status="EXPIRED" if auth_error == "auth_expired" else "REVOKED",
-                    error_msg=SESSION_AUTH_ERROR_DETAILS[auth_error],
-                    details={"query": request.query},
-                )
                 yield format_sse(auth_error, {"detail": SESSION_AUTH_ERROR_DETAILS[auth_error]})
                 return
 
-            # 2. 阶段 7~8: 大模型流式问答生成 (分流推理思考与正式解答)
-            full_answer_parts = []
-            full_reasoning_parts = []
+            await _audit_retrieved_high_classification_docs(
+                ctx=user,
+                action="HIGH_CLASSIFICATION_CHAT_READ",
+                final_chunks=final_chunks,
+                query=request.query,
+            )
+
+            if citations:
+                yield format_sse("citations", citations)
+
+            full_answer_parts: List[str] = []
+            full_reasoning_parts: List[str] = []
             async for evt_type, token in stream_answer(request.query, final_chunks, citations):
                 auth_error = await _get_auth_error()
                 if auth_error:
@@ -412,7 +454,7 @@ async def chat_endpoint(
             total_overall_ms = int((time.perf_counter() - t0) * 1000)
             thinking_payload = builder.to_thinking_process(total_overall_ms=total_overall_ms).model_dump()
 
-            # 记录 Assistant 消息 (持久化包含深度思考与检索流水线摘要)
+            # 持久化助手消息，完整保存实际使用的 source_doc_ids（供后续回看与多轮上下文复核）
             if request.conversation_id:
                 try:
                     await chat_store.append_message(
@@ -420,15 +462,15 @@ async def chat_endpoint(
                         "assistant",
                         full_answer,
                         citations=citations,
+                        source_doc_ids=used_doc_ids,
                         reasoning_content=full_reasoning if full_reasoning else None,
                         thinking_process=thinking_payload if thinking_payload else None,
                         tenant_id=user.tenant_id,
-                        user_id=user.user_id
+                        user_id=user.user_id,
                     )
                 except Exception as e:
                     logger.warning(f"记录助手消息失败: {e}")
 
-            # 记录审计日志
             await record_audit_log(
                 action="RETRIEVAL_CHAT",
                 resource_id=request.conversation_id,
@@ -438,15 +480,17 @@ async def chat_endpoint(
                     "query": request.query,
                     "answer_length": len(full_answer),
                     "citations_count": len(citations),
-                }
+                    "source_doc_ids": used_doc_ids,
+                },
             )
 
-            # 3. 派发完成事件
             yield format_sse("done", {
                 "total_overall_ms": total_overall_ms,
-                "total_retrieve_ms": builder.retrieve_ms
+                "total_retrieve_ms": builder.retrieve_ms,
             })
 
+        except HTTPException as http_err:
+            yield format_sse("error", {"error": http_err.detail})
         except Exception as err:
             logger.error(f"问答推流异常: {err}", exc_info=True)
             await record_audit_log(
@@ -454,7 +498,7 @@ async def chat_endpoint(
                 resource_id=request.conversation_id,
                 status="FAILED",
                 error_msg=str(err),
-                details={"query": request.query}
+                details={"query": request.query},
             )
             yield format_sse("error", {"error": str(err)})
         finally:
@@ -466,6 +510,6 @@ async def chat_endpoint(
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
+            "X-Accel-Buffering": "no",
+        },
     )

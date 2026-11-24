@@ -149,6 +149,7 @@ class Settings(BaseSettings):
     MODEL_NAME: str = "deepseek-v4.1-flash"
     LLM_API_BACKEND: str = "responses"
     VLM_REASONING_EFFORT: Optional[str] = "low"
+    VLM_MAX_OUTPUT_TOKENS: int = 128000
 
     @property
     def active_llm_api_backend(self) -> str:

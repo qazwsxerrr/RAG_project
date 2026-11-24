@@ -170,6 +170,7 @@ class TableNode(BaseNode):
             return None
 
         review_items: List[ReviewItem] = []
+        review_asset_oss_map: Dict[str, str] = {}
 
         # 3.1 表格审核项
         for idx, tbl in enumerate(processed_tables):
@@ -183,6 +184,8 @@ class TableNode(BaseNode):
             tbl_img = tbl.image_url or ""
             tbl_key = f"tbl_rev_{tbl.table_id}"
             tbl_proxy = f"/api/v1/documents/{doc_id}/review-items/{tbl_key}/asset" if tbl_img else ""
+            if tbl_img:
+                review_asset_oss_map[tbl_key] = tbl_img
             review_items.append(ReviewItem(
                 item_id=tbl_key,
                 doc_id=doc_id,
@@ -192,7 +195,6 @@ class TableNode(BaseNode):
                 display_page=tbl.display_page,
                 line_number=real_line,
                 asset_url=tbl_proxy,
-                raw_oss_url=tbl_img,
                 raw_content=tbl.html_content or tbl.raw_content,
                 vlm_description=table_text,
                 user_description=table_text,
@@ -213,6 +215,8 @@ class TableNode(BaseNode):
             raw_img = img.get("oss_url", "")
             img_key = f"img_rev_{idx}"
             img_proxy = f"/api/v1/documents/{doc_id}/review-items/{img_key}/asset" if raw_img else ""
+            if raw_img:
+                review_asset_oss_map[img_key] = raw_img
             vlm_desc = img.get("vlm_description") or "图片语义描述"
             review_items.append(ReviewItem(
                 item_id=img_key,
@@ -223,7 +227,6 @@ class TableNode(BaseNode):
                 display_page=img.get("page_idx", 0) + 1,
                 line_number=real_line,
                 asset_url=img_proxy,
-                raw_oss_url=raw_img,
                 raw_content=img.get("alt", ""),
                 vlm_description=vlm_desc,
                 user_description=vlm_desc,
@@ -269,6 +272,7 @@ class TableNode(BaseNode):
         state["processed_code_blocks"] = processed_code_blocks
         state["processed_mermaid_flowcharts"] = processed_mermaid_flowcharts
         state["pending_reviews"] = [item.model_dump() for item in review_items]
+        state["review_asset_oss_map"] = review_asset_oss_map
         state["overall_status"] = IngestStatus.TABLE.value
 
         if writer and callable(writer):

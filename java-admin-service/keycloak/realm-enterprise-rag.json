@@ -16,7 +16,41 @@
       "subGroups": [
         { "name": "admin", "path": "/roles/admin" },
         { "name": "developer", "path": "/roles/developer" },
-        { "name": "accountant", "path": "/roles/accountant" }
+        { "name": "accountant", "path": "/roles/accountant" },
+        { "name": "employee", "path": "/roles/employee" },
+        { "name": "kb_admin", "path": "/roles/kb_admin" },
+        { "name": "security_admin", "path": "/roles/security_admin" },
+        { "name": "dept_manager", "path": "/roles/dept_manager" },
+        { "name": "executive", "path": "/roles/executive" }
+      ]
+    },
+    {
+      "name": "corp",
+      "path": "/corp",
+      "subGroups": [
+        {
+          "name": "总公司",
+          "path": "/corp/总公司",
+          "subGroups": [
+            {
+              "name": "研发中心",
+              "path": "/corp/总公司/研发中心",
+              "subGroups": [
+                { "name": "技术部", "path": "/corp/总公司/研发中心/技术部" },
+                { "name": "产品部", "path": "/corp/总公司/研发中心/产品部" }
+              ]
+            },
+            {
+              "name": "职能中心",
+              "path": "/corp/总公司/职能中心",
+              "subGroups": [
+                { "name": "人事行政部", "path": "/corp/总公司/职能中心/人事行政部" },
+                { "name": "财务部", "path": "/corp/总公司/职能中心/财务部" }
+              ]
+            },
+            { "name": "总裁办", "path": "/corp/总公司/总裁办" }
+          ]
+        }
       ]
     }
   ],
@@ -66,6 +100,35 @@
           }
         },
         {
+          "name": "dept_paths",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "dept_paths",
+            "claim.name": "dept_paths",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "position_code",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "position_code",
+            "claim.name": "position_code",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
           "name": "groups",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-group-membership-mapper",
@@ -81,48 +144,5 @@
       ]
     }
   ],
-  "users": [
-    {
-      "username": "admin",
-      "enabled": true,
-      "emailVerified": true,
-      "firstName": "系统",
-      "lastName": "管理员",
-      "email": "admin@corp.local",
-      "attributes": { "dept_path": ["/"] },
-      "groups": ["/roles/admin"],
-      "requiredActions": [],
-      "credentials": [
-        { "type": "password", "value": "Rag@123456", "temporary": false }
-      ]
-    },
-    {
-      "username": "developer",
-      "enabled": true,
-      "emailVerified": true,
-      "firstName": "张",
-      "lastName": "工",
-      "email": "developer@corp.local",
-      "attributes": { "dept_path": ["/总公司/研发中心/技术部"] },
-      "groups": ["/roles/developer"],
-      "requiredActions": [],
-      "credentials": [
-        { "type": "password", "value": "Rag@123456", "temporary": false }
-      ]
-    },
-    {
-      "username": "accountant",
-      "enabled": true,
-      "emailVerified": true,
-      "firstName": "王",
-      "lastName": "会计",
-      "email": "accountant@corp.local",
-      "attributes": { "dept_path": ["/总公司/职能中心/财务部"] },
-      "groups": ["/roles/accountant"],
-      "requiredActions": [],
-      "credentials": [
-        { "type": "password", "value": "Rag@123456", "temporary": false }
-      ]
-    }
-  ]
+  "users": []
 }

@@ -1,18 +1,21 @@
-"""src/rag_kb/graph/state.py —— 定义入库流水线的状态契约 IngestState 及默认状态工厂。
+"""src/rag_kb/graph/state.py —— 定义入库流水线的状态契约 IngestState 及默认状态工厂。"""
 
-用 TypedDict 声明图上流转的全部字段（标识、元数据、阶段产物、中间结果、控制状态），
-并给出 INGEST_DEFAULT_STATE 与 get_default_state()，供各节点、build.py 与 API 层构造初始状态。
-"""
-
-import copy
 import uuid
 from typing import Any, Dict, List, Optional, TypedDict
 from rag_kb.core.constants import IngestStatus, STEP_NAMES
 
+
 class IngestState(TypedDict):
-    """入库流水线 LangGraph 全局流转状态契约"""
-    # 基础文档标识与元数据
+    """入库流水线 LangGraph 全局流转状态契约（含多维权限元数据）"""
+    # 基础文档标识与多维权限元数据
     doc_id: str
+    tenant_id: str
+    kb_id: Optional[str]
+    kb_name: Optional[str]
+    classification_level: Optional[int]
+    created_by: Optional[str]
+    uploader_clearance: Optional[int]
+
     file_name: str
     file_bytes: Optional[bytes]
     temp_file_path: Optional[str]
@@ -44,6 +47,7 @@ class IngestState(TypedDict):
     processed_code_blocks: List[Any]
     processed_mermaid_flowcharts: List[Any]
     pending_reviews: List[Dict[str, Any]]
+    review_asset_oss_map: Dict[str, str]
     review_results: Optional[Any]
 
     # 阶段 8: 描述回填增强 Markdown
@@ -64,16 +68,23 @@ class IngestState(TypedDict):
     force_overwrite: Optional[bool]
     dedup_res: Optional[Dict[str, Any]]
 
+
 def get_default_state(
     file_name: str,
     doc_id: Optional[str] = None,
     file_bytes: Optional[bytes] = None,
     temp_file_path: Optional[str] = None,
     source_url: Optional[str] = None,
-    department: str = "技术部",
+    department: str = "/总公司/研发中心/技术部",
     category: str = "技术规范",
     tags: Optional[List[str]] = None,
-    skip_review: bool = False
+    skip_review: bool = False,
+    tenant_id: str = "default_tenant",
+    kb_id: Optional[str] = None,
+    kb_name: Optional[str] = None,
+    classification_level: Optional[int] = None,
+    created_by: Optional[str] = None,
+    uploader_clearance: Optional[int] = None,
 ) -> IngestState:
     """构造初始入库流水线状态字典"""
     actual_doc_id = doc_id or str(uuid.uuid4())
@@ -83,7 +94,7 @@ def get_default_state(
             "name": name,
             "status": "waiting",
             "duration_ms": 0,
-            "error": None
+            "error": None,
         }
         for i, name in enumerate(STEP_NAMES)
     ]
@@ -92,6 +103,13 @@ def get_default_state(
 
     state: IngestState = {
         "doc_id": actual_doc_id,
+        "tenant_id": tenant_id or "default_tenant",
+        "kb_id": str(kb_id) if kb_id else None,
+        "kb_name": kb_name,
+        "classification_level": int(classification_level) if classification_level is not None else None,
+        "created_by": created_by,
+        "uploader_clearance": int(uploader_clearance) if uploader_clearance is not None else None,
+
         "file_name": file_name,
         "file_bytes": file_bytes,
         "temp_file_path": temp_file_path,
@@ -118,6 +136,7 @@ def get_default_state(
         "processed_code_blocks": [],
         "processed_mermaid_flowcharts": [],
         "pending_reviews": [],
+        "review_asset_oss_map": {},
         "review_results": None,
 
         "enhanced_md_content": None,

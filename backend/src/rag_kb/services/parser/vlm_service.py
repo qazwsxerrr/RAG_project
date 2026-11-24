@@ -19,19 +19,20 @@ class MultimodalVLMService:
     def _call_gateway(
         self,
         messages: List[Dict[str, Any]],
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         temperature: float = 0.1,
         action_name: str = "多模态视觉 API",
         backend: Optional[str] = None
     ) -> str:
         """统一通过全局弹性大模型网关执行同步推理，遇到主节点故障自动切换至可用候选节点"""
         try:
+            eff_max_tokens = max_tokens if max_tokens is not None else max(1, int(settings.VLM_MAX_OUTPUT_TOKENS))
             extra_kwargs: Dict[str, Any] = {}
             if settings.VLM_REASONING_EFFORT and settings.VLM_REASONING_EFFORT.strip():
                 extra_kwargs["reasoning_effort"] = settings.VLM_REASONING_EFFORT.strip()
             content = llm_gateway.chat_sync(
                 messages=messages,
-                max_tokens=max_tokens,
+                max_tokens=eff_max_tokens,
                 temperature=temperature,
                 backend=backend,
                 **extra_kwargs
@@ -74,7 +75,7 @@ class MultimodalVLMService:
                 ],
             }
         ]
-        content = self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="多模态视觉 API")
+        content = self._call_gateway(messages, temperature=0.1, action_name="多模态视觉 API")
         return self._strip_heading_hashes(content)
 
     def describe_flowchart(self, image_url_or_path: str, context: Dict[str, Any]) -> str:
@@ -104,7 +105,7 @@ class MultimodalVLMService:
                 ],
             }
         ]
-        content = self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="多模态流程图 API")
+        content = self._call_gateway(messages, temperature=0.1, action_name="多模态流程图 API")
         return self._strip_heading_hashes(content)
 
     def describe_table(self, table_content: str, context: Dict[str, Any], table_image_url: Optional[str] = None) -> str:
@@ -159,7 +160,7 @@ class MultimodalVLMService:
             content_payload.append({"type": "image_url", "image_url": {"url": formatted_url}})
 
         messages = [{"role": "user", "content": content_payload}]
-        return self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="表格描述 API")
+        return self._call_gateway(messages, temperature=0.1, action_name="表格描述 API")
 
     def describe_code(self, code_content: str, language: str, context: Dict[str, Any]) -> str:
         """调用大模型对代码块进行深度语义理解与业务逻辑提取"""
@@ -182,7 +183,7 @@ class MultimodalVLMService:
 - 纯文本直接输出技术事实，保持语言紧凑精炼。
 """
         messages = [{"role": "user", "content": prompt}]
-        content = self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="代码块语义解析 API")
+        content = self._call_gateway(messages, temperature=0.1, action_name="代码块语义解析 API")
         return self._strip_heading_hashes(content)
 
     def describe_flowchart_text(self, mermaid_code: str, context: Dict[str, Any]) -> str:
@@ -207,7 +208,7 @@ class MultimodalVLMService:
 - 纯文本直接陈述流转事实，保持高信息密度与语言紧凑。
 """
         messages = [{"role": "user", "content": prompt}]
-        content = self._call_gateway(messages, max_tokens=4096, temperature=0.1, action_name="流程图语义解析 API")
+        content = self._call_gateway(messages, temperature=0.1, action_name="流程图语义解析 API")
         return self._strip_heading_hashes(content)
 
     def _format_image_payload(self, image_url_or_path: str) -> str:

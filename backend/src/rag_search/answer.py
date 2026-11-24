@@ -7,6 +7,7 @@
 
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from rag_kb.core.authz.models import format_kb_full_path
 from rag_kb.core.config import settings
 from rag_kb.core.llm import llm_gateway
 from rag_kb.core.security import validate_prompt_security, default_stream_moderator
@@ -26,10 +27,14 @@ def build_generation_prompts(
         doc_title = chunk.get("document_title", "知识库文档")
         page_idx = chunk.get("page_idx", 0)
         chunk_label = chunk.get("chunk_label", f"第 {cit_id} 片")
+        kb_full_path = chunk.get("kb_full_path") or format_kb_full_path(
+            chunk.get("department_path"), chunk.get("kb_name")
+        )
+        kb_attr = f"归属：{kb_full_path} | " if kb_full_path else ""
         content = chunk.get("content", "")
 
         materials.append(
-            f"[{cit_id}] 文档：《{doc_title}》| 页码：第 {page_idx + 1} 页 | 标签：{chunk_label}\n"
+            f"[{cit_id}] {kb_attr}文档：《{doc_title}》| 页码：第 {page_idx + 1} 页 | 标签：{chunk_label}\n"
             f"内容：\n{content}\n"
         )
 

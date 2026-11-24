@@ -85,9 +85,18 @@
               @load="imageLoadError = false"
             />
             <div v-else-if="!imageLoadError" class="text-xs text-slate-400 py-8">正在安全加载切图...</div>
-            <div v-if="imageLoadError" class="text-xs text-amber-600 flex items-center gap-1.5 py-8">
-              <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-              <span>图片加载失败，请检查服务连接</span>
+            <div v-if="imageLoadError" class="text-xs text-amber-700 flex flex-col items-center gap-2 py-6 text-center">
+              <div class="flex items-center gap-1.5">
+                <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <span>{{ imageErrorMsg || '图片加载失败，请检查服务连接' }}</span>
+              </div>
+              <button
+                type="button"
+                @click="retryCurrentAsset"
+                class="px-3 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-800 text-[11px] font-medium cursor-pointer"
+              >
+                重试加载
+              </button>
             </div>
           </div>
           <div v-else class="text-xs text-slate-400 italic p-3 bg-slate-50 rounded-lg">
@@ -192,8 +201,10 @@ const props = withDefaults(defineProps<{
   docId: string;
   items: ReviewItem[];
   initialIndex?: number;
+  submitting?: boolean;
 }>(), {
-  initialIndex: 0
+  initialIndex: 0,
+  submitting: false,
 });
 
 const emit = defineEmits<{
@@ -204,8 +215,9 @@ const emit = defineEmits<{
 const currentIndex = ref(0);
 const editableDescriptions = ref<Record<string, string>>({});
 const remarks = ref<Record<string, string>>({});
-const submitting = ref(false);
 const imageLoadError = ref(false);
+const imageErrorMsg = ref('');
+let loadSeq = 0;
 const blobCache = createSecureBlobCache();
 
 const currentItem = computed(() => {
@@ -214,15 +226,30 @@ const currentItem = computed(() => {
 
 const currentBlobUrl = computed(() => blobCache.getUrl(currentItem.value?.asset_url));
 
-const loadCurrentAsset = async () => {
+const loadCurrentAsset = async (forceRetry = false) => {
+  const mySeq = ++loadSeq;
   imageLoadError.value = false;
+  imageErrorMsg.value = '';
   const targetUrl = currentItem.value?.asset_url;
   if (!props.visible || !targetUrl) return;
   try {
-    await blobCache.ensureLoaded(targetUrl);
-  } catch {
+    const objUrl = forceRetry
+      ? await blobCache.retry(targetUrl)
+      : await blobCache.ensureLoaded(targetUrl);
+    if (mySeq !== loadSeq) return;
+    if (!objUrl) {
+      imageLoadError.value = true;
+      imageErrorMsg.value = '图片加载已中止，请点击重试';
+    }
+  } catch (err: any) {
+    if (mySeq !== loadSeq) return;
     imageLoadError.value = true;
+    imageErrorMsg.value = err?.message || '图片加载失败，请检查服务连接';
   }
+};
+
+const retryCurrentAsset = () => {
+  void loadCurrentAsset(true);
 };
 
 watch(
@@ -272,7 +299,7 @@ const handleCancel = () => {
 };
 
 const handleConfirm = () => {
-  submitting.value = true;
+  if (props.submitting) return;
   const payload = props.items.map((item) => ({
     item_id: item.item_id,
     user_description: editableDescriptions.value[item.item_id] || item.vlm_description || '',
@@ -280,6 +307,5 @@ const handleConfirm = () => {
     approved: true,
   }));
   emit('confirm', payload);
-  submitting.value = false;
 };
 </script>

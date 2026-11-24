@@ -1,7 +1,7 @@
 <template>
   <div class="retrieval-chat-view h-full flex flex-col overflow-hidden relative select-none">
-    <!-- 顶部控制栏：左侧会话标题，右侧平铺部门/分类/场景分段/HyDE 假想开关与删除会话 -->
-    <header class="min-h-14 border-b border-slate-200/80 bg-white px-4 sm:px-5 py-1.5 flex flex-wrap items-center justify-between shrink-0 z-10 gap-x-3 gap-y-1.5">
+    <!-- 顶部控制栏：左侧会话标题，右侧知识库多选、分类、场景与 HyDE -->
+    <header class="min-h-14 border-b border-slate-200/80 bg-white px-4 sm:px-5 py-1.5 flex flex-wrap items-center justify-between shrink-0 z-20 gap-x-3 gap-y-1.5">
       <div class="flex items-center space-x-2.5 min-w-0 shrink-0">
         <button
           v-if="openMobileMenu"
@@ -12,7 +12,7 @@
           <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
         </button>
         <h2 class="text-sm font-bold text-slate-900 tracking-tight truncate max-w-[160px] sm:max-w-[220px]" :title="chatStore.currentSession?.title">
-          {{ chatStore.currentSession?.title || '知识问答' }}
+          {{ (chatStore.currentSession?.messages?.length ? chatStore.currentSession.title : '') || '知识问答' }}
         </h2>
         <span class="hidden sm:inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-400 shrink-0">
           <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
@@ -20,21 +20,64 @@
         </span>
       </div>
 
-      <!-- 右侧控制区：恢复顶部平铺部门、分类、检索场景与 HyDE 假想开关（移除重复的员工胶囊以保证笔记本视口不拥挤） -->
-      <div class="flex items-center flex-wrap sm:flex-nowrap gap-2 text-xs overflow-x-auto max-w-full py-0.5">
-        <!-- 部门范围选择器 -->
-        <div class="flex items-center gap-1.5 shrink-0 whitespace-nowrap">
-          <span class="text-slate-500 font-medium text-xs select-none">部门:</span>
-          <select
-            v-model="selectedDeptPath"
-            class="h-7 px-2 bg-slate-100 hover:bg-slate-200/70 text-slate-800 font-medium text-xs rounded-md outline-none border border-slate-200/80 cursor-pointer transition-colors max-w-[140px]"
-            title="限定检索部门范围"
+      <!-- 右侧控制区 -->
+      <div class="flex items-center flex-wrap sm:flex-nowrap gap-2 text-xs max-w-full py-0.5">
+        <!-- 知识库多选器（由 /api/v1/knowledge-bases?action=READ 实时驱动） -->
+        <div class="relative shrink-0" ref="kbDropdownRef">
+          <button
+            type="button"
+            @click="kbDropdownOpen = !kbDropdownOpen"
+            class="h-7 px-2.5 bg-slate-100 hover:bg-slate-200/70 text-slate-800 font-medium text-xs rounded-md border border-slate-200/80 cursor-pointer transition-colors flex items-center gap-1.5 max-w-[220px]"
+            title="选择参与本次问答检索的知识库（不勾选则默认检索全部有权读取的知识库）"
           >
-            <option value="">{{ isFullScope ? '全部部门' : '授权范围默认' }}</option>
-            <option v-for="d in visibleDepartments" :key="d.id" :value="d.path">
-              {{ d.name }}
-            </option>
-          </select>
+            <svg class="w-3.5 h-3.5 text-slate-500 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            <span class="truncate">{{ kbSelectorLabel }}</span>
+            <svg class="w-3 h-3 text-slate-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+
+          <!-- 分组知识库下拉面板 -->
+          <div
+            v-if="kbDropdownOpen"
+            class="absolute left-0 md:left-auto md:right-0 mt-1.5 w-80 max-w-[calc(100vw-2rem)] max-h-96 overflow-y-auto bg-white rounded-xl shadow-xl border border-slate-200 p-2.5 z-50 space-y-2"
+          >
+            <div class="flex items-center justify-between px-1 pb-1.5 border-b border-slate-100">
+              <span class="text-[11px] font-semibold text-slate-600">限定检索知识库（可多选）</span>
+              <button
+                v-if="selectedKbIds.length > 0"
+                type="button"
+                @click="selectedKbIds = []"
+                class="text-[11px] text-blue-600 hover:text-blue-800 cursor-pointer"
+              >
+                恢复默认全部
+              </button>
+            </div>
+
+            <div v-if="readableKbs.length === 0" class="py-4 text-center text-slate-400 text-xs">
+              暂无已授权知识库
+            </div>
+
+            <template v-for="group in kbGroups" :key="group.key">
+              <div v-if="group.items.length > 0" class="space-y-1">
+                <div class="px-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">{{ group.label }}</div>
+                <label
+                  v-for="kb in group.items"
+                  :key="kb.id"
+                  class="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer transition-colors"
+                >
+                  <input
+                    type="checkbox"
+                    :value="kb.id"
+                    v-model="selectedKbIds"
+                    class="rounded border-slate-300 text-blue-600 focus:ring-0 w-3.5 h-3.5 cursor-pointer shrink-0"
+                  />
+                  <div class="min-w-0 flex-1">
+                    <div class="text-xs font-medium text-slate-800 truncate">{{ kb.name }}</div>
+                    <div class="text-[10px] text-slate-400 font-mono truncate">{{ kb.owner_dept_path }}</div>
+                  </div>
+                </label>
+              </div>
+            </template>
+          </div>
         </div>
 
         <div class="hidden sm:block h-4 w-px bg-slate-200 shrink-0"></div>
@@ -99,14 +142,14 @@
       class="flex-1 overflow-y-auto px-4 sm:px-8 py-6 space-y-6 select-text bg-[#FAFBFD]"
     >
       <div class="max-w-3xl mx-auto w-full pb-4">
-        <!-- 权限或频率提示横幅（仅在非对话消息类全局拦截时展示） -->
+        <!-- 权限或频率提示横幅 -->
         <div
           v-if="authStore.interceptAlert"
           class="mb-5 p-3.5 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-3 shadow-sm"
         >
           <svg class="w-4 h-4 text-amber-600 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           <div class="flex-1 text-xs text-amber-900 space-y-1">
-            <div class="font-semibold">暂无该部门访问权限或操作受限</div>
+            <div class="font-semibold">权限校验拦截提示</div>
             <div class="text-amber-800 leading-relaxed break-all">{{ authStore.interceptAlert }}</div>
           </div>
           <button
@@ -127,7 +170,7 @@
             <circle cx="12" cy="12" r="10" stroke-opacity="0.25" stroke="currentColor" fill="none"/>
             <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
           </svg>
-          <span class="text-xs text-slate-400 font-medium">正在加载对话历史...</span>
+          <span class="text-xs text-slate-400 font-medium">正在加载已复核的对话历史...</span>
         </div>
 
         <!-- 空状态欢迎区域 -->
@@ -140,9 +183,12 @@
           </div>
           <div class="space-y-1">
             <h3 class="text-sm font-bold text-slate-800">企业级多模态知识问答</h3>
+            <p v-if="authStore.currentUser" class="text-[11px] text-slate-400">
+              当前授权范围：{{ readableKbs.length }} 个知识库 · 密级上限 L{{ authStore.currentUser.clearance_level }}
+            </p>
           </div>
 
-          <!-- 基于当前员工可见文档动态生成的示例提问 -->
+          <!-- 示例提问 -->
           <div v-if="samplePrompts.length > 0" class="flex flex-wrap items-center justify-center gap-2 pt-1">
             <button
               v-for="prompt in samplePrompts"
@@ -165,7 +211,7 @@
       </div>
     </div>
 
-    <!-- 底部纯净输入栏（Flex 自然置底，不遮挡消息流末尾的参考来源） -->
+    <!-- 底部输入栏 -->
     <div class="shrink-0 bg-[#FAFBFD] px-4 pb-5 pt-2 z-10">
       <div class="max-w-2xl mx-auto w-full">
         <div class="w-full bg-white rounded-xl shadow-lg border border-slate-200 p-2 pl-3.5 flex items-center gap-2 transition-all focus-within:border-slate-400">
@@ -216,9 +262,10 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onUnmounted, inject } from 'vue';
 import { useChatStore } from '../stores/chat';
-import { useAuthStore } from '../stores/auth';
+import { useAuthStore, isTokenExpired } from '../stores/auth';
 import { useDocumentStore } from '../stores/document';
-import type { CitationSource, DocumentItem } from '../types';
+import { accessControlApi } from '../api/accessControl';
+import type { AccessibleKnowledgeBase, CitationSource, DocumentItem } from '../types';
 import ChatMessage from '../components/retrieval/ChatMessage.vue';
 import CitationModal from '../components/retrieval/CitationModal.vue';
 
@@ -230,30 +277,38 @@ const openMobileMenu = inject<(() => void) | undefined>('openMobileMenu', undefi
 const inputQuery = ref('');
 const inputRef = ref<HTMLTextAreaElement | null>(null);
 const messageContainerRef = ref<HTMLElement | null>(null);
+const kbDropdownRef = ref<HTMLElement | null>(null);
 
 const sceneType = ref('general');
 const enableHyde = ref(false);
 
-const selectedDeptPath = ref('');
+const readableKbs = ref<AccessibleKnowledgeBase[]>([]);
+const selectedKbIds = ref<string[]>([]);
+const kbDropdownOpen = ref(false);
 const selectedCategory = ref('全部');
 
-const isFullScope = computed(() => {
-  const u = authStore.currentUser;
-  return Boolean(u && (u.data_scope === 'ALL' || u.dept_path === '/'));
-});
+const kbGroups = computed(() => [
+  {
+    key: 'PUBLIC',
+    label: '公共知识库',
+    items: readableKbs.value.filter((k) => k.visibility === 'PUBLIC'),
+  },
+  {
+    key: 'DEPARTMENT',
+    label: '部门知识库',
+    items: readableKbs.value.filter((k) => k.visibility !== 'PUBLIC'),
+  },
+]);
 
-const isDeptAllowed = (deptPath: string): boolean => {
-  const u = authStore.currentUser;
-  if (!u) return true;
-  if (u.data_scope === 'ALL' || u.dept_path === '/') return true;
-  const target = deptPath.replace(/\/+$/, '') || '/';
-  if (target === '/public') return true;
-  const prefix = u.dept_path.replace(/\/+$/, '');
-  return target === prefix || target.startsWith(prefix + '/');
-};
-
-const visibleDepartments = computed(() => {
-  return documentStore.departments.filter((d) => d.path && d.path !== '/' && isDeptAllowed(d.path));
+const kbSelectorLabel = computed(() => {
+  if (selectedKbIds.value.length === 0) {
+    return `全部授权库 (${readableKbs.value.length})`;
+  }
+  if (selectedKbIds.value.length === 1) {
+    const found = readableKbs.value.find((k) => k.id === selectedKbIds.value[0]);
+    return found ? found.name : '已选 1 个知识库';
+  }
+  return `已选 ${selectedKbIds.value.length} 个知识库`;
 });
 
 const categoryList = computed(() => {
@@ -266,23 +321,37 @@ const categoryList = computed(() => {
   return Array.from(catSet);
 });
 
+const handleDocumentClickOutside = (event: MouseEvent) => {
+  if (!kbDropdownOpen.value) return;
+  const target = event.target as Node | null;
+  if (kbDropdownRef.value && target && !kbDropdownRef.value.contains(target)) {
+    kbDropdownOpen.value = false;
+  }
+};
+
 onMounted(async () => {
+  document.addEventListener('click', handleDocumentClickOutside);
   authStore.interceptAlert = '';
   try {
-    await authStore.initAuth();
+    if (!authStore.token || isTokenExpired(authStore.token)) {
+      await authStore.refreshToken();
+    }
   } catch (err) {
     console.error('初始化员工身份失败:', err);
   }
 
   try {
-    await chatStore.initSessions();
+    readableKbs.value = await accessControlApi.listAccessibleKnowledgeBases('READ');
+  } catch (err) {
+    console.warn('加载授权知识库目录失败:', err);
+  }
+
+  try {
+    await chatStore.initSessions(true);
   } catch (err) {
     console.error('初始化云端会话列表失败:', err);
   }
 
-  if (documentStore.departments.length === 0) {
-    await documentStore.fetchDepartments();
-  }
   if (documentStore.documents.length === 0) {
     try {
       await documentStore.fetchDocuments();
@@ -302,33 +371,37 @@ const citationModalVisible = ref(false);
 const activeCitation = ref<CitationSource | null>(null);
 
 const samplePrompts = computed(() => {
-  const deptPath = authStore.currentUser?.dept_path || '';
-  // 针对不同部门员工，提供自然业务检索问题 + 1 条跨部门权限边界验证问题（不点名具体文件、不套书名号）
-  if (deptPath.includes('财务')) {
+  const deptPaths = authStore.currentUser?.dept_paths || [];
+  const joined = deptPaths.join(',');
+  if (joined.includes('财务')) {
     return [
-      '高管年终绩效奖金的分配基准系数与发放流程是什么？',
-      '单项研发外包合同超过多少金额需要附带 ROI 测算报告？',
-      '大额差旅与业务招待支出有哪些双签核准要求？',
-      '微服务网关熔断器的超时阈值和恢复窗口是多少？（跨部门权限验证）',
+      '公司弹性打卡窗口和一线城市差旅住宿标准是多少？',
+      '业财一体化报销凭证自动入账与对账核销规范有哪些要求？',
+      '公司差旅报销审批流程及费用发票合规标准是什么？',
     ];
   }
-  if (deptPath.includes('技术') || deptPath.includes('研发')) {
+  if (joined.includes('人事') || joined.includes('行政')) {
     return [
-      '微服务网关熔断隔离的触发条件与跨机房容灾 RTO 指标是多少？',
-      '新服务上线时金丝雀灰度发布的流量分流比例和观察时长怎么规定？',
-      'RAG 架构从传统线性检索到模块化演进的核心阶段有哪些？',
-      '2026 年度高管年终绩效奖金分配基准系数是多少？（跨部门权限验证）',
+      '公司弹性打卡窗口和一线城市差旅住宿标准是多少？',
+      '员工考勤请假与加班调休审批有哪些规定？',
+      '公司入职引导与日常办公行政支持流程是什么？',
+    ];
+  }
+  if (joined.includes('技术') || joined.includes('研发')) {
+    return [
+      '公司弹性打卡窗口和一线城市差旅住宿标准是多少？',
+      '技术部生产灰度发布窗口和微服务限流阈值有哪些规定？',
+      '业财一体化报销凭证自动入账的回调签名算法与对账 SLA 是什么？',
+      '技术部年度 H800 算力集群采购预算是多少？',
     ];
   }
   return [
-    '微服务网关熔断隔离的触发条件与跨机房容灾 RTO 指标是多少？',
-    '2026 年度高管年终绩效奖金的分配基准系数与审批流程是什么？',
-    'RAG 架构从传统线性检索到模块化演进的核心阶段有哪些？',
-    '单项技术研发外包合同达到什么标准需要提交财务 ROI 测算？',
+    '公司弹性打卡窗口和一线城市差旅住宿标准是多少？',
+    '公司年度重点工作规范与跨部门协作流程有哪些？',
+    '员工日常办公制度与合规注意事项有哪些？',
   ];
 });
 
-// 智能贴底滚动状态：用户主动上滑阅读前文时不强夺滚动条
 const isNearBottom = ref(true);
 let scrollRafId: number | null = null;
 
@@ -363,6 +436,7 @@ const handleSend = async () => {
   if (!q || chatStore.isGenerating) return;
 
   authStore.interceptAlert = '';
+  kbDropdownOpen.value = false;
   inputQuery.value = '';
   isNearBottom.value = true;
   scrollToBottom(true);
@@ -370,7 +444,7 @@ const handleSend = async () => {
   await chatStore.sendMessage(q, {
     scene_type: sceneType.value,
     enable_hyde: enableHyde.value,
-    department_scope: selectedDeptPath.value ? [selectedDeptPath.value] : undefined,
+    kb_ids: selectedKbIds.value.length > 0 ? [...selectedKbIds.value] : undefined,
     category_scope: selectedCategory.value !== '全部' ? selectedCategory.value : undefined,
   });
 
@@ -404,6 +478,7 @@ watch(
 );
 
 onUnmounted(() => {
+  document.removeEventListener('click', handleDocumentClickOutside);
   if (scrollRafId !== null) {
     cancelAnimationFrame(scrollRafId);
   }

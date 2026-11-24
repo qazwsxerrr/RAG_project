@@ -24,6 +24,11 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 import java.time.Duration;
 
+/**
+ * 企业 OIDC 认证网关安全配置：
+ * 仅负责 OIDC 登录回调、RS256 cv=2 令牌签发、JWKS 公钥发布与内部模型密钥租约；
+ * 知识库与 ACL 治理控制面统一收拢至 Python FastAPI 单一策略引擎。
+ */
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
@@ -48,7 +53,7 @@ public class SecurityConfig {
     @Bean
     public OidcUserService oidcUserService() {
         OidcUserService service = new OidcUserService();
-        // 换票刷新时强制从标准 OIDC UserInfo 端点拉取最新部门与角色组声明
+        // 换票刷新时强制从标准 OIDC UserInfo 端点拉取最新多部门与角色组声明
         service.setRetrieveUserInfo(req -> {
             String uri = req.getClientRegistration().getProviderDetails().getUserInfoEndpoint().getUri();
             return uri != null && !uri.isBlank();
@@ -56,6 +61,9 @@ public class SecurityConfig {
         return service;
     }
 
+    /**
+     * OIDC Session 登录、换票、登出、JWKS 与内部密钥租约安全链
+     */
     @Bean
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
@@ -64,16 +72,13 @@ public class SecurityConfig {
         ClientRegistrationRepository repo = clientRegistrationRepositoryProvider.getIfAvailable();
 
         http
-                // 彻底关闭表单登录与 HttpBasic，杜绝自研登录页 (§2.2)
                 .formLogin(AbstractHttpConfigurer::disable)
                 .httpBasic(AbstractHttpConfigurer::disable)
-                // 仅针对 API 换票端点、登出与内部服务端点关闭 CSRF
                 .csrf(csrf -> csrf.ignoringRequestMatchers(
                         "/api/admin/auth/token",
                         "/api/admin/internal/**",
                         "/api/admin/auth/logout"
                 ))
-                // 接入企业 OIDC 客户端流程：强制开启 S256 PKCE，认证成功后跳回前端 /auth/callback (§2.2)
                 .oauth2Login(oauth2 -> {
                     if (repo != null) {
                         oauth2.authorizationEndpoint(authEndpoint ->
@@ -82,7 +87,6 @@ public class SecurityConfig {
                     }
                     oauth2.defaultSuccessUrl("/auth/callback", true);
                 })
-                // 会话登出端点 (§2.5)
                 .logout(logout -> logout
                         .logoutUrl("/api/admin/auth/logout")
                         .invalidateHttpSession(true)
@@ -90,14 +94,12 @@ public class SecurityConfig {
                         .deleteCookies("JSESSIONID")
                         .logoutSuccessHandler(new HttpStatusReturningLogoutSuccessHandler(HttpStatus.OK))
                 )
-                // API 请求未认证时返回 401 状态码，避免重定向至 SSO 登录页
                 .exceptionHandling(ex -> ex
                         .defaultAuthenticationEntryPointFor(
                                 new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED),
                                 request -> request.getServletPath().startsWith("/api/")
                         )
                 )
-                // 显式白名单与 denyAll 铁律 (§2.6)
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/.well-known/jwks.json").permitAll()
                         .requestMatchers("/oauth2/**", "/login/oauth2/**").permitAll()

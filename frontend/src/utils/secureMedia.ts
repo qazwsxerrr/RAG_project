@@ -8,7 +8,8 @@ import { documentsApi } from '../api/documents';
  */
 export async function fetchAuthorizedObjectUrl(
   url: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  timeoutMs: number = 15000
 ): Promise<string> {
   const authStore = useAuthStore();
   let currentToken = authStore.token;
@@ -16,11 +17,39 @@ export async function fetchAuthorizedObjectUrl(
     currentToken = await authStore.refreshToken();
   }
 
-  const doFetch = (tk: string) =>
-    fetch(url, {
-      headers: { Authorization: `Bearer ${tk}` },
-      signal,
-    });
+  const doFetch = async (tk: string) => {
+    const reqController = new AbortController();
+    let timedOut = false;
+    const onExternalAbort = () => reqController.abort();
+    if (signal) {
+      if (signal.aborted) {
+        reqController.abort();
+      } else {
+        signal.addEventListener('abort', onExternalAbort, { once: true });
+      }
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reqController.abort();
+    }, timeoutMs);
+
+    try {
+      return await fetch(url, {
+        headers: { Authorization: `Bearer ${tk}` },
+        signal: reqController.signal,
+      });
+    } catch (err: any) {
+      if (timedOut) {
+        throw new Error('加载超时，请点击重试或检查后端服务连接');
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      if (signal) {
+        signal.removeEventListener('abort', onExternalAbort);
+      }
+    }
+  };
 
   let resp = await doFetch(currentToken);
   if (resp.status === 401) {
@@ -44,12 +73,21 @@ export async function fetchAuthorizedObjectUrl(
 }
 
 /**
- * 组件级受控图片 ObjectURL 缓存池：按源 URL 去重并发拉取，卸载或翻页时一键释放全部 Blob 内存。
+ * 组件级受控图片 ObjectURL 缓存池：按源 URL 去重并发拉取，记录失败状态并支持一键释放全部 Blob 内存。
  */
 export function createSecureBlobCache() {
   const blobMap = ref<Record<string, string>>({});
+  const errorMap = ref<Record<string, string>>({});
   const inflight = new Map<string, Promise<string>>();
   let activeController = new AbortController();
+
+  const clearError = (rawUrl: string) => {
+    if (errorMap.value[rawUrl]) {
+      const next = { ...errorMap.value };
+      delete next[rawUrl];
+      errorMap.value = next;
+    }
+  };
 
   const ensureLoaded = (rawUrl?: string | null): Promise<string> => {
     if (!rawUrl || !rawUrl.startsWith('/api/')) {
@@ -63,6 +101,7 @@ export function createSecureBlobCache() {
       return existing;
     }
 
+    clearError(rawUrl);
     const controller = activeController;
     const p = fetchAuthorizedObjectUrl(rawUrl, controller.signal)
       .then((objUrl) => {
@@ -70,8 +109,18 @@ export function createSecureBlobCache() {
           URL.revokeObjectURL(objUrl);
           return '';
         }
+        clearError(rawUrl);
         blobMap.value = { ...blobMap.value, [rawUrl]: objUrl };
         return objUrl;
+      })
+      .catch((err: any) => {
+        if (!controller.signal.aborted && err?.name !== 'AbortError') {
+          errorMap.value = {
+            ...errorMap.value,
+            [rawUrl]: err?.message || '图片加载失败',
+          };
+        }
+        throw err;
       })
       .finally(() => {
         inflight.delete(rawUrl);
@@ -81,10 +130,21 @@ export function createSecureBlobCache() {
     return p;
   };
 
+  const retry = (rawUrl?: string | null): Promise<string> => {
+    if (!rawUrl) return Promise.resolve('');
+    clearError(rawUrl);
+    return ensureLoaded(rawUrl);
+  };
+
   const getUrl = (rawUrl?: string | null): string => {
     if (!rawUrl) return '';
     if (!rawUrl.startsWith('/api/')) return rawUrl;
     return blobMap.value[rawUrl] || '';
+  };
+
+  const getError = (rawUrl?: string | null): string => {
+    if (!rawUrl) return '';
+    return errorMap.value[rawUrl] || '';
   };
 
   const revokeAll = () => {
@@ -97,11 +157,14 @@ export function createSecureBlobCache() {
       }
     }
     blobMap.value = {};
+    errorMap.value = {};
   };
 
   return {
     ensureLoaded,
+    retry,
     getUrl,
+    getError,
     revokeAll,
   };
 }
@@ -144,7 +207,13 @@ export async function openDocumentPreviewWithTicket(
     if (popup) {
       popup.location.replace(targetUrl);
     } else {
-      window.open(targetUrl, '_blank', 'noopener,noreferrer');
+      const link = document.createElement('a');
+      link.href = targetUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
     }
   } catch (err: any) {
     if (popup) popup.close();

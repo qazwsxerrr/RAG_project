@@ -184,14 +184,23 @@
               <h4 class="text-xs font-bold text-slate-900 tracking-tight">图表与代码明细</h4>
             </div>
 
-            <!-- 若处于第 7 步审核挂起状态，显示醒目操作按钮 -->
+            <!-- 若处于第 7 步审核挂起状态且存在待审项，显示醒目操作按钮 -->
             <button 
-              v-if="overallStatus === 'pending_review'"
+              v-if="overallStatus === 'pending_review' && pendingReviews.length > 0"
               @click="$emit('reviewRequired', pendingReviews)"
               class="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-medium shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer animate-bounce"
             >
               <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
               <span>打开人工审核 ({{ pendingReviews.length }})</span>
+            </button>
+            <!-- 若服务重启导致待审上下文丢失，提供一键重新解析入库 -->
+            <button
+              v-else-if="overallStatus === 'pending_review' && pendingReviews.length === 0"
+              @click="handleRetryCurrentStep"
+              :disabled="isRetrying"
+              class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-medium shadow-sm flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <span>{{ isRetrying ? '提交中...' : '重新解析入库' }}</span>
             </button>
             <!-- 若处于第 11 步防重预警挂起状态，显示醒目操作按钮 -->
             <button 
@@ -228,9 +237,9 @@
             </button>
           </div>
 
-          <!-- 待审核预警横幅 (若挂起) -->
+          <!-- 待审核预警横幅 (若挂起且待审项完好) -->
           <div 
-            v-if="overallStatus === 'pending_review'" 
+            v-if="overallStatus === 'pending_review' && pendingReviews.length > 0" 
             class="mb-3 p-3 rounded-lg bg-amber-50/90 border border-amber-200 text-xs text-amber-900 flex items-start gap-2.5 shrink-0"
           >
             <div class="w-4 h-4 rounded-md bg-amber-200 text-amber-800 flex items-center justify-center shrink-0 mt-0.5 text-[11px] font-bold">
@@ -239,6 +248,20 @@
             <div class="flex-1 text-[11px] leading-relaxed">
               <span class="font-bold text-amber-900">等待人工审核确认。</span>
               请点击右上角按钮核对提取的图表与代码说明，确认后继续完成入库。
+            </div>
+          </div>
+
+          <!-- 服务重启导致内存审核态丢失提示横幅 -->
+          <div 
+            v-else-if="overallStatus === 'pending_review' && pendingReviews.length === 0" 
+            class="mb-3 p-3 rounded-lg bg-rose-50/90 border border-rose-200 text-xs text-rose-900 flex items-start gap-2.5 shrink-0"
+          >
+            <div class="w-4 h-4 rounded-md bg-rose-200 text-rose-800 flex items-center justify-center shrink-0 mt-0.5 text-[11px] font-bold">
+              !
+            </div>
+            <div class="flex-1 text-[11px] leading-relaxed">
+              <span class="font-bold text-rose-900">待审核运行上下文已过期（后端服务曾重启）。</span>
+              当前已无待审明细，请点击右上角“重新解析入库”恢复处理流程。
             </div>
           </div>
 
@@ -313,6 +336,16 @@
                     @click="$emit('reviewRequired', pendingReviews, getReviewItemIndex(item.item_id))"
                     title="点击查看详情"
                   />
+                  <button
+                    v-else-if="getReviewThumbError(item.asset_url)"
+                    type="button"
+                    @click.stop="retryReviewThumb(item.asset_url)"
+                    :title="getReviewThumbError(item.asset_url)"
+                    class="h-16 w-20 rounded border border-amber-200 bg-amber-50 shrink-0 flex flex-col items-center justify-center text-[10px] text-amber-700 hover:bg-amber-100 cursor-pointer px-1"
+                  >
+                    <span>加载失败</span>
+                    <span class="underline">重试</span>
+                  </button>
                   <div
                     v-else
                     class="h-16 w-20 rounded border border-slate-200/80 bg-white shrink-0 flex items-center justify-center text-[10px] text-slate-400"
@@ -497,6 +530,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'reviewRequired', items: ReviewItem[], initialIndex?: number): void;
+  (e: 'reviewCompleted'): void;
   (e: 'duplicateWarning', matchedDocId?: string): void;
   (e: 'completed', docId: string): void;
   (e: 'failed', error: string): void;
@@ -523,6 +557,12 @@ let sseConnectToken = 0;
 const reviewThumbCache = createSecureBlobCache();
 
 const getReviewThumbUrl = (assetUrl?: string): string => reviewThumbCache.getUrl(assetUrl);
+const getReviewThumbError = (assetUrl?: string): string => reviewThumbCache.getError(assetUrl);
+const retryReviewThumb = (assetUrl?: string) => {
+  if (assetUrl) {
+    reviewThumbCache.retry(assetUrl).catch(() => {});
+  }
+};
 
 watch(
   pendingReviews,
@@ -1016,13 +1056,14 @@ const connectSSE = async () => {
       } else if (eventName === 'review_required') {
         overallStatus.value = 'pending_review';
         setStepStatus(7, 'process', '待人工审核');
-        const items = data.items || data.pending_reviews || [];
+        const items = data.pending_reviews || [];
         pendingReviews.value = items;
         emit('reviewRequired', items);
         addLog('审核', 'bg-amber-100 text-amber-800', `等待人工核对（共 ${items.length} 项）`);
       } else if (eventName === 'review_completed') {
+        overallStatus.value = 'running';
         setStepStatus(7, 'finish', '人工审核已确认');
-        const updatedItems = data.items || data.pending_reviews;
+        const updatedItems = data.pending_reviews;
         if (Array.isArray(updatedItems) && updatedItems.length > 0) {
           pendingReviews.value = updatedItems;
         } else if (pendingReviews.value.length > 0) {
@@ -1031,6 +1072,7 @@ const connectSSE = async () => {
             status: item.status === 'pending' ? 'approved' : item.status,
           }));
         }
+        emit('reviewCompleted');
         addLog('审核', 'bg-emerald-100 text-emerald-700', '人工审核已确认，继续完成入库');
       } else if (eventName === 'duplicate_warning') {
         overallStatus.value = 'duplicate_warning';
@@ -1130,8 +1172,9 @@ const reconnect = async () => {
   }
   reviewThumbCache.revokeAll();
   const snapStatus = await syncFromSnapshot();
-  // 仅在文档处于非终态（排队、处理中、待审核、待确认重复）时才建立 SSE 实时监听
-  if (snapStatus && !isTerminalStatus(snapStatus)) {
+  // 仅在文档处于非终态且未处于失活的空 pending_review 时才建立 SSE 实时监听
+  const isStaleEmptyReview = snapStatus === 'pending_review' && pendingReviews.value.length === 0;
+  if (snapStatus && !isTerminalStatus(snapStatus) && !isStaleEmptyReview) {
     await connectSSE();
   }
   setTimeout(() => {
@@ -1162,5 +1205,6 @@ defineExpose({
   reconnect,
   syncFromSnapshot,
   handleRetryCurrentStep,
+  isStreamConnected: () => Boolean(eventSource),
 });
 </script>

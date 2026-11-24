@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from fastapi import HTTPException
 from fastmcp.server.dependencies import get_http_headers
 
-from rag_kb.api.deps import UserContext, get_current_user
+from rag_kb.api.deps import EffectiveAuthzContext, get_current_user
 from rag_kb.core.config import settings
 from rag_kb.core.logging.audit import record_audit_log
 from rag_kb.core.logging.context import (
@@ -35,7 +35,7 @@ logger = logging.getLogger("rag_kb.mcp.auth_guard")
 @dataclass
 class MCPCallerContext:
     """经过 @mcp_secure_tool 完整核验后的 MCP 调用上下文"""
-    user: UserContext
+    user: EffectiveAuthzContext
     agent_id: str
     request_id: str
     tool_name: str
@@ -93,7 +93,7 @@ def extract_mcp_credentials() -> Tuple[str, str, Optional[str]]:
 
 
 def enforce_on_behalf_of(
-    user: UserContext,
+    user: EffectiveAuthzContext,
     claimed_agent_id: Optional[str],
     tool_name: str,
     required_perm: str,
@@ -170,7 +170,7 @@ def mcp_secure_tool(required_perm: str):
             trace_token = set_trace_context(request_id=incoming_req_id)
             req_id = get_request_id()
             t0 = time.perf_counter()
-            user: Optional[UserContext] = None
+            user: Optional[EffectiveAuthzContext] = None
             agent_id = claimed_agent_id or "unverified-client"
             caller_token = None
 

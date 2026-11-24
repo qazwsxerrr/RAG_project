@@ -1,12 +1,4 @@
-"""src/rag_kb/services/mcp/schemas.py —— MCP 5 大核心工具协议边界常量、输出消毒与防间接提示注入辅助层。
-
-核心职责：
-1. 统一定义 MCP 工具的入参边界约束常量（批量向量上限、检索 top_k 上限，检索场景直接复用 SCENE_WEIGHT_PROFILES）；
-2. 切片与引文输出消毒：
-   - 物理剥离底层私有阿里云 OSS 直链 `raw_oss_url` 与内部向量 `dense_embedding`（对齐 SECURITY_MODEL.md 方向四）；
-   - 扫描召回切片文本中潜在的间接提示注入指令（Indirect Prompt Injection），设置 `injection_warning: bool`；
-   - 强制执行 PII 隐私数据正则脱敏掩码（手机号、身份证、邮箱、银行卡），不开放关闭开关。
-"""
+"""src/rag_kb/services/mcp/schemas.py —— MCP 5 大核心工具协议边界常量、输出消毒与防间接提示注入辅助层。"""
 
 from typing import Any, Dict, Set
 from rag_kb.core.security.prompt_guard import INJECTION_PATTERNS
@@ -38,8 +30,8 @@ def sanitize_mcp_chunk(chunk: Dict[str, Any]) -> Dict[str, Any]:
     """
     对检索召回的单个切片执行 MCP 出境安全消毒：
     1. 物理剥离 raw_oss_url 与 dense_embedding；
-    2. 扫描标记 injection_warning；
-    3. 强制执行 mask_all_pii 隐私脱敏。
+    2. 保留 kb_id / kb_name / classification_level 多维权限元数据；
+    3. 扫描标记 injection_warning 并强制执行 mask_all_pii 隐私脱敏。
     """
     raw_content = str(chunk.get("content") or "")
     has_injection = detect_indirect_prompt_injection(raw_content)
@@ -53,6 +45,9 @@ def sanitize_mcp_chunk(chunk: Dict[str, Any]) -> Dict[str, Any]:
         "chunk_id": chunk_id,
         "document_id": str(chunk.get("document_id") or ""),
         "document_title": str(chunk.get("document_title") or ""),
+        "kb_id": chunk.get("kb_id"),
+        "kb_name": chunk.get("kb_name"),
+        "classification_level": chunk.get("classification_level"),
         "chunk_index": int(chunk.get("chunk_index") or 0),
         "chunk_label": str(chunk.get("chunk_label") or ""),
         "content": safe_content,
@@ -82,6 +77,9 @@ def sanitize_mcp_citation(cit: Dict[str, Any]) -> Dict[str, Any]:
         "chunk_id": str(cit.get("chunk_id") or ""),
         "document_id": str(cit.get("document_id") or ""),
         "document_title": str(cit.get("document_title") or ""),
+        "kb_id": cit.get("kb_id"),
+        "kb_name": cit.get("kb_name"),
+        "classification_level": cit.get("classification_level"),
         "chunk_label": str(cit.get("chunk_label") or ""),
         "page_idx": page_idx,
         "display_page": display_page,

@@ -1,16 +1,5 @@
 import { apiClient } from './client';
 
-export interface SystemHealth {
-  status: string;
-  app_name: string;
-  environment: string;
-  debug: boolean;
-  model_name: string;
-  embedding_model?: string;
-  db_status: string;
-  oss_status: string;
-}
-
 export interface RecentBarItem {
   status: 'SUCCESS' | 'FAILED' | 'SWITCHED';
   duration_ms: number;
@@ -74,11 +63,6 @@ export interface ChannelAuditsResponse {
 }
 
 export const systemApi = {
-  /** 获取系统核心组件健康状态 */
-  async getHealth(): Promise<SystemHealth> {
-    return apiClient.get('/health');
-  },
-
   /** 获取所有大模型渠道状态大盘数据 (支持时间窗口范围) */
   async getChannelsStatus(range: '90m' | '24h' | '7d' | '30d' = '90m'): Promise<ChannelsStatusResponse> {
     return apiClient.get('/system/llm/channels', { params: { range } });

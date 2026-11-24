@@ -49,8 +49,10 @@ knowledge/
 docs/
 phases/
 phases2/
+phase3/
 bug/
-scripts/
+scripts/*
+!scripts/seed_authz_kb_documents.py
 进度/
 plan.txt
 注意事项.txt
@@ -66,9 +68,12 @@ java-admin-service/target/
 java-admin-service/.env.vault
 keys/
 
-# 本地测试套件与临时夹具 (本地留存，不纳入远端仓库)
-backend/tests/
-java-admin-service/src/test/
+# 本地测试套件与临时夹具（放行核心多维权限自动化验收套件及公共测试夹具，便于干净检出复跑）
+backend/tests/*
+!backend/tests/conftest.py
+!backend/tests/test_step8_auth_permissions.py
+!backend/tests/test_step13_multidim_kb_authz.py
+!java-admin-service/src/test/
 
 # 统一入口网关配置显式纳入版本库
 !nginx/

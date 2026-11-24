@@ -8,14 +8,18 @@ import java.time.Duration;
 import java.util.Objects;
 
 /**
- * 基于 Spring Data Redis (StringRedisTemplate) 的员工访问吊销与权限变更同步服务。
- * 严格遵循 AGENTS.md Fail-Fast 红线：直连真实 Redis 实例，异常直接抛出，绝不吞异常降级。
+ * 基于 Spring Data Redis (StringRedisTemplate) 的员工访问吊销与双层权限版本同步服务。
+ * 严格遵循 AGENTS.md Fail-Fast 红线：
+ * 1. 直连真实 Redis 实例，写入失败绝不吞异常、绝不报告同步成功；
+ * 2. 策略版本号由 PostgreSQL 持久化提交后通过本组件发布，Redis 不独立生成策略版本。
  */
 @Component
 public class RedisRevocationSync {
 
     public static final String REVOKED_KEY_PREFIX = "auth:revoked:";
     public static final String PERM_CHANGED_KEY_PREFIX = "auth:perm_changed_at:";
+    public static final String USER_AUTHZ_VER_KEY_PREFIX = "auth:user_ver:";
+    public static final String TENANT_POLICY_EPOCH_KEY_PREFIX = "auth:policy_epoch:";
 
     private final StringRedisTemplate redisTemplate;
     private final int defaultTtlSeconds;
@@ -65,7 +69,7 @@ public class RedisRevocationSync {
     }
 
     /**
-     * 当员工在 IdP 侧的角色或部门发生变更时，记录最新权限变更 13 位毫秒级时间戳，使不晚于该时间签发的旧票立即失效
+     * 当员工的权限、部门、职级或角色发生变更时，记录最新 13 位毫秒级时间戳，使不晚于该时间签发的旧票立即失效
      */
     public void markPermissionChanged(String userId, long changedEpochMilli) {
         if (userId == null || userId.isBlank()) {
@@ -76,6 +80,51 @@ public class RedisRevocationSync {
                 String.valueOf(changedEpochMilli),
                 Duration.ofSeconds(defaultTtlSeconds)
         );
+    }
+
+    /**
+     * 发布 PostgreSQL 已提交的个人授权版本号与毫秒变更边界至 Redis
+     */
+    public void publishUserAuthzVersion(String userId, long authzVersion, long changedEpochMilli) {
+        if (userId == null || userId.isBlank()) {
+            throw new IllegalArgumentException("userId 不能为空");
+        }
+        String uid = userId.trim();
+        redisTemplate.opsForValue().set(
+                USER_AUTHZ_VER_KEY_PREFIX + uid,
+                String.valueOf(authzVersion),
+                Duration.ofSeconds(defaultTtlSeconds)
+        );
+        redisTemplate.opsForValue().set(
+                PERM_CHANGED_KEY_PREFIX + uid,
+                String.valueOf(changedEpochMilli),
+                Duration.ofSeconds(defaultTtlSeconds)
+        );
+    }
+
+    /**
+     * 发布 PostgreSQL 已提交的租户级策略纪元至 Redis（不独立生成版本）
+     */
+    public void publishTenantPolicyEpoch(String tenantId, long committedPolicyEpoch) {
+        if (tenantId == null || tenantId.isBlank()) {
+            throw new IllegalArgumentException("tenantId 不能为空");
+        }
+        redisTemplate.opsForValue().set(
+                TENANT_POLICY_EPOCH_KEY_PREFIX + tenantId.trim(),
+                String.valueOf(committedPolicyEpoch),
+                Duration.ofSeconds(Math.max(defaultTtlSeconds, 86400))
+        );
+    }
+
+    public long getTenantPolicyEpoch(String tenantId) {
+        if (tenantId == null || tenantId.isBlank()) {
+            return 0L;
+        }
+        String raw = redisTemplate.opsForValue().get(TENANT_POLICY_EPOCH_KEY_PREFIX + tenantId.trim());
+        if (raw == null || raw.isBlank()) {
+            return 0L;
+        }
+        return Long.parseLong(raw.trim());
     }
 
     /**

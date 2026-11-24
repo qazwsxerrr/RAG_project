@@ -98,9 +98,6 @@ public class AuthController {
         this.redisRevocationSync = Objects.requireNonNull(redisRevocationSync, "redisRevocationSync 不能为空");
     }
 
-    /**
-     * Phase-6 §2.1 & §3.1: JWKS 公钥端点（支持平滑密钥轮换期间同时暴露新旧公钥）
-     */
     @GetMapping("/.well-known/jwks.json")
     public Map<String, Object> getJwks() {
         return publicJwkSet.toJSONObject();
@@ -108,15 +105,10 @@ public class AuthController {
 
     private record RefreshedOidcSession(
             OidcUser oidcUser,
-            boolean deptChangedInIdp,
+            boolean deptsChangedInIdp,
             boolean rolesChangedInIdp
     ) {}
 
-    /**
-     * 标准 OIDC 会话实时身份刷新：
-     * 严格 Fail-Fast，移除一切静默跳过旧身份回退分支。
-     * 若员工在 IdP 侧已被禁用或会话吊销，同步写入真实 Redis 秒级吊销其存量业务 JWT，并立即销毁本地 Session 返回 401。
-     */
     private RefreshedOidcSession refreshOidcIdentityStrict(
             OidcUser currentOidcUser,
             Authentication authentication,
@@ -131,7 +123,7 @@ public class AuthController {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【鉴权失败】缺少 OIDC 会话身份");
         }
 
-        String previousIdpDept = UserMappingService.extractDeptPath(currentOidcUser);
+        Set<String> previousIdpDepts = new LinkedHashSet<>(UserMappingService.extractDeptPaths(currentOidcUser));
         Set<String> previousRoles = new LinkedHashSet<>(UserMappingService.extractRoleCodes(currentOidcUser));
         try {
             OAuth2AuthorizeRequest authorizeRequest = OAuth2AuthorizeRequest
@@ -143,7 +135,7 @@ public class AuthController {
 
             OAuth2AuthorizedClient authorizedClient = authorizedClientManager.authorize(authorizeRequest);
             if (authorizedClient == null || authorizedClient.getAccessToken() == null) {
-                markExistingUserPermissionChanged(currentOidcUser.getSubject());
+                markExistingUserPermissionChanged(UserMappingService.extractTenantId(currentOidcUser), currentOidcUser.getSubject());
                 invalidateLocalSession(request, response);
                 throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业 IdP 授权已过期或被撤销，请重新登录");
             }
@@ -167,10 +159,10 @@ public class AuthController {
                 session.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, context);
             }
 
-            String latestIdpDept = UserMappingService.extractDeptPath(refreshedUser);
-            boolean deptChanged = !Objects.equals(previousIdpDept, latestIdpDept);
+            Set<String> latestIdpDepts = new LinkedHashSet<>(UserMappingService.extractDeptPaths(refreshedUser));
+            boolean deptsChanged = !Objects.equals(previousIdpDepts, latestIdpDepts);
             boolean rolesChanged = !Objects.equals(previousRoles, new LinkedHashSet<>(UserMappingService.extractRoleCodes(refreshedUser)));
-            return new RefreshedOidcSession(refreshedUser, deptChanged, rolesChanged);
+            return new RefreshedOidcSession(refreshedUser, deptsChanged, rolesChanged);
         } catch (ResponseStatusException e) {
             throw e;
         } catch (OAuth2AuthorizationException | OAuth2AuthenticationException ex) {
@@ -184,7 +176,7 @@ public class AuthController {
             }
             log.warn("[OIDC_SESSION_REFRESH] IdP 明确拒绝或撤销当前会话 (code={})，主动销毁本地会话并淘汰当前用户既有权限票据: {}",
                     errorCode, ex.getMessage());
-            markExistingUserPermissionChanged(currentOidcUser.getSubject());
+            markExistingUserPermissionChanged(UserMappingService.extractTenantId(currentOidcUser), currentOidcUser.getSubject());
             invalidateLocalSession(request, response);
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业身份授权已过期或被撤销，请重新登录", ex);
         } catch (Exception ex) {
@@ -193,17 +185,17 @@ public class AuthController {
                 throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "【鉴权中台暂时不可用】企业 IdP 通信异常，请稍后重试", ex);
             }
             log.warn("[OIDC_SESSION_REFRESH] IdP 实时刷新身份失败，主动销毁本地会话: {}", ex.getMessage());
-            markExistingUserPermissionChanged(currentOidcUser.getSubject());
+            markExistingUserPermissionChanged(UserMappingService.extractTenantId(currentOidcUser), currentOidcUser.getSubject());
             invalidateLocalSession(request, response);
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "【会话失效】企业身份状态已变更或停用，请重新登录", ex);
         }
     }
 
-    private void markExistingUserPermissionChanged(String externalId) {
+    private void markExistingUserPermissionChanged(String tenantId, String externalId) {
         if (externalId == null || externalId.isBlank()) {
             return;
         }
-        userMappingService.findExistingUserId(externalId)
+        userMappingService.findExistingUserId(tenantId, externalId)
                 .ifPresent(uid -> redisRevocationSync.markPermissionChanged(uid, System.currentTimeMillis()));
     }
 
@@ -253,7 +245,7 @@ public class AuthController {
     }
 
     /**
-     * Phase-6 §2.3 & §3.1: 会话换短期业务 JWT (默认 10min，含标准 OIDC 实时身份刷新与权限展开)
+     * 会话换短期 cv=2 业务 JWT（含多部门、按动作范围 scope_by_action、职级、有效密级、双版本号）
      */
     @PostMapping("/api/admin/auth/token")
     public Map<String, Object> exchangeToken(
@@ -263,12 +255,13 @@ public class AuthController {
             HttpServletResponse response
     ) {
         RefreshedOidcSession refreshed = refreshOidcIdentityStrict(oidcUser, authentication, request, response);
-        MappedIdentity mapped = userMappingService.mapAndProvision(refreshed.oidcUser(), refreshed.deptChangedInIdp());
-        ResolvedPermissions perms = permissionResolver.resolve(mapped.roleCodes());
+        MappedIdentity mapped = userMappingService.mapAndProvision(refreshed.oidcUser(), refreshed.deptsChangedInIdp());
+        ResolvedPermissions perms = permissionResolver.resolve(mapped.user().tenantId(), mapped.roleCodes());
 
         Instant now = Instant.now();
         String userIdStr = mapped.user().id().toString();
-        if (refreshed.deptChangedInIdp() || refreshed.rolesChangedInIdp()) {
+        if (refreshed.deptsChangedInIdp() || refreshed.rolesChangedInIdp()
+                || mapped.idpDepartmentsMutated() || mapped.positionMutated()) {
             redisRevocationSync.markPermissionChanged(userIdStr, System.currentTimeMillis());
         }
         long lastPermChangedMs = redisRevocationSync.getPermissionChangedAtMs(userIdStr);
@@ -282,11 +275,17 @@ public class AuthController {
                 .claim("username", mapped.user().realName())
                 .claim("tenant_id", mapped.user().tenantId())
                 .claim("roles", mapped.roleCodes())
+                .claim("idp_roles", mapped.idpRoleCodes())
                 .claim("perms", new ArrayList<>(perms.permissions()))
-                .claim("dept_path", mapped.user().deptPath())
-                .claim("data_scope", perms.dataScope())
+                .claim("dept_path", mapped.primaryDeptPath())
+                .claim("dept_paths", mapped.effectiveDeptPaths())
+                .claim("scope_by_action", perms.scopeByAction())
+                .claim("position_code", mapped.user().positionCode())
+                .claim("clearance_level", mapped.effectiveClearance())
+                .claim("authz_ver", mapped.user().authzVersion())
+                .claim("policy_epoch", mapped.policyEpoch())
                 .claim("is_to_c", false)
-                .claim("cv", 1)
+                .claim("cv", 2)
                 .claim("typ", "access")
                 .claim("iat_ms", issuedAtMs)
                 .issuedAt(now)
@@ -307,7 +306,7 @@ public class AuthController {
     }
 
     /**
-     * Phase-6 §2.5: 回显当前登录员工基本信息与权限范围
+     * 回显当前 OIDC 登录员工完整多维权限画像
      */
     @GetMapping("/api/admin/users/me")
     public Map<String, Object> getMyProfile(
@@ -317,9 +316,10 @@ public class AuthController {
             HttpServletResponse response
     ) {
         RefreshedOidcSession refreshed = refreshOidcIdentityStrict(oidcUser, authentication, request, response);
-        MappedIdentity mapped = userMappingService.mapAndProvision(refreshed.oidcUser(), refreshed.deptChangedInIdp());
-        ResolvedPermissions perms = permissionResolver.resolve(mapped.roleCodes());
-        if (refreshed.deptChangedInIdp() || refreshed.rolesChangedInIdp()) {
+        MappedIdentity mapped = userMappingService.mapAndProvision(refreshed.oidcUser(), refreshed.deptsChangedInIdp());
+        ResolvedPermissions perms = permissionResolver.resolve(mapped.user().tenantId(), mapped.roleCodes());
+        if (refreshed.deptsChangedInIdp() || refreshed.rolesChangedInIdp()
+                || mapped.idpDepartmentsMutated() || mapped.positionMutated()) {
             redisRevocationSync.markPermissionChanged(mapped.user().id().toString(), System.currentTimeMillis());
         }
 
@@ -327,18 +327,20 @@ public class AuthController {
         me.put("user_id", mapped.user().id().toString());
         me.put("tenant_id", mapped.user().tenantId());
         me.put("username", mapped.user().realName());
-        me.put("dept_path", mapped.user().deptPath());
-        me.put("data_scope", perms.dataScope());
+        me.put("dept_path", mapped.primaryDeptPath());
+        me.put("dept_paths", mapped.effectiveDeptPaths());
+        me.put("scope_by_action", perms.scopeByAction());
+        me.put("position_code", mapped.user().positionCode());
+        me.put("clearance_level", mapped.effectiveClearance());
+        me.put("authz_ver", mapped.user().authzVersion());
+        me.put("policy_epoch", mapped.policyEpoch());
         me.put("roles", mapped.roleCodes());
         me.put("perms", perms.permissions());
         me.put("is_to_c", false);
-        me.put("cv", 1);
+        me.put("cv", 2);
         return me;
     }
 
-    /**
-     * Phase-6 §2.5: 会话登出端点（清理 Session 与 JSESSIONID Cookie）
-     */
     @PostMapping("/api/admin/auth/logout")
     public Map<String, Object> logout(HttpServletRequest request, HttpServletResponse response) {
         invalidateLocalSession(request, response);
@@ -347,10 +349,6 @@ public class AuthController {
 
     public record ModelTokenRequest(String provider, List<String> scopes) {}
 
-    /**
-     * Phase-6 §7.3 & §7.4: 内部服务短期凭据租约发放端点 (仅允许容器网络内部访问)
-     * 每次取用均记录结构化审计日志 (service_id + provider + scopes + masked + expires_at)，严禁明文 Key 落日志。
-     */
     @PostMapping("/api/admin/internal/model-token")
     public Map<String, Object> issueModelToken(
             @RequestHeader(value = "X-Service-Id", required = false) String serviceId,
@@ -397,7 +395,7 @@ public class AuthController {
         }
 
         long nowSec = Instant.now().getEpochSecond();
-        long expSec = nowSec + 600; // 10分钟租约
+        long expSec = nowSec + 600;
 
         String masked = apiKey.length() > 8
                 ? apiKey.substring(0, 4) + "****" + apiKey.substring(apiKey.length() - 4)

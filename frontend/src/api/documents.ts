@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { DepartmentItem, DocumentItem, ChunkItem, PipelineSnapshot } from '../types';
+import type { DocumentItem, ChunkItem, PipelineSnapshot } from '../types';
 import { useAuthStore } from '../stores/auth';
 
 export interface StreamTicketResult {
@@ -14,13 +14,16 @@ export interface ManagedPipelineStream {
 }
 
 export const documentsApi = {
-  /** 获取可用部门列表（支持下拉与动态匹配） */
-  async getDepartments(): Promise<DepartmentItem[]> {
-    return apiClient.get('/documents/departments');
-  },
-
   /** 文档上传接入并启动流水线 */
-  async uploadDocument(formData: FormData): Promise<{ doc_id: string; file_name: string; oss_url: string; status: string }> {
+  async uploadDocument(formData: FormData): Promise<{
+    doc_id: string;
+    file_name: string;
+    kb_id: string;
+    kb_name: string;
+    classification_level: number;
+    preview_url: string;
+    status: string;
+  }> {
     return apiClient.post('/documents/upload', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
@@ -30,8 +33,28 @@ export const documentsApi = {
   },
 
   /** 获取所有入库/运行中文档列表 */
-  async getDocuments(): Promise<DocumentItem[]> {
-    return apiClient.get('/documents');
+  async getDocuments(params?: { kb_id?: string; classification_level?: number }): Promise<DocumentItem[]> {
+    return apiClient.get('/documents', { params });
+  },
+
+  /** 单篇文档在线独立改密 */
+  async updateDocumentClassification(
+    docId: string,
+    classificationLevel: number,
+    reason?: string
+  ): Promise<{
+    doc_id: string;
+    kb_id: string;
+    previous_level: number;
+    classification_level: number;
+    effective_classification_level: number;
+    policy_epoch: number;
+    message: string;
+  }> {
+    return apiClient.patch(`/documents/${docId}/classification`, {
+      classification_level: classificationLevel,
+      reason,
+    });
   },
 
   /** 删除文档及其全部切片 */

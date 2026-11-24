@@ -1,8 +1,7 @@
 """src/rag_kb/nodes/review.py —— 人工审核节点 ReviewNode。
 
 流水线第七环：
-利用 LangGraph 原生 interrupt 机制挂起流水线，
-对外广播 review_required 事件，等待人机审核结果；
+利用 LangGraph 原生 interrupt 机制挂起流水线并将待审核载荷交由队列消费层广播 review_required 事件；
 在外部注入 Command(resume=review_data) 唤醒后，更新审核描述并继续下一步。
 """
 
@@ -34,27 +33,17 @@ class ReviewNode(BaseNode):
 
         if not pending_reviews or skip_review:
             logger.info(f"▶ [人工审核] 无待审核项或已显式配置 skip_review=True (doc_id={doc_id})，直接放行")
-            state["overall_status"] = IngestStatus.REVIEW.value
+            state["overall_status"] = "running"
             return state
-
-        # 广播 review_required 事件通知前端
-        if writer and callable(writer):
-            writer({
-                "event": "review_required",
-                "doc_id": doc_id,
-                "review_count": len(pending_reviews),
-                "items": pending_reviews,
-                "pending_reviews": pending_reviews
-            })
 
         logger.info(f"⏸ [人工审核] 正在挂起等待人工审核确认 (doc_id={doc_id}, 共 {len(pending_reviews)} 项)...")
 
-        # 原生 interrupt 挂起当前协程并保存 Checkpoint
+        # 原生 interrupt 挂起当前协程并保存 Checkpoint（禁止在 interrupt 前使用 writer 广播，避免 Command(resume) 重放节点时二次推送 review_required）
         resumed_data = interrupt({
+            "event": "review_required",
             "doc_id": doc_id,
             "review_count": len(pending_reviews),
-            "items": pending_reviews,
-            "pending_reviews": pending_reviews
+            "pending_reviews": pending_reviews,
         })
 
         logger.info(f"▶ [人工审核] 收到审核反馈，正在唤醒流水线 (doc_id={doc_id})...")
@@ -94,16 +83,7 @@ class ReviewNode(BaseNode):
 
             state["pending_reviews"] = pending_reviews
 
-        if writer and callable(writer):
-            writer({
-                "event": "review_completed",
-                "doc_id": doc_id,
-                "reviewed_items_count": len(pending_reviews),
-                "items": pending_reviews,
-                "pending_reviews": pending_reviews,
-            })
-
-        state["overall_status"] = IngestStatus.REVIEW.value
+        state["overall_status"] = "running"
         return state
 
 review_node = ReviewNode()

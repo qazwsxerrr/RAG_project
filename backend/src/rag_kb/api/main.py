@@ -2,7 +2,7 @@
 
 功能：
 1. 配置 CORS 跨域与静态切片目录挂载；
-2. 注册 /api/v1 下全部业务路由 (documents, departments, chunks, retrieval, sessions)；
+2. 注册 /api/v1 下全部业务路由 (documents, knowledge_bases, chunks, retrieval, sessions)；
 3. lifespan 异步生命周期管理（启动时幂等校验数据库与初始化表结构）；
 4. 提供 /health 与 /api/v1/health 双端健康检查。
 """
@@ -15,7 +15,8 @@ from sqlalchemy import text
 from rag_kb.core.config import settings
 from rag_kb.db.session import AsyncSessionLocal, init_db
 from rag_kb.api.routes import router as documents_router, router_chunks as chunks_router
-from rag_kb.api.departments import router as departments_router
+from rag_kb.api.knowledge_bases import router as knowledge_bases_router
+from rag_kb.api.admin import router as admin_router
 from rag_kb.api.retrieval import router as retrieval_router
 from rag_kb.api.sessions import router as sessions_router
 from rag_kb.api.auth import router as auth_router
@@ -86,8 +87,9 @@ def create_app() -> FastAPI:
     # 3. 注册 API 业务路由 (优先展示鉴权与检索核心路由)
     prefix = settings.API_V1_PREFIX
     app.include_router(auth_router, prefix=prefix)
+    app.include_router(admin_router, prefix=prefix)
+    app.include_router(knowledge_bases_router, prefix=prefix)
     app.include_router(retrieval_router, prefix=prefix)
-    app.include_router(departments_router, prefix=prefix)
     app.include_router(documents_router, prefix=prefix)
     app.include_router(chunks_router, prefix=prefix)
     app.include_router(sessions_router, prefix=prefix)

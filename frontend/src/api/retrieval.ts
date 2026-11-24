@@ -5,7 +5,7 @@ import { useAuthStore, isTokenExpired } from '../stores/auth';
 export interface ChatQueryPayload {
   query: string;
   conversation_id?: string;
-  department_scope?: string[];
+  kb_ids?: string[];
   category_scope?: string;
   tags_scope?: string[];
   scene_type?: string;

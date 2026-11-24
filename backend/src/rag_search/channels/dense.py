@@ -1,24 +1,24 @@
-"""src/rag_search/channels/dense.py —— 四路召回中的稠密向量召回通道。
+"""src/rag_search/channels/dense.py —— 四路召回中的稠密向量召回通道。"""
 
-用查询向量按余弦距离召回语义相近的 chunk，基于 pgvector 1024 维 HNSW 索引。
-严格强制执行组织架构权限隔离与激活状态校验。
-"""
-
-from typing import Any, Dict, List, Optional
-from sqlalchemy import select
+import uuid
+from typing import Any, Dict, List, Optional, Sequence
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from rag_kb.db.models import Document, DocumentChunk
+
+from rag_kb.db.models import Document, DocumentChunk, KnowledgeBase
 from rag_search.channels.base import apply_filters, make_candidate
 
 NAME = "dense"
 
+
 async def search(
     session: AsyncSession,
     query_dense: List[float],
-    department_scope: Optional[List[str]] = None,
+    authz_filter_spec: Any = None,
+    kb_ids: Optional[Sequence[uuid.UUID]] = None,
     category_scope: Optional[str] = None,
     tags_scope: Optional[List[str]] = None,
-    top_k: int = 20
+    top_k: int = 20,
 ) -> List[Dict[str, Any]]:
     """稠密向量召回 Top-K"""
     if not query_dense or len(query_dense) != 1024:
@@ -26,14 +26,23 @@ async def search(
 
     distance_expr = DocumentChunk.dense_embedding.cosine_distance(query_dense)
     score_expr = (1.0 - distance_expr).label("score")
+    eff_level_expr = func.greatest(KnowledgeBase.min_classification_level, Document.classification_level).label("eff_level")
 
     stmt = select(
         DocumentChunk,
         Document.title.label("doc_title"),
-        Document.raw_oss_url.label("doc_raw_oss_url"),
-        score_expr
+        KnowledgeBase.id.label("kb_id"),
+        KnowledgeBase.name.label("kb_name"),
+        eff_level_expr,
+        score_expr,
     )
-    stmt = apply_filters(stmt, department_scope, category_scope, tags_scope)
+    stmt = apply_filters(
+        stmt,
+        authz_filter_spec=authz_filter_spec,
+        kb_ids=kb_ids,
+        category_scope=category_scope,
+        tags_scope=tags_scope,
+    )
     stmt = stmt.order_by(distance_expr.asc()).limit(top_k)
 
     res = await session.execute(stmt)
@@ -41,18 +50,15 @@ async def search(
 
     chunks: List[Dict[str, Any]] = []
     for idx, row in enumerate(rows):
-        chunk_obj: DocumentChunk = row[0]
-        doc_title: str = row[1]
-        doc_oss_url: Optional[str] = row[2]
-        score: float = float(row[3])
-
         cand = make_candidate(
-            chunk_obj=chunk_obj,
-            doc_title=doc_title,
-            doc_oss_url=doc_oss_url,
-            score=score,
+            chunk_obj=row[0],
+            doc_title=row[1],
+            kb_id=str(row[2]),
+            kb_name=row[3],
+            effective_classification_level=int(row[4]),
+            score=float(row[5]),
             channel_name=NAME,
-            rank=idx + 1
+            rank=idx + 1,
         )
         chunks.append(cand)
 

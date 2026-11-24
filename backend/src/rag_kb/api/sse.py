@@ -135,6 +135,8 @@ class IngestPipelineManager:
                 state["overall_status"] = IngestStatus.QUEUED.value
             elif event_name == "review_required":
                 state["overall_status"] = IngestStatus.REVIEW.value
+            elif event_name in ("review_completed", "pipeline_resumed"):
+                state["overall_status"] = "running"
             elif event_name == "duplicate_warning":
                 state["overall_status"] = IngestStatus.DUPLICATE_WARNING.value
             elif event_name == "pipeline_completed":

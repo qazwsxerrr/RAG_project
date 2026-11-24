@@ -1,6 +1,6 @@
 export interface ThinkingStep {
   name: string;
-  status: string; // "已执行" | "已跳过" | "已熔断"
+  status: string;
   duration_ms: number;
   count_change?: string;
   summary?: string;
@@ -17,13 +17,15 @@ export interface CitationSource {
   chunk_id: string;
   document_id: string;
   document_title: string;
-  chunk_label: string; // e.g. "技术部 · 第 12 片"
+  kb_id?: string;
+  kb_name?: string;
+  classification_level?: number;
+  chunk_label: string;
   page_idx: number;
   display_page?: number;
   bbox?: number[];
   snippet: string;
   asset_url?: string;
-  raw_oss_url?: string;
   preview_url?: string;
   page_render_url?: string;
   asset_proxy_url?: string;
@@ -56,4 +58,5 @@ export interface ChatSession {
   messages: ChatMessage[];
   scene_type?: string;
   enable_hyde?: boolean;
+  kb_ids?: string[];
 }

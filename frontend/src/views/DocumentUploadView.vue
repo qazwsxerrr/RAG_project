@@ -75,6 +75,16 @@
 
       <!-- 右侧快速操作按钮组 -->
       <div class="flex items-center space-x-2">
+        <div
+          v-if="authStore.currentUser && authStore.hasPermission(PERMISSIONS.DOC_UPLOAD)"
+          class="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-50 border border-slate-200/80 text-[11px] text-slate-600"
+        >
+          <span>可上传库 {{ loadingKbs ? '-' : uploadableKbs.length }} 个</span>
+          <span class="text-slate-300">|</span>
+          <span>密级上限</span>
+          <ClassificationBadge :level="authStore.currentUser.clearance_level" />
+        </div>
+
         <button 
           v-if="currentDocId && !showFormAgain && authStore.hasPermission(PERMISSIONS.DOC_UPLOAD)"
           @click="showFormAgain = true"
@@ -97,6 +107,10 @@
     <!-- 上传表单卡片 (仅具备 doc:upload 权限时渲染) -->
     <DocumentForm 
       v-if="(!currentDocId || showFormAgain) && authStore.hasPermission(PERMISSIONS.DOC_UPLOAD)"
+      :uploadableKbs="uploadableKbs"
+      :loadingKbs="loadingKbs"
+      :kbLoadError="kbLoadError"
+      @retryLoadKbs="loadUploadableKbs"
       @submitted="handleSubmitted" 
     />
 
@@ -125,6 +139,7 @@
         @statusChange="handleStatusChange"
         @fileNameChange="handleFileNameChange"
         @reviewRequired="handleReviewRequired"
+        @reviewCompleted="handleReviewCompleted"
         @duplicateWarning="handleDuplicateWarning"
         @completed="handleCompleted"
         @failed="handleFailed"
@@ -137,6 +152,7 @@
       :docId="currentDocId"
       :items="pendingReviews"
       :initialIndex="reviewInitialIndex"
+      :submitting="reviewSubmitting"
       @confirm="handleReviewConfirm"
       @close="reviewModalVisible = false"
     />
@@ -153,20 +169,47 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { ref, watch, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import DocumentForm from '../components/documents/DocumentForm.vue';
 import PipelineSteps from '../components/documents/PipelineSteps.vue';
 import ReviewDialog from '../components/documents/ReviewDialog.vue';
 import DuplicateDialog from '../components/documents/DuplicateDialog.vue';
-import type { ReviewItem } from '../types';
+import ClassificationBadge from '../components/common/ClassificationBadge.vue';
+import type { AccessibleKnowledgeBase, ReviewItem } from '../types';
 import { documentsApi } from '../api/documents';
+import { accessControlApi } from '../api/accessControl';
 import { useAuthStore, PERMISSIONS } from '../stores/auth';
 
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 const pipelineStepsRef = ref<any>(null);
+const uploadableKbs = ref<AccessibleKnowledgeBase[]>([]);
+const loadingKbs = ref<boolean>(false);
+const kbLoadError = ref<string>('');
+
+const loadUploadableKbs = async () => {
+  if (!authStore.hasPermission(PERMISSIONS.DOC_UPLOAD)) {
+    uploadableKbs.value = [];
+    return;
+  }
+  loadingKbs.value = true;
+  kbLoadError.value = '';
+  try {
+    const kbs = await accessControlApi.listAccessibleKnowledgeBases('UPLOAD');
+    uploadableKbs.value = kbs.filter((k) => k.can_upload);
+  } catch (err: any) {
+    uploadableKbs.value = [];
+    kbLoadError.value = err?.message || '加载可上传知识库失败';
+  } finally {
+    loadingKbs.value = false;
+  }
+};
+
+onMounted(() => {
+  void loadUploadableKbs();
+});
 
 const currentDocId = ref<string>('');
 const currentFileName = ref<string>('');
@@ -186,6 +229,7 @@ const handleFileNameChange = (fileName: string) => {
 
 // 审核模态框状态
 const reviewModalVisible = ref(false);
+const reviewSubmitting = ref(false);
 const pendingReviews = ref<ReviewItem[]>([]);
 const reviewInitialIndex = ref<number>(0);
 
@@ -216,14 +260,24 @@ const handleReviewRequired = (items: ReviewItem[], initialIndex: number = 0) => 
   reviewModalVisible.value = true;
 };
 
+const handleReviewCompleted = () => {
+  reviewModalVisible.value = false;
+};
+
 const handleReviewConfirm = async (itemsPayload: any[]) => {
+  if (reviewSubmitting.value) return;
+  reviewSubmitting.value = true;
   try {
     await documentsApi.submitReview(currentDocId.value, itemsPayload);
     reviewModalVisible.value = false;
-    // 刷新看板
-    pipelineStepsRef.value?.reconnect();
+    // SSE 在线时直接接收后续进度事件，避免立刻断连重拉快照；仅在未建连时兜底重连
+    if (!pipelineStepsRef.value?.isStreamConnected?.()) {
+      pipelineStepsRef.value?.reconnect();
+    }
   } catch (err: any) {
     alert(`审核提交失败: ${err.message}`);
+  } finally {
+    reviewSubmitting.value = false;
   }
 };
 

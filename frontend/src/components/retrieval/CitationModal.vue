@@ -104,6 +104,16 @@
               alt="原文图表截图" 
               class="max-h-64 max-w-full object-contain rounded"
             />
+            <div v-else-if="citationAssetError" class="flex flex-col items-center gap-2 py-5 text-xs text-amber-700">
+              <span>图表截图加载失败：{{ citationAssetError }}</span>
+              <button
+                type="button"
+                @click="retryCitationAsset"
+                class="px-3 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-800 text-[11px] font-medium cursor-pointer"
+              >
+                重试加载
+              </button>
+            </div>
             <span v-else class="text-xs text-slate-400 py-6">正在加载图表截图...</span>
           </div>
         </div>
@@ -216,9 +226,15 @@ const props = defineProps<{
   citation: CitationSource | null;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   (e: 'close'): void;
 }>();
+
+const handleEscapeKey = (event: KeyboardEvent) => {
+  if (event.key === 'Escape' && props.visible) {
+    emit('close');
+  }
+};
 
 const authStore = useAuthStore();
 const activeTab = ref<'snippet' | 'pdf'>('snippet');
@@ -234,6 +250,14 @@ const assetBlobCache = createSecureBlobCache();
 const citationAssetBlobUrl = computed(() =>
   assetBlobCache.getUrl(props.citation?.asset_proxy_url)
 );
+const citationAssetError = computed(() =>
+  assetBlobCache.getError(props.citation?.asset_proxy_url)
+);
+const retryCitationAsset = () => {
+  if (props.citation?.asset_proxy_url) {
+    assetBlobCache.retry(props.citation.asset_proxy_url).catch(() => {});
+  }
+};
 
 const displayPage = computed(() => {
   if (!props.citation) return 1;
@@ -396,7 +420,20 @@ const resetZoom = () => {
   zoomScale.value = 0.85;
 };
 
+watch(
+  () => props.visible,
+  (vis) => {
+    if (vis) {
+      window.addEventListener('keydown', handleEscapeKey);
+    } else {
+      window.removeEventListener('keydown', handleEscapeKey);
+    }
+  },
+  { immediate: true }
+);
+
 onUnmounted(() => {
+  window.removeEventListener('keydown', handleEscapeKey);
   abortInflightPageLoad();
   revokeBlobUrl();
   assetBlobCache.revokeAll();

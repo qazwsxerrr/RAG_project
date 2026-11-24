@@ -1,11 +1,10 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
-import type { DocumentItem, DepartmentItem, PipelineSnapshot } from '../types';
+import type { DocumentItem } from '../types';
 import { documentsApi } from '../api/documents';
 
 export const useDocumentStore = defineStore('document', () => {
   const documents = ref<DocumentItem[]>([]);
-  const departments = ref<DepartmentItem[]>([]);
   const loading = ref<boolean>(false);
   const error = ref<string | null>(null);
 
@@ -23,15 +22,6 @@ export const useDocumentStore = defineStore('document', () => {
     }
   };
 
-  /** 加载部门列表 */
-  const fetchDepartments = async () => {
-    try {
-      departments.value = await documentsApi.getDepartments();
-    } catch (err: any) {
-      console.warn('获取部门列表失败:', err);
-    }
-  };
-
   /** 删除指定文档 */
   const deleteDoc = async (docId: string) => {
     await documentsApi.deleteDocument(docId);
@@ -40,11 +30,9 @@ export const useDocumentStore = defineStore('document', () => {
 
   return {
     documents,
-    departments,
     loading,
     error,
     fetchDocuments,
-    fetchDepartments,
     deleteDoc,
   };
 });

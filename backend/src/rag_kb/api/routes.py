@@ -1,73 +1,84 @@
-"""src/rag_kb/api/routes.py —— 文档入库与流水线管控 HTTP 端点层。
+"""src/rag_kb/api/routes.py —— 文档入库、多维权限管控、单文档改密与流式预览 HTTP 端点层。
 
-前缀 /api/v1/documents，与前端 Vue 3 完全无缝对齐：
-- POST /documents/upload: 接收文件上传，注册并启动后台 LangGraph 流水线
-- GET /documents: 获取所有持久化及运行中文档列表
-- DELETE /documents/{doc_id}: 物理删除文档及其切片
-- GET /documents/{doc_id}/chunks: 查询指定文档切片详情
-- GET /documents/{doc_id}/status: 获取流水线静态状态快照
-- GET /documents/{doc_id}/events: SSE 长连接实时同步 11 节点执行流
-- POST /documents/{doc_id}/review: 提交人工审核确认并通过 Command(resume) 唤醒 LangGraph
-- GET /documents/{doc_id}/review-items/{item_id}/asset: 私有 OSS 切图反向代理
-- GET /chunks/{chunk_id}/asset: 切片图元反向代理
-- POST /documents/{doc_id}/resolve_duplicate: 防重冲突决策处理
-- POST /documents/{doc_id}/retry: 流水线重试
+全面迁移至 rag_kb.core.authz 单一策略决策中心 (PDP)：
+- 物理清除全部 8 处单部门前缀与 "/" 放行硬编码；
+- 上传支持多部门库与跨部门 ALLOW UPLOAD 共享库及受控 L1-L4 密级；
+- 新增 PATCH /api/v1/documents/{doc_id}/classification 单文档独立改密接口（含降密双权校验、租户版本递增与同事务安全审计）；
+- PDF 分片预览短票、单页高清渲染（含命中 _PDF_DOCUMENT_CACHE 时）与切图代理均执行对象级实时复核 + L3/L4 交付前强制留痕。
 """
 
+import io
 import re
 import uuid
 import json
+import zlib
+import struct
 import hashlib
 import asyncio
 import logging
 from pathlib import Path
+from urllib.parse import quote
 from typing import List, Optional, AsyncGenerator, Dict, Any, Tuple
+
+import numpy as np
+import pypdfium2 as pdfium
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Header, Query, Depends, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_kb.api.deps import (
-    UserContext,
-    get_current_user,
+    EffectiveAuthzContext,
+    get_current_user_with_db,
     require_permission,
-    assert_doc_visible,
-    is_path_under_prefix,
     issue_stream_ticket,
     verify_stream_ticket,
     get_session_auth_error,
+    publish_tenant_policy_epoch_to_redis,
     SESSION_AUTH_ERROR_DETAILS,
 )
-from rag_kb.core.config import settings
-from rag_kb.core.constants import IngestStatus, STEP_NAMES, Permissions
-from rag_kb.core.logging.context import get_request_id
-from rag_kb.db.session import get_db, AsyncSessionLocal
-from rag_kb.db.models import Document, DocumentChunk, Department, DocumentReviewItem
-from rag_kb.graph.state import get_default_state, IngestState
-from rag_kb.graph.build import get_ingest_graph
-from rag_kb.utils.oss import oss_service
 from rag_kb.api.schemas import (
     DocumentUploadResponse,
     DocumentItemSchema,
+    DocumentClassificationUpdateRequest,
+    DocumentClassificationUpdateResponse,
     ChunkItemSchema,
     PipelineSnapshotResponse,
-    PipelineStepStatus,
     ReviewSubmitRequest,
     DuplicateResolveRequest,
     DuplicateResolveResponse,
     RetryPipelineRequest,
-    ReviewItem,
     StreamTicketRequest,
     StreamTicketResponse,
 )
 from rag_kb.api.sse import pipeline_manager, format_sse
-from rag_kb.core.logging.audit import record_audit_log
-from rag_kb.core.rate_limit import (
-    enforce_user_rate_limit,
-    upload_dedup_lock,
+from rag_kb.core.authz import (
+    apply_document_authz_join_and_filter,
+    assert_doc_access,
+    assert_pipeline_state_access,
+    audit_high_classification_read,
+    invalidate_authz_cache,
+    list_accessible_kbs,
+    resolve_authorized_target_kb,
+    validate_requested_kb_ids,
 )
+from rag_kb.core.config import settings
+from rag_kb.core.constants import IngestStatus, KbAction, Permissions
+from rag_kb.core.logging.audit import (
+    AuditWriteError,
+    record_audit_log,
+    record_denial_audit,
+    record_security_audit_in_tx,
+)
+from rag_kb.core.logging.context import get_request_id
+from rag_kb.core.rate_limit import enforce_user_rate_limit
+from rag_kb.db.models import Document, DocumentChunk, DocumentReviewItem, KnowledgeBase
+from rag_kb.db.session import get_db, AsyncSessionLocal
 from rag_kb.graph.edges import can_safely_jump_to_step
+from rag_kb.graph.state import get_default_state
+from rag_kb.services.pipeline.dedup_service import render_duplicate_warning_for_viewer
 from rag_kb.services.pipeline.ingest_queue import ingest_queue_service, cleanup_doc_temp_files
+from rag_kb.utils.oss import oss_service
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +91,6 @@ _RANGE_HEADER_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
 def _parse_http_byte_range(range_header: Optional[str], total_size: int) -> Optional[Tuple[int, int]]:
-    """解析标准单段 HTTP Range 头 (bytes=start-end)，返回闭区间 (start, end)"""
     if not range_header or total_size <= 0:
         return None
     m = _RANGE_HEADER_RE.match(range_header.strip())
@@ -113,12 +123,13 @@ async def _authenticate_bearer_or_ticket(
     purpose: str,
     authorization: Optional[str],
     ticket: Optional[str],
-) -> UserContext:
-    """支持标准 Authorization Bearer 头或单文档单用途受限短票 (?ticket=)，彻底拒绝通用 ?token="""
+    db: Optional[AsyncSession] = None,
+) -> EffectiveAuthzContext:
+    """支持标准 Authorization Bearer 头或单文档单用途 cv=2 短票 (?ticket=)，每次调用重验双版本与自然到期"""
     if authorization and authorization.strip():
-        user = await get_current_user(authorization=authorization)
+        user = await get_current_user_with_db(authorization=authorization, db=db)
     elif ticket and ticket.strip():
-        user = await verify_stream_ticket(ticket.strip(), expected_doc_id=doc_id, expected_purpose=purpose)
+        user = await verify_stream_ticket(ticket.strip(), expected_doc_id=doc_id, expected_purpose=purpose, db=db)
     else:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -128,7 +139,7 @@ async def _authenticate_bearer_or_ticket(
     if not user.has_permission(Permissions.KB_RETRIEVE.value):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"【权限不足】当前操作需要 [{Permissions.KB_RETRIEVE.value}] 权限点，您的角色缺乏此权限",
+            detail=f"【权限不足】当前操作需要 [{Permissions.KB_RETRIEVE.value}] 权限点",
         )
     return user
 
@@ -138,10 +149,9 @@ async def _stream_read_upload_with_limit(
     dest_path: Path,
     max_size_bytes: int,
 ) -> tuple[int, str]:
-    """流式分块读取上传文件并同步计算 SHA-256，超出单文件上限立即 413 熔断，杜绝超大文件撑爆内存"""
     sha = hashlib.sha256()
     total_bytes = 0
-    chunk_size = 1024 * 1024  # 1MB 分块
+    chunk_size = 1024 * 1024
 
     try:
         with open(dest_path, "wb") as out_f:
@@ -176,29 +186,22 @@ async def _stream_read_upload_with_limit(
     return total_bytes, sha.hexdigest()
 
 
-# ==================== 1. 文档上传与受理 (Phase-8 先存后返 202 + Redis 队列异步削峰) ====================
+# ==================== 1. 文档上传与受理 ====================
 
 @router.post("/upload", response_model=DocumentUploadResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload_document(
     request: Request,
     file: UploadFile = File(...),
-    department: Optional[str] = Form(None),
+    kb_id: Optional[str] = Form(None),
+    classification_level: Optional[int] = Form(None),
     category: str = Form("技术规范"),
     tags: str = Form("[]"),
     custom_file_name: Optional[str] = Form(None),
     skip_review: bool = Form(False),
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission(Permissions.DOC_UPLOAD))
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.DOC_UPLOAD)),
 ):
-    """
-    企业级高并发异步文档上传受理接口 (Phase-6 RBAC + Phase-8 Redis 限流与队列削峰)：
-    1. Redis Lua 原子滑动窗口频率限流（超限返回 429 + Retry-After）；
-    2. 严格校验 doc:upload 权限点与目标归属部门范围（BOLA 防越权）；
-    3. 流式分块落盘校验体积与 SHA-256 + Redis 分布式防抖幂等锁；
-    4. 真实上传阿里云 OSS 原件，写入 rag_documents(overall_status='queued', is_active=False)；
-    5. XADD 投递至 Redis Streams 消费队列，立即响应 HTTP 202 Accepted 成功受理提示。
-    """
-    # 0. Redis 高并发上传频率限制
+    """企业级多维权限异步文档上传受理接口（支持多部门库与跨部门 ALLOW UPLOAD 共享库及 L1-L4 独立密级）"""
     await enforce_user_rate_limit(
         request=request,
         tenant_id=user.tenant_id,
@@ -212,7 +215,7 @@ async def upload_document(
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"不支持的文件格式: {ext}。仅允许上传: {', '.join(ALLOWED_EXTENSIONS)}"
+            detail=f"不支持的文件格式: {ext}。仅允许上传: {', '.join(ALLOWED_EXTENSIONS)}",
         )
 
     parsed_tags = []
@@ -223,12 +226,12 @@ async def upload_document(
     except Exception:
         parsed_tags = [t.strip() for t in tags.split(",") if t.strip()]
 
-    from rag_kb.services.mcp.server import (
-        resolve_authorized_department_path,
-        execute_core_document_ingest_from_temp_file,
+    target_kb, validated_level = await resolve_authorized_target_kb(
+        db=db,
+        ctx=user,
+        kb_id=kb_id,
+        classification_level=classification_level,
     )
-
-    department_path = await resolve_authorized_department_path(db, user, department)
 
     doc_id = str(uuid.uuid4())
     temp_dir = Path(settings.DATA_PARSED_DIR) / "tmp"
@@ -238,6 +241,8 @@ async def upload_document(
     max_bytes = max(1, int(settings.MAX_UPLOAD_SIZE_MB)) * 1024 * 1024
     file_size, file_hash = await _stream_read_upload_with_limit(file, temp_file_path, max_bytes)
 
+    from rag_kb.services.mcp.server import execute_core_document_ingest_from_temp_file
+
     return await execute_core_document_ingest_from_temp_file(
         db=db,
         user=user,
@@ -246,102 +251,273 @@ async def upload_document(
         temp_file_path=temp_file_path,
         file_size=file_size,
         file_hash=file_hash,
-        department_path=department_path,
+        target_kb=target_kb,
+        classification_level=validated_level,
         category=category,
         parsed_tags=parsed_tags,
         skip_review=skip_review,
         queue_service=ingest_queue_service,
     )
 
-# ==================== 2. 文档列表与删除 ====================
+
+# ==================== 2. 文档列表、单文档在线改密与删除 ====================
 
 @router.get("", response_model=List[DocumentItemSchema])
 async def list_documents(
+    kb_id: Optional[str] = Query(None, description="按知识库 ID 收窄过滤"),
+    classification_level: Optional[int] = Query(None, ge=1, le=4, description="按文档密级过滤"),
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
 ):
-    """获取所有已入库与正在入库的文档列表 (强制按当前员工权限前缀隔离)"""
-    stmt = select(Document).order_by(Document.created_at.desc())
+    """获取当前员工有权 READ 的文档列表（基于单一策略决策中心 SQL 前置过滤 + 逐库动作能力标记）"""
+    authorized_kb_ids = await validate_requested_kb_ids(db, user, [kb_id] if kb_id else None, action=KbAction.READ.value)
 
-    # 非全局管理员强制施加部门树隔离
-    if "/" not in user.allowed_department_prefixes:
-        from sqlalchemy import or_
-        dept_conds = [
-            or_(
-                Document.department_path == p.rstrip("/"),
-                Document.department_path.startswith(p.rstrip("/") + "/")
-            )
-            for p in user.allowed_department_prefixes
-        ]
-        stmt = stmt.where(or_(*dept_conds))
+    # 加载逐库动作矩阵，用于前端精确展示单篇文档的可删除/可改密操作按钮
+    accessible_kbs = await list_accessible_kbs(db, user, action=KbAction.READ.value)
+    kb_caps = {str(item.kb.id): item for item in accessible_kbs}
 
-    res = await db.execute(stmt)
-    db_docs = res.scalars().all()
+    stmt = select(Document, KnowledgeBase).order_by(Document.created_at.desc())
+    stmt = apply_document_authz_join_and_filter(
+        stmt=stmt,
+        ctx=user,
+        action=KbAction.READ.value,
+        kb_ids=authorized_kb_ids,
+    )
+    if classification_level is not None:
+        stmt = stmt.where(
+            func.greatest(KnowledgeBase.min_classification_level, Document.classification_level) == classification_level
+        )
 
-    # 统计当前可见文档各自的切片数
+    rows = (await db.execute(stmt)).all()
+
     chunk_counts: Dict[uuid.UUID, int] = {}
-    if db_docs:
-        from sqlalchemy import func
-        doc_ids = [d.id for d in db_docs]
+    if rows:
+        doc_ids = [d.id for d, _ in rows]
         cnt_stmt = (
             select(DocumentChunk.document_id, func.count(DocumentChunk.id))
             .where(DocumentChunk.document_id.in_(doc_ids))
             .group_by(DocumentChunk.document_id)
         )
-        cnt_res = await db.execute(cnt_stmt)
-        chunk_counts = {row[0]: int(row[1]) for row in cnt_res.all()}
+        chunk_counts = {row[0]: int(row[1]) for row in (await db.execute(cnt_stmt)).all()}
 
-    results = []
+    results: List[DocumentItemSchema] = []
     seen_ids = set()
 
-    for d in db_docs:
-        seen_ids.add(str(d.id))
+    for d, kb in rows:
+        doc_id_str = str(d.id)
+        seen_ids.add(doc_id_str)
+        kb_id_str = str(kb.id)
+        cap = kb_caps.get(kb_id_str)
+        eff_level = max(int(kb.min_classification_level), int(d.classification_level))
+
         if d.department_path in ("/public", "/"):
             dept_name = "公共知识库"
         elif d.department_path:
             dept_name = d.department_path.strip("/").split("/")[-1] or "公共知识库"
         else:
-            dept_name = "技术部"
-        results.append(DocumentItemSchema(
-            doc_id=str(d.id),
-            file_name=d.title,
-            department=dept_name,
-            category=d.category,
-            tags=d.tags or [],
-            status=d.overall_status,
-            step_index=d.current_step_index or 11,
-            chunk_count=chunk_counts.get(d.id, 0),
-            created_at=d.created_at,
-            updated_at=d.updated_at
-        ))
+            dept_name = kb.name
 
-    # 合并内存中活跃的流水线实例 (同样受部门树前缀过滤)
-    for doc_id, state in pipeline_manager._active_states.items():
-        if doc_id not in seen_ids:
-            mem_dept = state.get("department", "")
-            if "/" in user.allowed_department_prefixes or any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-                results.append(DocumentItemSchema(
-                    doc_id=doc_id,
-                    file_name=state.get("file_name", "unknown"),
-                    department=mem_dept.split("/")[-1] if "/" in mem_dept else mem_dept,
-                    category=state.get("category", "技术规范"),
-                    tags=state.get("tags", []),
-                    status=state.get("overall_status", "pending"),
-                    step_index=state.get("current_step_index", 1),
-                    created_at=None,
-                    updated_at=None
-                ))
-                seen_ids.add(doc_id)
+        results.append(
+            DocumentItemSchema(
+                doc_id=doc_id_str,
+                file_name=d.title,
+                kb_id=kb_id_str,
+                kb_name=kb.name,
+                classification_level=int(d.classification_level),
+                effective_classification_level=eff_level,
+                can_delete=bool(cap.can_delete) if cap else False,
+                can_manage=bool(cap.can_manage and user.has_permission(Permissions.SECURITY_CLASSIFY)) if cap else False,
+                department=dept_name,
+                category=d.category,
+                tags=d.tags or [],
+                status=d.overall_status,
+                step_index=d.current_step_index or 11,
+                chunk_count=chunk_counts.get(d.id, 0),
+                created_at=d.created_at,
+                updated_at=d.updated_at,
+            )
+        )
+
+    # 合并内存中活跃的流水线实例（逐条通过 assert_pipeline_state_access 校验）
+    for mem_doc_id, state in list(pipeline_manager._active_states.items()):
+        if mem_doc_id in seen_ids:
+            continue
+        if authorized_kb_ids and str(state.get("kb_id") or "") not in {str(k) for k in authorized_kb_ids}:
+            continue
+        try:
+            kb, eff_level = await assert_pipeline_state_access(db, user, state, KbAction.READ.value, audit_denial=False)
+        except HTTPException:
+            continue
+        if classification_level is not None and eff_level != classification_level:
+            continue
+        mem_dept = state.get("department", kb.owner_dept_path)
+        cap = kb_caps.get(str(kb.id))
+        results.append(
+            DocumentItemSchema(
+                doc_id=mem_doc_id,
+                file_name=state.get("file_name", "unknown"),
+                kb_id=str(kb.id),
+                kb_name=kb.name,
+                classification_level=int(state.get("classification_level") or kb.default_doc_level),
+                effective_classification_level=eff_level,
+                can_delete=bool(cap.can_delete) if cap else False,
+                can_manage=bool(cap.can_manage and user.has_permission(Permissions.SECURITY_CLASSIFY)) if cap else False,
+                department=mem_dept.split("/")[-1] if "/" in mem_dept else mem_dept,
+                category=state.get("category", "技术规范"),
+                tags=state.get("tags", []),
+                status=state.get("overall_status", "pending"),
+                step_index=state.get("current_step_index", 1),
+                created_at=None,
+                updated_at=None,
+            )
+        )
+        seen_ids.add(mem_doc_id)
 
     return results
+
+
+@router.patch("/{doc_id}/classification", response_model=DocumentClassificationUpdateResponse)
+async def update_document_classification(
+    doc_id: str,
+    req: DocumentClassificationUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.SECURITY_CLASSIFY)),
+):
+    """
+    单文档独立改密接口（严格遵循方案 §3.3.4）：
+    1. 校验真实所属库的 MANAGE 权限、security:classify 权限、操作者可访问原密级；
+    2. 目标密级必须落入目标知识库允许区间 [min, max] 且不超过操作者自身有效密级；
+    3. 若为降密 (target < current)，额外强制要求 security:declassify 权限点；
+    4. 同事务更新文档密级、递增租户 policy_epoch 并落盘安全审计（任一步失败整体回滚）；
+    5. 事务提交后发布最新 policy_epoch 至 Redis，立即驱逐旧版本 JWT 与预览短票！
+    """
+    try:
+        doc_uuid = uuid.UUID(doc_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="无效的文档 UUID 格式")
+
+    doc = (
+        await db.execute(
+            select(Document).where(Document.id == doc_uuid).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="未找到该文档")
+
+    # 要求对真实所属库具备 MANAGE 且当前操作者能访问原密级（防止盲改本人不可读的高密文档）
+    kb, prev_effective_level = await assert_doc_access(db, user, doc, KbAction.MANAGE.value)
+
+    target_level = int(req.classification_level)
+    prev_level = int(doc.classification_level)
+
+    if target_level < int(kb.min_classification_level) or target_level > int(kb.max_doc_level):
+        await record_denial_audit(
+            action="DOCUMENT_CLASSIFICATION_DENIED",
+            resource_id=doc_id,
+            error_msg=f"目标密级 L{target_level} 超出知识库区间 [L{kb.min_classification_level}, L{kb.max_doc_level}]",
+            details={"kb_id": str(kb.id), "target_level": target_level},
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"【密级边界拦截】目标密级 L{target_level} 超出所属知识库允许区间 [L{kb.min_classification_level}, L{kb.max_doc_level}]",
+        )
+
+    if target_level > int(user.effective_clearance):
+        await record_denial_audit(
+            action="DOCUMENT_CLASSIFICATION_DENIED",
+            resource_id=doc_id,
+            error_msg=f"目标密级 L{target_level} 高于操作者有效密级 L{user.effective_clearance}",
+            details={"kb_id": str(kb.id), "target_level": target_level, "user_clearance": user.effective_clearance},
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"【密级边界拦截】不能将文档设置为高于操作者自身密级 (L{user.effective_clearance}) 的密级 L{target_level}",
+        )
+
+    if target_level < prev_level and not user.has_permission(Permissions.SECURITY_DECLASSIFY):
+        await record_denial_audit(
+            action="DOCUMENT_DECLASSIFY_DENIED",
+            resource_id=doc_id,
+            error_msg="缺少 security:declassify 降密权限",
+            details={"kb_id": str(kb.id), "previous_level": prev_level, "target_level": target_level},
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="【降密拦截】将文档密级调低需要额外的 [security:declassify] 权限点",
+        )
+
+    try:
+        doc.classification_level = target_level
+        epoch_res = await db.execute(
+            text(
+                "INSERT INTO sys_tenant_policy_epochs (tenant_id, policy_epoch, updated_at) VALUES (:tid, 2, NOW()) "
+                "ON CONFLICT (tenant_id) DO UPDATE "
+                "SET policy_epoch = sys_tenant_policy_epochs.policy_epoch + 1, updated_at = NOW() "
+                "RETURNING policy_epoch"
+            ),
+            {"tid": user.tenant_id},
+        )
+        new_epoch = int(epoch_res.scalar_one())
+
+        new_effective_level = max(int(kb.min_classification_level), target_level)
+        await record_security_audit_in_tx(
+            db=db,
+            action="DOCUMENT_CLASSIFICATION_UPDATE",
+            resource_id=doc_id,
+            status="SUCCESS",
+            details={
+                "operator": user.username,
+                "kb_id": str(kb.id),
+                "kb_name": kb.name,
+                "previous_level": prev_level,
+                "previous_effective_level": prev_effective_level,
+                "target_level": target_level,
+                "new_effective_level": new_effective_level,
+                "reason": req.reason,
+                "policy_epoch": new_epoch,
+            },
+            tenant_id=user.tenant_id,
+            user_id=user.user_id,
+        )
+        await db.commit()
+    except AuditWriteError as ae:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(ae))
+    except Exception:
+        await db.rollback()
+        raise
+
+    # 同步更新内存态流水线缓存并向 Redis 广播新租户策略纪元
+    mem_state = pipeline_manager.get_state(doc_id)
+    if mem_state is not None:
+        mem_state["classification_level"] = target_level
+    invalidate_authz_cache(tenant_id=user.tenant_id)
+    await publish_tenant_policy_epoch_to_redis(user.tenant_id, new_epoch)
+
+    return DocumentClassificationUpdateResponse(
+        doc_id=doc_id,
+        kb_id=str(kb.id),
+        previous_level=prev_level,
+        classification_level=target_level,
+        effective_classification_level=new_effective_level,
+        policy_epoch=new_epoch,
+        message=f"文档密级已从 L{prev_level} 更新为 L{target_level}，策略版本已推进至 v{new_epoch}",
+    )
+
 
 @router.delete("/{doc_id}")
 async def delete_document(
     doc_id: str,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission(Permissions.DOC_DELETE))
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.DOC_DELETE)),
 ):
-    """物理删除文档及其全部切片 (Phase-6: 校验 doc:delete 且强制 assert_doc_visible 防越权)"""
+    """物理删除文档及其全部切片（严格校验 DELETE 动作范围 + KB ACL + 密级）"""
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
@@ -350,49 +526,72 @@ async def delete_document(
     doc = await db.get(Document, doc_uuid)
     if not doc:
         raise HTTPException(status_code=404, detail="未找到该文档或已被删除")
-    assert_doc_visible(user, doc)
+    kb, eff_level = await assert_doc_access(db, user, doc, KbAction.DELETE.value)
 
     await db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == doc_uuid))
     await db.execute(delete(Document).where(Document.id == doc_uuid))
+    await record_security_audit_in_tx(
+        db=db,
+        action="DOCUMENT_DELETE",
+        resource_id=doc_id,
+        status="SUCCESS",
+        details={
+            "operator": user.username,
+            "kb_id": str(kb.id),
+            "kb_name": kb.name,
+            "effective_doc_level": eff_level,
+        },
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
+    )
     await db.commit()
 
     mem_temp_path = None
     if doc_id in pipeline_manager._active_states:
         mem_temp_path = pipeline_manager._active_states[doc_id].get("temp_file_path")
-        del pipeline_manager._active_states[doc_id]
+    pipeline_manager.remove_pipeline(doc_id)
     cleanup_doc_temp_files(doc_id, mem_temp_path)
 
-    await record_audit_log(
-        action="DOCUMENT_DELETE",
-        resource_id=doc_id,
-        status="SUCCESS",
-        details={"operator": user.username, "dept_path": user.dept_path}
-    )
-
     return {"status": "success", "message": f"文档 {doc_id} 及其切片已彻底删除"}
+
 
 # ==================== 3. 切片详情查询 ====================
 
 @router.get("/{doc_id}/chunks", response_model=List[ChunkItemSchema])
 async def get_document_chunks(
     doc_id: str,
+    kb_id: Optional[str] = Query(None, description="可选收窄核对的知识库 ID"),
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
 ):
-    """获取指定文档已入库的全部切片详情 (校验 kb:retrieve 并做 assert_doc_visible)"""
+    """获取指定文档已入库的全部切片详情（强制对象级 READ 鉴权 + L3/L4 交付前强制留痕）"""
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="无效的文档 UUID 格式")
 
+    expected_kb_uuid: Optional[uuid.UUID] = None
+    if kb_id and kb_id.strip():
+        try:
+            expected_kb_uuid = uuid.UUID(kb_id.strip())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="无效的 kb_id UUID 格式")
+
     doc = await db.get(Document, doc_uuid)
     if not doc:
         raise HTTPException(status_code=404, detail="未找到该文档")
-    assert_doc_visible(user, doc)
+    kb, eff_level = await assert_doc_access(db, user, doc, KbAction.READ.value, expected_kb_id=expected_kb_uuid)
+    await audit_high_classification_read(
+        ctx=user,
+        action="HIGH_CLASSIFICATION_CHUNKS_READ",
+        doc_id=doc_id,
+        kb_id=str(kb.id),
+        effective_level=eff_level,
+        extra_details={"document_title": doc.title},
+    )
 
     stmt = select(DocumentChunk).where(DocumentChunk.document_id == doc_uuid).order_by(DocumentChunk.chunk_index.asc())
-    res = await db.execute(stmt)
-    chunks = res.scalars().all()
+    chunks = (await db.execute(stmt)).scalars().all()
 
     return [
         ChunkItemSchema(
@@ -409,10 +608,11 @@ async def get_document_chunks(
             breadcrumb=c.breadcrumb or [],
             asset_url=f"/api/v1/chunks/{c.id}/asset" if getattr(c, "asset_url", None) else None,
             table_id=getattr(c, "table_id", None),
-            sparse_token_count=len(c.sparse_vector) if c.sparse_vector else 0
+            sparse_token_count=len(c.sparse_vector) if c.sparse_vector else 0,
         )
         for c in chunks
     ]
+
 
 # ==================== 4. 状态快照与 SSE 流式推流 ====================
 
@@ -420,40 +620,35 @@ async def get_document_chunks(
 async def get_pipeline_status(
     doc_id: str,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
 ):
-    """获取流水线静态快照 (委托 FastMCP 核心状态服务 build_core_document_status_snapshot 单一事实源)"""
     from rag_kb.services.mcp.server import build_core_document_status_snapshot
     return await build_core_document_status_snapshot(db=db, user=user, doc_id=doc_id)
+
 
 @router.post("/{doc_id}/stream-ticket", response_model=StreamTicketResponse)
 async def create_document_stream_ticket(
     doc_id: str,
     req: StreamTicketRequest,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
 ):
-    """
-    签发绑定当前用户与单篇文档的短期只读流式票据（TTL 默认 60s），
-    供浏览器新窗口 PDF 分片预览或 EventSource 建立连接使用，避免通用业务 JWT 出现在 URL 中。
-    """
+    """签发绑定当前用户与单篇文档的 cv=2 短期受限只读流式票据"""
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="无效的文档 UUID 格式")
 
     state = pipeline_manager.get_state(doc_id)
+    if req.purpose == "events" and not state and doc_id not in pipeline_manager._event_history:
+        raise HTTPException(status_code=404, detail=f"未找到文档 ID 为 {doc_id} 的活跃流水线")
     if state:
-        mem_dept = state.get("department", "")
-        if "/" not in user.allowed_department_prefixes and not any(
-            is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes
-        ):
-            raise HTTPException(status_code=403, detail="【越权访问拦截】您当前无权访问其他部门的文档资料")
+        await assert_pipeline_state_access(db, user, state, KbAction.READ.value)
     else:
         doc = await db.get(Document, doc_uuid)
         if not doc:
             raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id}")
-        assert_doc_visible(user, doc)
+        await assert_doc_access(db, user, doc, KbAction.READ.value)
 
     ticket, ttl = await issue_stream_ticket(user=user, doc_id=doc_id, purpose=req.purpose)
     return StreamTicketResponse(
@@ -467,36 +662,34 @@ async def create_document_stream_ticket(
 @router.get("/{doc_id}/events")
 async def stream_pipeline_events(
     doc_id: str,
+    request: Request,
     last_event_id: Optional[str] = Header(None, alias="Last-Event-ID"),
-    last_event_id_query: Optional[int] = Query(None, alias="last_event_id", ge=0, description="受控换新票重连时续传的历史事件序号"),
+    last_event_id_query: Optional[int] = Query(None, alias="last_event_id", ge=0),
     authorization: Optional[str] = Header(None, alias="Authorization"),
-    ticket: Optional[str] = Query(None, description="单文档短期受限 SSE 票据")
+    ticket: Optional[str] = Query(None, description="单文档短期受限 SSE 票据"),
+    db: AsyncSession = Depends(get_db),
 ):
-    """
-    SSE 长连接推流接口（实时同步 11 节点流转、审核挂起信号）
-    支持标准 Last-Event-ID 机制进行断网重连与历史事件回放 (强制验签与防越权校验)
-    """
+    """SSE 长连接推流接口（强制验签、对象权限复核与推送前实时双版本/到期检测）"""
     user = await _authenticate_bearer_or_ticket(
         doc_id=doc_id,
         purpose="events",
         authorization=authorization,
         ticket=ticket,
+        db=db,
     )
+
+    try:
+        doc_uuid = uuid.UUID(doc_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="无效的文档 UUID 格式")
 
     state = pipeline_manager.get_state(doc_id)
     if state:
-        mem_dept = state.get("department", "")
-        if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权监听其他部门的文档进度流")
+        await assert_pipeline_state_access(db, user, state, KbAction.READ.value)
     else:
-        try:
-            doc_uuid = uuid.UUID(doc_id)
-            async with AsyncSessionLocal() as session:
-                db_doc = await session.get(Document, doc_uuid)
-                if db_doc:
-                    assert_doc_visible(user, db_doc)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="无效的文档 UUID 格式")
+        db_doc = await db.get(Document, doc_uuid)
+        if db_doc:
+            await assert_doc_access(db, user, db_doc, KbAction.READ.value)
 
     if not state and doc_id not in pipeline_manager._event_history:
         raise HTTPException(status_code=404, detail=f"未找到文档 ID 为 {doc_id} 的活跃流水线")
@@ -509,16 +702,21 @@ async def stream_pipeline_events(
     elif last_event_id_query is not None:
         since_id = int(last_event_id_query)
 
+    async def _prepare_sse_payload(event_name: str, raw_data: Any) -> Any:
+        if event_name == "duplicate_warning" and isinstance(raw_data, dict):
+            async with AsyncSessionLocal() as viewer_db:
+                return await render_duplicate_warning_for_viewer(viewer_db, user, raw_data)
+        return raw_data
+
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
             auth_error = await get_session_auth_error(
-                user.user_id, token_iat_ms=user.token_iat_ms, token_exp=user.token_exp
+                user, token_iat_ms=user.token_iat_ms, token_exp=user.token_exp, watched_doc_ids=[doc_uuid]
             )
             if auth_error:
                 yield format_sse(auth_error, {"doc_id": doc_id, "detail": SESSION_AUTH_ERROR_DETAILS[auth_error]})
                 return
 
-            # 首次连接下发初始快照，重连时回放尚未消费的历史事件。
             if since_id == 0:
                 snapshot = pipeline_manager.to_snapshot(doc_id)
                 if snapshot:
@@ -528,30 +726,42 @@ async def stream_pipeline_events(
                 for past_evt in pipeline_manager.get_history(doc_id):
                     past_id = int(past_evt["id"])
                     if past_id > since_id:
-                        yield format_sse(past_evt["event"], past_evt["data"], past_id)
+                        past_payload = await _prepare_sse_payload(past_evt["event"], past_evt["data"])
+                        yield format_sse(past_evt["event"], past_payload, past_id)
 
             curr_status = state.get("overall_status") if state else None
             if curr_status in ["completed", "failed"]:
                 return
 
+            idle_ticks = 0
             while True:
+                if await request.is_disconnected():
+                    break
                 try:
-                    event = await asyncio.wait_for(event_queue.get(), timeout=10.0)
+                    event = await asyncio.wait_for(event_queue.get(), timeout=2.0)
+                    idle_ticks = 0
                 except asyncio.TimeoutError:
                     event = None
+                    idle_ticks += 1
+
+                if await request.is_disconnected():
+                    break
 
                 auth_error = await get_session_auth_error(
-                    user.user_id, token_iat_ms=user.token_iat_ms, token_exp=user.token_exp
+                    user, token_iat_ms=user.token_iat_ms, token_exp=user.token_exp, watched_doc_ids=[doc_uuid]
                 )
                 if auth_error:
                     yield format_sse(auth_error, {"doc_id": doc_id, "detail": SESSION_AUTH_ERROR_DETAILS[auth_error]})
                     break
                 if event is None:
-                    yield ": keepalive\n\n"
+                    if idle_ticks >= 5:
+                        idle_ticks = 0
+                        yield ": keepalive\n\n"
                     continue
 
                 event_name = event["event"]
-                yield format_sse(event_name, event["data"], event["id"])
+                event_payload = await _prepare_sse_payload(event_name, event["data"])
+                yield format_sse(event_name, event_payload, event["id"])
 
                 if event_name in ["pipeline_completed", "pipeline_failed"]:
                     break
@@ -567,8 +777,9 @@ async def stream_pipeline_events(
             "Cache-Control": PRIVATE_NO_STORE_CACHE,
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-        }
+        },
     )
+
 
 # ==================== 5. 人工审核提交与恢复 ====================
 
@@ -576,12 +787,10 @@ async def stream_pipeline_events(
 async def submit_pipeline_review(
     doc_id: str,
     request: ReviewSubmitRequest,
-    user: UserContext = Depends(require_permission(Permissions.DOC_REVIEW)),
-    db: AsyncSession = Depends(get_db)
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.DOC_REVIEW)),
+    db: AsyncSession = Depends(get_db),
 ):
-    """
-    提交人工审核结果并唤醒 LangGraph 流水线恢复执行 (Phase-6: 校验 doc:review 并做 assert_doc_visible)
-    """
+    """提交人工审核结果并唤醒流水线（校验 REVIEW 动作范围 + KB ACL + 密级）"""
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
@@ -589,20 +798,18 @@ async def submit_pipeline_review(
 
     state = pipeline_manager.get_state(doc_id)
     if state:
-        mem_dept = state.get("department", "")
-        if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权审核其他部门的文档")
+        await assert_pipeline_state_access(db, user, state, KbAction.REVIEW.value)
     else:
         doc = await db.get(Document, doc_uuid)
         if doc:
-            assert_doc_visible(user, doc)
+            await assert_doc_access(db, user, doc, KbAction.REVIEW.value)
         else:
             raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id} 的活跃流水线")
 
     if state and state.get("overall_status") != IngestStatus.REVIEW.value:
         raise HTTPException(status_code=400, detail="当前流水线并未处于待人工审核挂起状态")
 
-    # 更新状态中的用户修改
+    updated_reviews: List[Dict[str, Any]] = []
     if state:
         update_map = {item.item_id: item for item in request.items}
         for rev in state.get("pending_reviews", []):
@@ -612,8 +819,14 @@ async def submit_pipeline_review(
                 rev["user_description"] = up.user_description
                 rev["remark"] = up.remark
                 rev["status"] = "modified" if up.user_description != rev.get("vlm_description") else "approved"
+        updated_reviews = list(state.get("pending_reviews", []))
+        # 返回 200 前立即将内存状态切出 pending_review，消除提交后快照轮询回弹与并发重复提交窗口
+        state["overall_status"] = "running"
+        state["current_step_index"] = 8
+        steps = state.get("steps", [])
+        if isinstance(steps, list) and len(steps) >= 7 and isinstance(steps[6], dict):
+            steps[6]["status"] = "completed"
 
-    # 后台受队列并发信号量保护注入 Command(resume=...) 唤醒流水线并完整同步 DB 终态
     resume_payload = [item.model_dump() for item in request.items]
     ingest_queue_service.schedule_background_resume(
         ingest_queue_service.resume_after_review(
@@ -627,7 +840,8 @@ async def submit_pipeline_review(
 
     await pipeline_manager.broadcast(doc_id, "review_completed", {
         "doc_id": doc_id,
-        "reviewed_items_count": len(request.items)
+        "reviewed_items_count": len(request.items),
+        "pending_reviews": updated_reviews,
     })
 
     await record_audit_log(
@@ -637,15 +851,18 @@ async def submit_pipeline_review(
         details={
             "reviewed_items_count": len(request.items),
             "operator": user.username,
-            "action": "resume"
-        }
+            "action": "resume",
+        },
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
     )
 
     return {
         "status": "success",
         "message": "人工审核已确认，流水线已继续执行",
-        "doc_id": doc_id
+        "doc_id": doc_id,
     }
+
 
 # ==================== 6. 资产安全流式反向代理 ====================
 
@@ -653,10 +870,10 @@ async def submit_pipeline_review(
 async def get_review_item_asset(
     doc_id: str,
     item_id: str,
-    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
-    db: AsyncSession = Depends(get_db)
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
+    db: AsyncSession = Depends(get_db),
 ):
-    """人工审核多模态资产私有 OSS 安全流式反向代理 (挂载 kb:retrieve 鉴权与 assert_doc_visible)"""
+    """人工审核多模态资产私有 OSS 安全流式反向代理"""
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
@@ -664,22 +881,26 @@ async def get_review_item_asset(
 
     state = pipeline_manager.get_state(doc_id)
     if state:
-        mem_dept = state.get("department", "")
-        if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权查看其他部门的文档图表")
+        kb, eff_level = await assert_pipeline_state_access(db, user, state, KbAction.READ.value)
     else:
         doc = await db.get(Document, doc_uuid)
-        if doc:
-            assert_doc_visible(user, doc)
-        else:
+        if not doc:
             raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id}")
+        kb, eff_level = await assert_doc_access(db, user, doc, KbAction.READ.value)
+
+    await audit_high_classification_read(
+        ctx=user,
+        action="HIGH_CLASSIFICATION_REVIEW_ASSET_READ",
+        doc_id=doc_id,
+        kb_id=str(kb.id),
+        effective_level=eff_level,
+        extra_details={"item_id": item_id},
+    )
 
     target_url = None
     if state:
-        for r in state.get("pending_reviews", []):
-            if r.get("item_id") == item_id:
-                target_url = r.get("raw_oss_url")
-                break
+        oss_map = state.get("review_asset_oss_map") or {}
+        target_url = oss_map.get(item_id)
     else:
         rev_item = (await db.execute(
             select(DocumentReviewItem).where(DocumentReviewItem.document_id == doc_uuid, DocumentReviewItem.item_key == item_id)
@@ -691,7 +912,7 @@ async def get_review_item_asset(
         raise HTTPException(status_code=404, detail="未找到该待审核图元或该项无关联切图")
 
     try:
-        stream_gen, content_length, clean_key = oss_service.get_object_stream(target_url)
+        stream_gen, content_length, clean_key = await asyncio.to_thread(oss_service.get_object_stream, target_url)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"拉取 OSS 资产流失败: {e}")
 
@@ -703,32 +924,39 @@ async def get_review_item_asset(
 
     return StreamingResponse(stream_gen, media_type=media_type, headers=headers)
 
+
 @router_chunks.get("/{chunk_id}/asset")
 async def get_chunk_asset(
     chunk_id: str,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
 ):
-    """切片关联的多模态切图安全流式反向代理 (Phase-6: 校验关联主文档归属权限 BOLA)"""
+    """切片关联的多模态切图安全流式反向代理（先查 chunk.document_id 再按真实主文档与所属库裁决）"""
     try:
         c_uuid = uuid.UUID(chunk_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="无效的切片 UUID 格式")
 
-    stmt = select(DocumentChunk).where(DocumentChunk.id == c_uuid)
-    res = await db.execute(stmt)
-    chunk = res.scalar_one_or_none()
+    chunk = (await db.execute(select(DocumentChunk).where(DocumentChunk.id == c_uuid))).scalar_one_or_none()
     if not chunk or not chunk.asset_url:
         raise HTTPException(status_code=404, detail="切片无关联图元切图")
 
     doc = await db.get(Document, chunk.document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="切片所属主文档不存在")
-    assert_doc_visible(user, doc)
+    kb, eff_level = await assert_doc_access(db, user, doc, KbAction.READ.value)
 
-    target_url = chunk.asset_url
+    await audit_high_classification_read(
+        ctx=user,
+        action="HIGH_CLASSIFICATION_CHUNK_ASSET_READ",
+        doc_id=str(doc.id),
+        kb_id=str(kb.id),
+        effective_level=eff_level,
+        extra_details={"chunk_id": chunk_id},
+    )
+
     try:
-        stream_gen, content_length, clean_key = oss_service.get_object_stream(target_url)
+        stream_gen, content_length, clean_key = await asyncio.to_thread(oss_service.get_object_stream, chunk.asset_url)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"拉取 OSS 资产流失败: {e}")
 
@@ -740,14 +968,8 @@ async def get_chunk_asset(
 
     return StreamingResponse(stream_gen, media_type=media_type, headers=headers)
 
-# ==================== 6.1 原文预览与单页高清渲染 ====================
 
-import io
-import struct
-import zlib
-import numpy as np
-import pypdfium2 as pdfium
-from urllib.parse import quote
+# ==================== 6.1 原文预览与单页高清渲染 ====================
 
 _PDF_DOCUMENT_CACHE: Dict[str, bytes] = {}
 _PDF_RENDER_SEM: Optional[asyncio.Semaphore] = None
@@ -761,7 +983,6 @@ def _get_pdf_render_sem() -> asyncio.Semaphore:
 
 
 async def _fetch_pdf_bytes(raw_oss_url: str) -> bytes:
-    """从 OSS 异步线程拉取 PDF 二进制并做受控 LRU 缓存"""
     if raw_oss_url in _PDF_DOCUMENT_CACHE:
         return _PDF_DOCUMENT_CACHE[raw_oss_url]
 
@@ -778,7 +999,6 @@ async def _fetch_pdf_bytes(raw_oss_url: str) -> bytes:
 
 
 def _encode_numpy_to_png(arr: np.ndarray) -> bytes:
-    """将 pypdfium2 渲染出的 RGB/RGBA uint8 矩阵无损编码为标准 PNG 字节流（零外部 PIL 依赖）"""
     if arr.ndim != 3 or arr.shape[2] not in (3, 4):
         raise ValueError(f"不支持的像素通道维度: {arr.shape}")
     height, width, channels = arr.shape
@@ -802,7 +1022,6 @@ def _encode_numpy_to_png(arr: np.ndarray) -> bytes:
 
 
 def _render_pdf_page_sync(pdf_bytes: bytes, page_num: int, scale: float) -> tuple[bytes, int]:
-    """在独立工作线程执行 CPU 密集型 pypdfium2 渲染，严禁阻塞 FastAPI 主事件循环"""
     pdf = pdfium.PdfDocument(pdf_bytes)
     try:
         total_pages = len(pdf)
@@ -817,6 +1036,7 @@ def _render_pdf_page_sync(pdf_bytes: bytes, page_num: int, scale: float) -> tupl
         except Exception:
             pass
 
+
 @router.get("/{doc_id}/preview")
 async def preview_document(
     doc_id: str,
@@ -825,23 +1045,32 @@ async def preview_document(
     ticket: Optional[str] = Query(None, description="单文档短期受限预览票据"),
     db: AsyncSession = Depends(get_db),
 ):
-    """文档安全流式预览接口 (支持 HTTP Range 206 分片秒开，仅允许 Bearer 或单资源受限短票)"""
+    """文档安全流式预览接口（每次 Range 请求均重验双版本、自然到期、对象密级 + L3/L4 交付前强制留痕）"""
     user = await _authenticate_bearer_or_ticket(
         doc_id=doc_id,
         purpose="preview",
         authorization=authorization,
         ticket=ticket,
+        db=db,
     )
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="无效的文档 UUID 格式")
 
-    res = await db.execute(select(Document).where(Document.id == doc_uuid))
-    doc = res.scalar_one_or_none()
+    doc = (await db.execute(select(Document).where(Document.id == doc_uuid))).scalar_one_or_none()
     if not doc or not doc.raw_oss_url:
         raise HTTPException(status_code=404, detail="未找到文档或未关联 OSS 原文")
-    assert_doc_visible(user, doc)
+    kb, eff_level = await assert_doc_access(db, user, doc, KbAction.READ.value)
+
+    await audit_high_classification_read(
+        ctx=user,
+        action="HIGH_CLASSIFICATION_PREVIEW_READ",
+        doc_id=doc_id,
+        kb_id=str(kb.id),
+        effective_level=eff_level,
+        extra_details={"range": range_header, "document_title": doc.title},
+    )
 
     ext = Path(doc.title).suffix.lower()
     if ext == ".pdf":
@@ -899,27 +1128,35 @@ async def preview_document(
 
     return StreamingResponse(stream_gen, media_type=media_type, headers=headers)
 
+
 @router.get("/{doc_id}/pages/{page_num}")
 async def get_document_page_image(
     doc_id: str,
     page_num: int,
     scale: float = 2.0,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission(Permissions.KB_RETRIEVE))
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.KB_RETRIEVE)),
 ):
-    """
-    文档单页超高精渲染接口 (Phase-6: 校验权限并做 assert_doc_visible)
-    """
+    """文档单页超高精渲染接口（即使命中 _PDF_DOCUMENT_CACHE 也必须先复核授权并完成高密留痕）"""
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="无效的文档 UUID 格式")
 
-    res = await db.execute(select(Document).where(Document.id == doc_uuid))
-    doc = res.scalar_one_or_none()
+    doc = (await db.execute(select(Document).where(Document.id == doc_uuid))).scalar_one_or_none()
     if not doc or not doc.raw_oss_url:
         raise HTTPException(status_code=404, detail="文档未找到或未关联 OSS 原文")
-    assert_doc_visible(user, doc)
+
+    # 强制先复核对象授权与高密审计，再访问 _PDF_DOCUMENT_CACHE
+    kb, eff_level = await assert_doc_access(db, user, doc, KbAction.READ.value)
+    await audit_high_classification_read(
+        ctx=user,
+        action="HIGH_CLASSIFICATION_PAGE_RENDER_READ",
+        doc_id=doc_id,
+        kb_id=str(kb.id),
+        effective_level=eff_level,
+        extra_details={"page_num": page_num, "document_title": doc.title},
+    )
 
     if not doc.title.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="单页图片预览仅支持 PDF 格式文档")
@@ -941,6 +1178,7 @@ async def get_document_page_image(
     }
     return StreamingResponse(io.BytesIO(png_bytes), media_type="image/png", headers=headers)
 
+
 # ==================== 7. 防重冲突与重试 ====================
 
 @router.post("/{doc_id}/resolve_duplicate", response_model=DuplicateResolveResponse)
@@ -948,9 +1186,9 @@ async def resolve_duplicate(
     doc_id: str,
     request: DuplicateResolveRequest,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission(Permissions.DOC_UPLOAD))
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.DOC_UPLOAD)),
 ):
-    """防重冲突解决决策接口 (Phase-6: 校验权限与 assert_doc_visible)"""
+    """防重冲突解决决策接口（禁止低密级用户 overwrite 覆盖高密级存量文档）"""
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
@@ -958,19 +1196,53 @@ async def resolve_duplicate(
 
     state = pipeline_manager.get_state(doc_id)
     if state:
-        mem_dept = state.get("department", "")
-        if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权操作其他部门的文档")
+        kb, _ = await assert_pipeline_state_access(db, user, state, KbAction.UPLOAD.value)
     else:
         doc = await db.get(Document, doc_uuid)
         if doc:
-            assert_doc_visible(user, doc)
+            await assert_doc_access(db, user, doc, KbAction.UPLOAD.value)
             raise HTTPException(status_code=400, detail=f"文档 {doc_id} 内存中无挂起的活跃流水线")
-        else:
-            raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id} 的活跃流水线")
+        raise HTTPException(status_code=404, detail=f"未找到文档 {doc_id} 的活跃流水线")
 
     if request.action == "overwrite":
+        dedup_res = state.get("dedup_res") or {}
+        if dedup_res.get("is_higher_classification") or dedup_res.get("can_overwrite") is False:
+            await record_denial_audit(
+                action="DOCUMENT_OVERWRITE_HIGHER_CLASSIFICATION_DENIED",
+                resource_id=doc_id,
+                error_msg="禁止低密级上传者覆盖高密级存量文档",
+                details={"kb_id": str(kb.id), "user_clearance": user.effective_clearance},
+                tenant_id=user.tenant_id,
+                user_id=user.user_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="【越权覆盖拦截】命中文档的密级高于您的访问等级，严禁覆盖更新，请选择独立新建或取消",
+            )
+        # 二次查库核对 matched_doc_id 真实密级
+        matched_id = request.matched_doc_id or dedup_res.get("matched_doc_id")
+        if matched_id:
+            try:
+                old_doc = await db.get(Document, uuid.UUID(str(matched_id)))
+            except ValueError:
+                old_doc = None
+            if old_doc is not None:
+                old_eff_lvl = max(int(kb.min_classification_level), int(old_doc.classification_level))
+                if int(user.effective_clearance) < old_eff_lvl or old_doc.kb_id != kb.id or old_doc.tenant_id != user.tenant_id:
+                    await record_denial_audit(
+                        action="DOCUMENT_OVERWRITE_HIGHER_CLASSIFICATION_DENIED",
+                        resource_id=str(old_doc.id),
+                        error_msg="禁止低密级或跨库覆盖存量高密文档",
+                        details={"kb_id": str(kb.id), "old_eff_lvl": old_eff_lvl, "user_clearance": user.effective_clearance},
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="【越权覆盖拦截】您当前密级不足以覆盖该存量高密文档",
+                    )
         state["force_overwrite"] = True
+        state["uploader_clearance"] = user.effective_clearance
     elif request.action == "create_new":
         state["force_overwrite"] = False
         state["skip_review"] = True
@@ -984,11 +1256,10 @@ async def resolve_duplicate(
         cleanup_doc_temp_files(doc_id, state.get("temp_file_path"))
         await pipeline_manager.broadcast(doc_id, "pipeline_cancelled", {
             "doc_id": doc_id,
-            "message": "用户取消重复文档入库"
+            "message": "用户取消重复文档入库",
         })
         return DuplicateResolveResponse(doc_id=doc_id, status="cancelled", message="已取消入库")
 
-    # 受队列并发信号量保护唤醒继续完成第 11 步入库并同步 DB 终态
     ingest_queue_service.schedule_background_resume(
         ingest_queue_service.resume_after_duplicate_decision(
             doc_id,
@@ -1001,17 +1272,18 @@ async def resolve_duplicate(
     return DuplicateResolveResponse(
         doc_id=doc_id,
         status="resumed",
-        message=f"已按动作 {request.action} 恢复入库流水线"
+        message=f"已按动作 {request.action} 恢复入库流水线",
     )
+
 
 @router.post("/{doc_id}/retry")
 async def retry_pipeline(
     doc_id: str,
     request: Optional[RetryPipelineRequest] = None,
     db: AsyncSession = Depends(get_db),
-    user: UserContext = Depends(require_permission(Permissions.DOC_UPLOAD))
+    user: EffectiveAuthzContext = Depends(require_permission(Permissions.DOC_UPLOAD)),
 ):
-    """流水线失败引导重试 (Phase-6 权限校验 + Phase-8 重新推入 Redis Streams 消费队列受控执行)"""
+    """流水线失败引导重试（校验 UPLOAD 动作范围 + KB ACL + 密级，并透传 kb_id 与密级）"""
     try:
         doc_uuid = uuid.UUID(doc_id)
     except ValueError:
@@ -1020,12 +1292,10 @@ async def retry_pipeline(
     doc = await db.get(Document, doc_uuid)
     state = pipeline_manager.get_state(doc_id)
     if state:
-        mem_dept = state.get("department", "")
-        if "/" not in user.allowed_department_prefixes and not any(is_path_under_prefix(mem_dept, p) for p in user.allowed_department_prefixes):
-            raise HTTPException(status_code=403, detail="【越权访问拦截】您无权重试其他部门的文档")
+        kb, eff_level = await assert_pipeline_state_access(db, user, state, KbAction.UPLOAD.value)
     else:
         if doc:
-            assert_doc_visible(user, doc)
+            kb, eff_level = await assert_doc_access(db, user, doc, KbAction.UPLOAD.value)
             persisted_skip_review = bool(
                 doc.pipeline_steps
                 and isinstance(doc.pipeline_steps, list)
@@ -1039,6 +1309,12 @@ async def retry_pipeline(
                 category=doc.category,
                 tags=doc.tags or [],
                 skip_review=persisted_skip_review,
+                tenant_id=doc.tenant_id,
+                kb_id=str(doc.kb_id),
+                kb_name=kb.name,
+                classification_level=int(doc.classification_level),
+                created_by=doc.created_by or user.user_id,
+                uploader_clearance=user.effective_clearance,
             )
             state["raw_oss_url"] = doc.raw_oss_url
             state["file_hash"] = doc.file_hash
@@ -1058,6 +1334,7 @@ async def retry_pipeline(
     state["current_step_index"] = effective_from_step
     state["error"] = None
     state["failed_step"] = None
+    state["uploader_clearance"] = user.effective_clearance
     for s in state.get("steps", []):
         s_idx = s.get("step_index", 0)
         if s_idx >= effective_from_step or s.get("status") == "failed":
@@ -1076,7 +1353,7 @@ async def retry_pipeline(
         file_name=state.get("file_name") or (doc.title if doc else "document.pdf"),
         raw_oss_url=state.get("raw_oss_url") or (doc.raw_oss_url if doc else ""),
         file_hash=state.get("file_hash") or (doc.file_hash if doc else ""),
-        department=state.get("department") or (doc.department_path if doc else "/public"),
+        department=state.get("department") or kb.owner_dept_path,
         category=state.get("category") or (doc.category if doc else "技术规范"),
         tags=state.get("tags") or (doc.tags if doc else []),
         skip_review=bool(state.get("skip_review", False)),
@@ -1085,6 +1362,9 @@ async def retry_pipeline(
         user_id=user.user_id,
         tenant_id=user.tenant_id,
         request_id=get_request_id(),
+        kb_id=str(kb.id),
+        classification_level=int(state.get("classification_level") or eff_level),
+        uploader_clearance=user.effective_clearance,
     )
 
     retry_hint = (
@@ -1104,11 +1384,14 @@ async def retry_pipeline(
         resource_id=doc_id,
         status="SUCCESS",
         details={
+            "kb_id": str(kb.id),
             "requested_from_step": requested_step,
             "effective_from_step": effective_from_step,
             "operator": user.username,
             "stream_msg_id": stream_msg_id,
-        }
+        },
+        tenant_id=user.tenant_id,
+        user_id=user.user_id,
     )
 
     return {

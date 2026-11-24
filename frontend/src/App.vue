@@ -118,6 +118,21 @@
             <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
             <span v-show="!isSidebarCollapsed || isMobileMenuOpen">渠道状态</span>
           </router-link>
+
+          <router-link
+            v-if="authStore.canAccessGovernance()"
+            to="/access-control"
+            @click="isMobileMenuOpen = false"
+            class="flex items-center px-2.5 py-2 rounded-lg text-xs transition-colors"
+            :class="[
+              isSidebarCollapsed && !isMobileMenuOpen ? 'justify-center' : 'space-x-2.5',
+              route.path === '/access-control' ? 'bg-blue-50 text-blue-600 font-semibold' : 'text-slate-600 hover:bg-slate-100/70 hover:text-slate-900'
+            ]"
+            title="权限治理"
+          >
+            <svg class="w-4 h-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span v-show="!isSidebarCollapsed || isMobileMenuOpen">权限治理</span>
+          </router-link>
         </div>
 
         <!-- 导航分组 2：问答会话管理 -->
@@ -186,7 +201,7 @@
         <div v-else class="flex-1"></div>
       </div>
 
-      <!-- 侧边栏底部：当前登录员工身份卡片（双行排布，完整展示用户名与部门，移除底层组件铭牌） -->
+      <!-- 侧边栏底部：当前登录员工多维身份卡片（用户名、职级、L1-L4 密级与多部门归属） -->
       <div v-if="authStore.currentUser" class="border-t border-slate-100 bg-slate-50/60 p-3">
         <div v-if="!isSidebarCollapsed || isMobileMenuOpen" class="space-y-2">
           <div class="flex items-center justify-between gap-1.5">
@@ -194,13 +209,22 @@
               <span class="w-2 h-2 rounded-full bg-indigo-500 shrink-0"></span>
               <span class="text-xs font-bold text-slate-800 truncate">{{ authStore.currentUser.username }}</span>
             </div>
-            <span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 text-[10px] font-mono shrink-0">
-              {{ authStore.currentUser.roles?.[0] || 'employee' }}
+            <ClassificationBadge :level="authStore.currentUser.clearance_level" compact />
+          </div>
+          <div class="flex items-center justify-between gap-1.5 text-[10px] text-slate-500">
+            <span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 font-medium truncate">
+              {{ formatPositionLabel(authStore.currentUser.position_code) }}
+            </span>
+            <span class="truncate text-slate-400" :title="formatRolesTooltip(authStore.currentUser.roles)">
+              {{ formatRolesShort(authStore.currentUser.roles) }}
             </span>
           </div>
           <div class="flex items-center justify-between gap-2">
-            <span class="text-[11px] text-slate-500 truncate" :title="authStore.currentUser.dept_path">
-              {{ formatDeptShort(authStore.currentUser.dept_path) }}
+            <span
+              class="text-[11px] text-slate-500 truncate"
+              :title="(authStore.currentUser.dept_paths || []).join(' | ') || authStore.currentUser.dept_path"
+            >
+              {{ formatMultiDeptShort(authStore.currentUser.dept_paths, authStore.currentUser.dept_path) }}
             </span>
             <button
               @click="authStore.logout()"
@@ -252,11 +276,7 @@
 
       <!-- 页面视图渲染 -->
       <div class="flex-1 h-full overflow-hidden">
-        <router-view v-slot="{ Component }">
-          <transition name="fade" mode="out-in">
-            <component :is="Component" />
-          </transition>
-        </router-view>
+        <router-view />
       </div>
     </main>
   </div>
@@ -268,6 +288,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { useChatStore } from './stores/chat';
 import { useAuthStore, PERMISSIONS } from './stores/auth';
 import SciFiBackground from './components/retrieval/SciFiBackground.vue';
+import ClassificationBadge from './components/common/ClassificationBadge.vue';
 
 const route = useRoute();
 const router = useRouter();
@@ -288,10 +309,44 @@ const setRenameInputRef = (el: unknown) => {
   renameInputEl.value = el instanceof HTMLInputElement ? el : null;
 };
 
-const formatDeptShort = (deptPath?: string): string => {
-  if (!deptPath || deptPath === '/') return '全部部门';
-  const parts = deptPath.split('/').filter(Boolean);
-  return parts[parts.length - 1] || deptPath;
+const POSITION_LABEL_MAP: Record<string, string> = {
+  EXECUTIVE: '高管',
+  MANAGER: '部门经理',
+  STAFF: '正式员工',
+};
+
+const ROLE_LABEL_MAP: Record<string, string> = {
+  admin: '系统管理员',
+  dept_manager: '部门管理员',
+  developer: '研发人员',
+  accountant: '财务人员',
+  executive: '高管',
+  employee: '员工',
+};
+
+const formatPositionLabel = (code?: string): string => {
+  const key = String(code || 'STAFF').toUpperCase();
+  return POSITION_LABEL_MAP[key] || key;
+};
+
+const formatRolesShort = (roles?: string[]): string => {
+  if (!roles || roles.length === 0) return '员工';
+  return roles.slice(0, 2).map((r) => ROLE_LABEL_MAP[r] || r).join(' · ');
+};
+
+const formatRolesTooltip = (roles?: string[]): string => {
+  if (!roles || roles.length === 0) return '员工';
+  return roles.map((r) => ROLE_LABEL_MAP[r] || r).join('、');
+};
+
+const formatMultiDeptShort = (deptPaths?: string[], primary?: string): string => {
+  const paths = (deptPaths && deptPaths.length > 0) ? deptPaths : (primary ? [primary] : []);
+  if (paths.length === 0) return '无归属部门';
+  const shortNames = paths.map((p) => {
+    const parts = p.split('/').filter(Boolean);
+    return parts[parts.length - 1] || p;
+  });
+  return shortNames.length > 1 ? `${shortNames[0]} 等${shortNames.length}部门` : shortNames[0];
 };
 
 const handleNewChat = () => {

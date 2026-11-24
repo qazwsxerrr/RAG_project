@@ -1,21 +1,14 @@
-"""src/rag_search/nodes.py —— 检索 LangGraph 的全部节点函数实现。
-
-从 prepare 到 dense / sparse / bm25 / hyde 四路并行召回，再到 fuse → rerank → mmr，
-每个节点都是检索流程的执行体。
-在各阶段埋设 StreamWriter 思考流事件帧（ThinkingStep），支持前端 ThinkingProcess 思考看板实时动画展示。
-"""
+"""src/rag_search/nodes.py —— 检索 LangGraph 的全部节点函数实现（全面接入多维权限 PDP 与无 raw_oss_url 剥离）。"""
 
 import time
 import logging
 from typing import Any, Dict, List, Optional
-import httpx
 from langgraph.types import StreamWriter
 from langchain_core.runnables import RunnableConfig
 
 from rag_kb.core.config import settings
 from rag_kb.core.llm import llm_gateway
 from rag_kb.db.session import AsyncSessionLocal
-from rag_kb.utils.embedding import embedding_service
 from rag_kb.utils import tokenize
 from rag_search import edges, fusion, rerank as reranker_module, mmr
 from rag_search.channels import dense, sparse, bm25, hyde
@@ -23,15 +16,15 @@ from rag_search.state import RetrievalState
 
 logger = logging.getLogger(__name__)
 
+
 def _emit_thinking(
     writer: Optional[StreamWriter],
     name: str,
     status: str,
     duration_ms: int = 0,
     count_change: Optional[str] = None,
-    summary: Optional[str] = None
+    summary: Optional[str] = None,
 ):
-    """向前端流式派发单个思考阶段状态微标帧"""
     if writer is None:
         return
     step_payload = {
@@ -39,15 +32,15 @@ def _emit_thinking(
         "status": status,
         "duration_ms": duration_ms,
         "count_change": count_change,
-        "summary": summary
+        "summary": summary,
     }
     try:
         writer({"type": "thinking_step", "step": step_payload})
     except Exception:
         pass
 
+
 async def _resolve_db_session(config: Optional[RunnableConfig]):
-    """从 RunnableConfig 解析注入的 AsyncSession，或新建连接"""
     if config:
         cfg = config.get("configurable", {})
         existing = cfg.get("db_session")
@@ -55,29 +48,26 @@ async def _resolve_db_session(config: Optional[RunnableConfig]):
             return existing, False
     return AsyncSessionLocal(), True
 
+
 # ==================== 阶段 1：查询预处理 ====================
 
 async def prepare_node(
     state: RetrievalState,
     writer: StreamWriter,
-    config: RunnableConfig
+    config: RunnableConfig,
 ) -> Dict[str, Any]:
-    """阶段 1: 多轮会话指代消除改写与特征提取"""
     _emit_thinking(
         writer,
         name="查询预处理",
         status="执行中...",
-        summary="正在多轮会话指代消除并提取高维稠密与稀疏特征向量..."
+        summary="正在多轮会话指代消除并提取高维稠密与稀疏特征向量...",
     )
     t0 = time.perf_counter()
 
     query = state["query"].strip()
     history = state.get("history", [])
 
-    # 1. 多轮指代消除
     rewritten_query = query
-    # Phase-6 §7: 模型凭据已 100% 租约化，不再依赖本地明文 Key 做前置判定；
-    # 若租约换取失败由 llm_gateway 内部 Fail-Fast 抛出真实异常。
     if history and len(history) > 0:
         valid_history = [m for m in history if m.get("content") and m.get("content") != query]
         has_assistant = any(m.get("role") == "assistant" for m in valid_history)
@@ -92,10 +82,10 @@ async def prepare_node(
                 rw = await llm_gateway.chat(
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
+                        {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.1,
-                    max_tokens=150
+                    max_tokens=150,
                 )
                 rw = rw.strip().strip('"\'')
                 if rw:
@@ -103,7 +93,6 @@ async def prepare_node(
             except Exception as e:
                 logger.warning(f"【指代消除跳过】LLM 改写异常: {e}")
 
-    # 2. 委托 MCP 向量特征单一事实源 (SSOT) 提取 1024 维稠密向量与 L2 归一化稀疏特征
     from rag_kb.services.mcp.server import execute_core_embeddings_extraction
 
     dense_list, sparse_list = await execute_core_embeddings_extraction(
@@ -127,7 +116,7 @@ async def prepare_node(
         status="已执行",
         duration_ms=cost_ms,
         count_change="1 句",
-        summary=summary_desc
+        summary=summary_desc,
     )
 
     return {
@@ -139,18 +128,18 @@ async def prepare_node(
             "node": edges.NODE_PREPARE,
             "duration_ms": cost_ms,
             "status": "success",
-            "rewritten_query": rewritten_query
-        }]
+            "rewritten_query": rewritten_query,
+        }],
     }
+
 
 # ==================== 阶段 2：四路并行召回 ====================
 
 async def dense_node(
     state: RetrievalState,
     writer: StreamWriter,
-    config: RunnableConfig
+    config: RunnableConfig,
 ) -> Dict[str, Any]:
-    """阶段 2a: HNSW 稠密语义召回"""
     _emit_thinking(writer, name="稠密召回", status="执行中...", summary="并发检索 1024 维 HNSW 向量索引...")
     t0 = time.perf_counter()
 
@@ -159,10 +148,11 @@ async def dense_node(
         chunks = await dense.search(
             session=db_session,
             query_dense=state["dense_vec"],
-            department_scope=state.get("department_scope"),
+            authz_filter_spec=state.get("authz_filter_spec"),
+            kb_ids=state.get("kb_ids"),
             category_scope=state.get("category_scope"),
             tags_scope=state.get("tags_scope"),
-            top_k=settings.RETRIEVAL_RECALL_TOP_N
+            top_k=settings.RETRIEVAL_RECALL_TOP_N,
         )
     finally:
         if should_close:
@@ -175,7 +165,7 @@ async def dense_node(
         status="已执行",
         duration_ms=cost_ms,
         count_change=f"{len(chunks)} 条",
-        summary=f"HNSW 1024 维语义向量召回 Top-{len(chunks)}"
+        summary=f"HNSW 1024 维语义向量召回 Top-{len(chunks)}",
     )
 
     return {
@@ -184,16 +174,18 @@ async def dense_node(
             "node": edges.NODE_DENSE,
             "duration_ms": cost_ms,
             "count": len(chunks),
-            "status": "success"
-        }]
+            "candidate_chunk_ids": [c["chunk_id"] for c in chunks],
+            "candidate_doc_ids": sorted({c["document_id"] for c in chunks}),
+            "status": "success",
+        }],
     }
+
 
 async def sparse_node(
     state: RetrievalState,
     writer: StreamWriter,
-    config: RunnableConfig
+    config: RunnableConfig,
 ) -> Dict[str, Any]:
-    """阶段 2b: 归一化稀疏向量内积召回"""
     _emit_thinking(writer, name="稀疏召回", status="执行中...", summary="计算 JSONB 稀疏特征与 L2 内积打分...")
     t0 = time.perf_counter()
 
@@ -202,10 +194,11 @@ async def sparse_node(
         chunks = await sparse.search(
             session=db_session,
             query_sparse=state["sparse_vec"],
-            department_scope=state.get("department_scope"),
+            authz_filter_spec=state.get("authz_filter_spec"),
+            kb_ids=state.get("kb_ids"),
             category_scope=state.get("category_scope"),
             tags_scope=state.get("tags_scope"),
-            top_k=settings.RETRIEVAL_RECALL_TOP_N
+            top_k=settings.RETRIEVAL_RECALL_TOP_N,
         )
     finally:
         if should_close:
@@ -218,7 +211,7 @@ async def sparse_node(
         status="已执行",
         duration_ms=cost_ms,
         count_change=f"{len(chunks)} 条",
-        summary=f"L2 归一化稀疏内积召回 Top-{len(chunks)}"
+        summary=f"L2 归一化稀疏内积召回 Top-{len(chunks)}",
     )
 
     return {
@@ -227,16 +220,18 @@ async def sparse_node(
             "node": edges.NODE_SPARSE,
             "duration_ms": cost_ms,
             "count": len(chunks),
-            "status": "success"
-        }]
+            "candidate_chunk_ids": [c["chunk_id"] for c in chunks],
+            "candidate_doc_ids": sorted({c["document_id"] for c in chunks}),
+            "status": "success",
+        }],
     }
+
 
 async def bm25_node(
     state: RetrievalState,
     writer: StreamWriter,
-    config: RunnableConfig
+    config: RunnableConfig,
 ) -> Dict[str, Any]:
-    """阶段 2c: 全文倒排索引召回"""
     _emit_thinking(writer, name="关键词召回", status="执行中...", summary="检索 PostgreSQL TSVector GIN 倒排索引...")
     t0 = time.perf_counter()
 
@@ -245,10 +240,11 @@ async def bm25_node(
         chunks = await bm25.search(
             session=db_session,
             tsquery_tokens=state["tsquery_tokens"],
-            department_scope=state.get("department_scope"),
+            authz_filter_spec=state.get("authz_filter_spec"),
+            kb_ids=state.get("kb_ids"),
             category_scope=state.get("category_scope"),
             tags_scope=state.get("tags_scope"),
-            top_k=settings.RETRIEVAL_RECALL_TOP_N
+            top_k=settings.RETRIEVAL_RECALL_TOP_N,
         )
     finally:
         if should_close:
@@ -261,7 +257,7 @@ async def bm25_node(
         status="已执行",
         duration_ms=cost_ms,
         count_change=f"{len(chunks)} 条",
-        summary=f"PostgreSQL TSVector 倒排索引召回 Top-{len(chunks)}"
+        summary=f"PostgreSQL TSVector 倒排索引召回 Top-{len(chunks)}",
     )
 
     return {
@@ -270,19 +266,20 @@ async def bm25_node(
             "node": edges.NODE_BM25,
             "duration_ms": cost_ms,
             "count": len(chunks),
-            "status": "success"
-        }]
+            "candidate_chunk_ids": [c["chunk_id"] for c in chunks],
+            "candidate_doc_ids": sorted({c["document_id"] for c in chunks}),
+            "status": "success",
+        }],
     }
+
 
 async def hyde_node(
     state: RetrievalState,
     writer: StreamWriter,
-    config: RunnableConfig
+    config: RunnableConfig,
 ) -> Dict[str, Any]:
-    """阶段 3: 假设性搜索 (HyDE) 增强"""
     if not state.get("enable_hyde", True):
-        # 未开启 HyDE 假想增强时不向流中推入该步骤，保持时间线纯粹
-        return {"candidates": [], "trace": [{"node": edges.NODE_HYDE, "status": "skipped"}]}
+        return {"candidates": [], "trace": [{"node": edges.NODE_HYDE, "status": "skipped", "candidate_chunk_ids": [], "candidate_doc_ids": []}]}
 
     _emit_thinking(writer, name="假设性搜索", status="执行中...", summary="大模型正在构思撰写假想技术解答并二次召回...")
     t0 = time.perf_counter()
@@ -292,10 +289,11 @@ async def hyde_node(
         chunks = await hyde.search(
             session=db_session,
             query=state["rewritten_query"],
-            department_scope=state.get("department_scope"),
+            authz_filter_spec=state.get("authz_filter_spec"),
+            kb_ids=state.get("kb_ids"),
             category_scope=state.get("category_scope"),
             tags_scope=state.get("tags_scope"),
-            top_k=settings.HYDE_TOP_N
+            top_k=settings.HYDE_TOP_N,
         )
     finally:
         if should_close:
@@ -314,7 +312,7 @@ async def hyde_node(
         status=status_label,
         duration_ms=cost_ms,
         count_change=f"{len(chunks)} 条",
-        summary=summary_text
+        summary=summary_text,
     )
 
     return {
@@ -323,22 +321,24 @@ async def hyde_node(
             "node": edges.NODE_HYDE,
             "duration_ms": cost_ms,
             "count": len(chunks),
-            "status": "success" if chunks else "fallback"
-        }]
+            "candidate_chunk_ids": [c["chunk_id"] for c in chunks],
+            "candidate_doc_ids": sorted({c["document_id"] for c in chunks}),
+            "status": "success" if chunks else "fallback",
+        }],
     }
+
 
 # ==================== 阶段 4：RRF 融合 ====================
 
 async def fuse_node(
     state: RetrievalState,
-    writer: StreamWriter
+    writer: StreamWriter,
 ) -> Dict[str, Any]:
-    """阶段 4: 加权倒数排名动态融合与物理去重"""
     _emit_thinking(
         writer,
         name="RRF 融合",
         status="执行中...",
-        summary=f"场景 '{state.get('scene_type', 'general')}' 动态加权倒数排名融合去重中..."
+        summary=f"场景 '{state.get('scene_type', 'general')}' 动态加权倒数排名融合去重中...",
     )
     t0 = time.perf_counter()
 
@@ -349,7 +349,7 @@ async def fuse_node(
         candidates=raw_candidates,
         scene_type=state.get("scene_type", "general"),
         k=settings.RRF_K,
-        top_n=settings.FUSE_TOP_N
+        top_n=settings.FUSE_TOP_N,
     )
 
     cost_ms = int((time.perf_counter() - t0) * 1000)
@@ -359,7 +359,7 @@ async def fuse_node(
         status="已执行",
         duration_ms=cost_ms,
         count_change=f"{total_candidates} -> {len(fused)} 条",
-        summary=f"场景 '{state.get('scene_type', 'general')}' 动态加权倒数排名去重融合"
+        summary=f"场景 '{state.get('scene_type', 'general')}' 动态加权倒数排名去重融合",
     )
 
     return {
@@ -369,17 +369,17 @@ async def fuse_node(
             "duration_ms": cost_ms,
             "input_count": total_candidates,
             "output_count": len(fused),
-            "status": "success"
-        }]
+            "status": "success",
+        }],
     }
+
 
 # ==================== 阶段 5：交叉精排 ====================
 
 async def rerank_node(
     state: RetrievalState,
-    writer: StreamWriter
+    writer: StreamWriter,
 ) -> Dict[str, Any]:
-    """阶段 5: Cross-Encoder 深度精排与丢弃审计"""
     _emit_thinking(writer, name="重排", status="执行中...", summary="正在使用 BGE-Reranker-v2 交叉注意力深度打分...")
     t0 = time.perf_counter()
 
@@ -387,7 +387,7 @@ async def rerank_node(
     reranked, dropped = await reranker_module.rerank(
         query=state["rewritten_query"],
         chunks=fused,
-        top_n=settings.RERANK_TOP_N
+        top_n=settings.RERANK_TOP_N,
     )
 
     cost_ms = int((time.perf_counter() - t0) * 1000)
@@ -397,7 +397,7 @@ async def rerank_node(
         status="已执行",
         duration_ms=cost_ms,
         count_change=f"{len(fused)} -> {len(reranked)} 条",
-        summary=f"Cross-Encoder 交叉注意力打分，检出丢弃审计 {len(dropped)} 条"
+        summary=f"Cross-Encoder 交叉注意力打分，检出丢弃审计 {len(dropped)} 条",
     )
 
     return {
@@ -409,17 +409,17 @@ async def rerank_node(
             "input_count": len(fused),
             "output_count": len(reranked),
             "dropped_count": len(dropped),
-            "status": "success"
-        }]
+            "status": "success",
+        }],
     }
+
 
 # ==================== 阶段 6：MMR 去重与溯源卡片 ====================
 
 async def mmr_node(
     state: RetrievalState,
-    writer: StreamWriter
+    writer: StreamWriter,
 ) -> Dict[str, Any]:
-    """阶段 6: 最大边际相关性去重与角标溯源卡片构建"""
     _emit_thinking(writer, name="MMR 去重", status="执行中...", summary="正在使用最大边际相关性贪心筛选互补黄金切片...")
     t0 = time.perf_counter()
 
@@ -431,14 +431,15 @@ async def mmr_node(
         chunks=reranked,
         top_k=effective_top_k,
         lambda_param=settings.MMR_LAMBDA,
-        strip_vector=True
+        strip_vector=True,
     )
 
     cost_ms = int((time.perf_counter() - t0) * 1000)
 
-    # 构造前端专属的精确溯源卡片列表
+    # 构造精确溯源卡片（彻底剥离 raw_oss_url，附加 kb_id / kb_name / classification_level）
     citations: List[Dict[str, Any]] = []
     for idx, c in enumerate(final_chunks):
+        c.pop("raw_oss_url", None)
         target_page = (c.get("page_idx") or 0) + 1
         doc_id = str(c["document_id"])
         chunk_id = str(c["chunk_id"])
@@ -451,22 +452,26 @@ async def mmr_node(
             "chunk_id": chunk_id,
             "document_id": doc_id,
             "document_title": doc_title,
+            "kb_id": c.get("kb_id"),
+            "kb_name": c.get("kb_name"),
+            "kb_full_path": c.get("kb_full_path"),
+            "classification_level": c.get("classification_level"),
             "chunk_label": c.get("chunk_label", ""),
             "page_idx": c.get("page_idx", 0),
             "display_page": target_page,
             "bbox": c.get("bbox", []),
             "snippet": c.get("content", "")[:220].strip(),
-            "asset_url": asset_url,
-            "raw_oss_url": c.get("raw_oss_url"),
+            "asset_url": f"/api/v1/chunks/{chunk_id}/asset" if asset_url else None,
+            "is_table": bool(c.get("is_table", False)),
+            "table_html": c.get("table_html"),
             "preview_url": f"/api/v1/documents/{doc_id}/preview",
             "page_render_url": f"/api/v1/documents/{doc_id}/pages/{target_page}" if is_pdf else None,
             "asset_proxy_url": f"/api/v1/chunks/{chunk_id}/asset" if asset_url else None,
             "is_pdf": is_pdf,
-            "score": c.get("score", 0.0)
+            "score": c.get("score", 0.0),
         }
         citations.append(cit)
 
-    # 主动向 SSE 流广播 citations 卡片事件
     if writer is not None:
         try:
             writer({"type": "citations", "citations": citations})
@@ -479,7 +484,7 @@ async def mmr_node(
         status="已执行",
         duration_ms=cost_ms,
         count_change=f"{len(reranked)} -> {len(final_chunks)} 条",
-        summary=f"最大边际相关性贪心选择 (λ={settings.MMR_LAMBDA})，提炼 {len(final_chunks)} 条互补黄金切片"
+        summary=f"最大边际相关性贪心选择 (λ={settings.MMR_LAMBDA})，提炼 {len(final_chunks)} 条互补黄金切片",
     )
 
     return {
@@ -490,6 +495,6 @@ async def mmr_node(
             "duration_ms": cost_ms,
             "input_count": len(reranked),
             "output_count": len(final_chunks),
-            "status": "success"
-        }]
+            "status": "success",
+        }],
     }

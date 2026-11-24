@@ -23,15 +23,15 @@ export const DEFAULT_PIPELINE_STEPS: PipelineStep[] = [
   { index: 11, name: '入库', code: 'index_store', status: 'wait' }
 ];
 
-export interface DepartmentItem {
-  id: number;
-  name: string;
-  path: string;
-}
-
 export interface DocumentItem {
   doc_id: string;
   file_name: string;
+  kb_id?: string;
+  kb_name?: string;
+  classification_level: number;
+  effective_classification_level?: number;
+  can_delete?: boolean;
+  can_manage?: boolean;
   department: string;
   category: string;
   tags: string[];
@@ -71,7 +71,6 @@ export interface ReviewItem {
   status?: string;
   html_table?: string;
   asset_url?: string;
-  raw_oss_url?: string;
   raw_content?: string;
   language?: string;
   title?: string;
@@ -81,6 +80,9 @@ export interface ReviewItem {
 export interface PipelineSnapshot {
   doc_id: string;
   file_name: string;
+  kb_id?: string;
+  kb_name?: string;
+  classification_level?: number;
   department: string;
   category: string;
   tags: string[];

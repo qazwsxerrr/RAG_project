@@ -39,5 +39,5 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests", "tests"]
-pythonpath = ["backend/src", "src"]
+pythonpath = ["backend/src", "src", "backend/tests"]
 asyncio_mode = "strict"

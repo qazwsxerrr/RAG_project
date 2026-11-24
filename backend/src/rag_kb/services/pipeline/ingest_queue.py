@@ -29,7 +29,7 @@ from rag_kb.core.constants import IngestStatus, STEP_NAMES
 from rag_kb.core.logging.context import set_trace_context, reset_trace_context, get_request_id
 from rag_kb.core.redis_client import get_redis_client
 from rag_kb.db.session import AsyncSessionLocal
-from rag_kb.db.models import Document
+from rag_kb.db.models import Document, KnowledgeBase, Position, SysUser
 from rag_kb.graph.state import get_default_state
 from rag_kb.graph.build import get_ingest_graph
 from rag_kb.graph.edges import can_safely_jump_to_step
@@ -121,8 +121,11 @@ class RedisIngestQueueService:
         user_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
         request_id: Optional[str] = None,
+        kb_id: Optional[str] = None,
+        classification_level: Optional[int] = None,
+        uploader_clearance: Optional[int] = None,
     ) -> str:
-        """向真实 Redis Streams 投递轻量文档解析任务（严禁携带大体积二进制）"""
+        """向真实 Redis Streams 投递轻量文档解析任务（完整携带 tenant_id, kb_id, classification_level）"""
         await self.ensure_consumer_group()
         redis_cli = get_redis_client()
         eff_step = max(1, min(11, int(from_step or 1)))
@@ -142,6 +145,9 @@ class RedisIngestQueueService:
             "user_id": str(user_id or ""),
             "tenant_id": str(tenant_id or settings.DEFAULT_TENANT_ID),
             "request_id": str(request_id or get_request_id()),
+            "kb_id": str(kb_id or ""),
+            "classification_level": str(classification_level) if classification_level is not None else "",
+            "uploader_clearance": str(uploader_clearance) if uploader_clearance is not None else "",
         }
         msg_id = await redis_cli.xadd(
             self.stream_key,
@@ -351,34 +357,92 @@ class RedisIngestQueueService:
             logger.warning(f"[IngestQueue] 读取 Stream 存量快照异常: {e}")
 
         requeued = 0
-        for doc in queued_docs:
-            doc_id_str = str(doc.id)
-            if doc_id_str in existing_stream_doc_ids:
-                continue
-            persisted_skip_review = bool(
-                doc.pipeline_steps
-                and isinstance(doc.pipeline_steps, list)
-                and isinstance(doc.pipeline_steps[0], dict)
-                and doc.pipeline_steps[0].get("skip_review", False)
-            )
-            await self.enqueue_ingest_task(
-                doc_id=doc_id_str,
-                file_name=doc.title,
-                raw_oss_url=doc.raw_oss_url,
-                file_hash=doc.file_hash,
-                department=doc.department_path or "/public",
-                category=doc.category or "技术规范",
-                tags=doc.tags or [],
-                skip_review=persisted_skip_review,
-                temp_file_path=None,
-                attempt=0,
-                from_step=max(1, int(doc.current_step_index or 1)),
-            )
-            requeued += 1
+        async with AsyncSessionLocal() as clearance_session:
+            for doc in queued_docs:
+                doc_id_str = str(doc.id)
+                if doc_id_str in existing_stream_doc_ids:
+                    continue
+                persisted_skip_review = bool(
+                    doc.pipeline_steps
+                    and isinstance(doc.pipeline_steps, list)
+                    and isinstance(doc.pipeline_steps[0], dict)
+                    and doc.pipeline_steps[0].get("skip_review", False)
+                )
+                recovered_clearance = await self._resolve_uploader_clearance(
+                    clearance_session, doc.tenant_id, doc.created_by
+                )
+                await self.enqueue_ingest_task(
+                    doc_id=doc_id_str,
+                    file_name=doc.title,
+                    raw_oss_url=doc.raw_oss_url,
+                    file_hash=doc.file_hash,
+                    department=doc.department_path or "/public",
+                    category=doc.category or "技术规范",
+                    tags=doc.tags or [],
+                    skip_review=persisted_skip_review,
+                    temp_file_path=None,
+                    attempt=0,
+                    from_step=max(1, int(doc.current_step_index or 1)),
+                    user_id=doc.created_by,
+                    tenant_id=doc.tenant_id,
+                    kb_id=str(doc.kb_id) if doc.kb_id else None,
+                    classification_level=doc.classification_level,
+                    uploader_clearance=recovered_clearance,
+                )
+                requeued += 1
 
         if requeued > 0:
             logger.info(f"[IngestQueue] 已从 PostgreSQL 恢复补投递 {requeued} 条孤儿 queued 文档任务")
         return requeued
+
+    async def _update_mem_state_with_db_truth(self, doc_id: str, graph_state: Dict[str, Any]) -> None:
+        """将图快照写回内存缓存前以数据库当前归属与密级对齐；若文档已删除则移除缓存不再复活"""
+        try:
+            doc_uuid = uuid.UUID(str(doc_id))
+        except ValueError:
+            pipeline_manager.update_state(doc_id, graph_state)
+            return
+
+        async with AsyncSessionLocal() as session:
+            db_doc = await session.get(Document, doc_uuid)
+            if db_doc is None:
+                pipeline_manager.remove_pipeline(doc_id)
+                return
+            graph_state["tenant_id"] = db_doc.tenant_id
+            graph_state["kb_id"] = str(db_doc.kb_id)
+            graph_state["classification_level"] = int(db_doc.classification_level)
+
+        pipeline_manager.update_state(doc_id, graph_state)
+
+    async def _resolve_uploader_clearance(
+        self,
+        session,
+        tenant_id: Optional[str],
+        user_id: Optional[str],
+    ) -> Optional[int]:
+        """按上传者最新职级核对有效访问密级；无法核实时返回 None 交由下游 Fail-Closed 拦截"""
+        if not tenant_id or not user_id:
+            return None
+        try:
+            uid = uuid.UUID(str(user_id))
+        except ValueError:
+            return None
+        row = (
+            await session.execute(
+                select(Position.default_clearance_level)
+                .join(
+                    SysUser,
+                    (SysUser.tenant_id == Position.tenant_id)
+                    & (SysUser.position_code == Position.position_code),
+                )
+                .where(
+                    SysUser.tenant_id == tenant_id,
+                    SysUser.id == uid,
+                    SysUser.is_active.is_(True),
+                )
+            )
+        ).first()
+        return int(row[0]) if row and row[0] is not None else None
 
     async def _run_with_released_slot(self, sem: asyncio.Semaphore, msg_id: str, fields: Dict[str, str]) -> None:
         did = str(fields.get("doc_id") or "")
@@ -518,17 +582,32 @@ class RedisIngestQueueService:
                         interrupted_state = None
                     await pipeline_manager.broadcast(doc_id, evt_name, chunk)
                 elif mode == "values" and isinstance(chunk, dict):
-                    latest_graph_state = chunk
+                    latest_graph_state = {k: v for k, v in chunk.items() if k != "__interrupt__"}
 
             if latest_graph_state:
-                for preserve_key in ("doc_id", "file_name", "department", "category", "tags", "raw_oss_url", "file_hash"):
+                for preserve_key in (
+                    "doc_id",
+                    "tenant_id",
+                    "kb_id",
+                    "kb_name",
+                    "classification_level",
+                    "created_by",
+                    "uploader_clearance",
+                    "file_name",
+                    "department",
+                    "category",
+                    "tags",
+                    "raw_oss_url",
+                    "file_hash",
+                    "review_asset_oss_map",
+                ):
                     if not latest_graph_state.get(preserve_key) and state.get(preserve_key):
                         latest_graph_state[preserve_key] = state[preserve_key]
                 if interrupted_state:
                     latest_graph_state["overall_status"] = interrupted_state[0]
                     latest_graph_state["current_step_index"] = interrupted_state[1]
                     latest_graph_state["current_step_name"] = interrupted_state[2]
-                pipeline_manager.update_state(doc_id, latest_graph_state)
+                await self._update_mem_state_with_db_truth(doc_id, latest_graph_state)
             await self._finalize_post_graph_state(doc_id, latest_graph_state or state)
         except Exception as err:
             logger.error(f"[IngestQueue] 人工审核唤醒后执行失败 [doc_id={doc_id}]: {err}", exc_info=True)
@@ -603,7 +682,7 @@ class RedisIngestQueueService:
             state["resume_from_step"] = None
             if latest_graph_state:
                 latest_graph_state["resume_from_step"] = None
-                pipeline_manager.update_state(doc_id, latest_graph_state)
+                await self._update_mem_state_with_db_truth(doc_id, latest_graph_state)
             await self._finalize_post_graph_state(doc_id, latest_graph_state or state)
         except Exception as err:
             logger.error(f"[IngestQueue] 防重决策恢复执行失败 [doc_id={doc_id}]: {err}", exc_info=True)
@@ -652,6 +731,11 @@ class RedisIngestQueueService:
         user_id = fields.get("user_id") or None
         tenant_id = fields.get("tenant_id") or settings.DEFAULT_TENANT_ID
         request_id = fields.get("request_id") or None
+        kb_id = fields.get("kb_id") or None
+        raw_cls = fields.get("classification_level") or ""
+        classification_level = int(raw_cls) if raw_cls.isdigit() else None
+        raw_up_clr = fields.get("uploader_clearance") or ""
+        uploader_clearance = int(raw_up_clr) if raw_up_clr.isdigit() else None
 
         trace_token = set_trace_context(
             request_id=request_id,
@@ -673,6 +757,7 @@ class RedisIngestQueueService:
                 return
 
             # 若文档在排队期间已被用户物理删除，清理残余临时文件并直接 XACK 跳过，避免浪费算力
+            kb_name: Optional[str] = None
             try:
                 doc_uuid = uuid.UUID(doc_id)
                 async with AsyncSessionLocal() as session:
@@ -682,6 +767,21 @@ class RedisIngestQueueService:
                         cleanup_doc_temp_files(doc_id, temp_file_path)
                         await redis_cli.xack(self.stream_key, self.group_name, msg_id)
                         return
+                    if db_doc.kb_id:
+                        kb_id = str(db_doc.kb_id)
+                        kb_obj = await session.get(KnowledgeBase, db_doc.kb_id)
+                        if kb_obj is not None:
+                            kb_name = kb_obj.name
+                            if kb_obj.owner_dept_path:
+                                department = kb_obj.owner_dept_path
+                    if db_doc.classification_level is not None:
+                        classification_level = int(db_doc.classification_level)
+                    if db_doc.tenant_id:
+                        tenant_id = db_doc.tenant_id
+                    if uploader_clearance is None and db_doc.created_by:
+                        uploader_clearance = await self._resolve_uploader_clearance(
+                            session, tenant_id, db_doc.created_by
+                        )
             except ValueError:
                 await redis_cli.xack(self.stream_key, self.group_name, msg_id)
                 return
@@ -696,6 +796,12 @@ class RedisIngestQueueService:
                     category=category,
                     tags=tags,
                     skip_review=skip_review,
+                    tenant_id=tenant_id,
+                    kb_id=kb_id,
+                    kb_name=kb_name,
+                    classification_level=classification_level,
+                    created_by=user_id,
+                    uploader_clearance=uploader_clearance,
                 )
                 state["raw_oss_url"] = raw_oss_url
                 state["file_hash"] = file_hash
@@ -703,6 +809,17 @@ class RedisIngestQueueService:
             else:
                 state["raw_oss_url"] = raw_oss_url or state.get("raw_oss_url")
                 state["file_hash"] = file_hash or state.get("file_hash")
+                state["tenant_id"] = tenant_id or state.get("tenant_id") or settings.DEFAULT_TENANT_ID
+                state["kb_id"] = kb_id or state.get("kb_id")
+                state["kb_name"] = kb_name or state.get("kb_name")
+                if department:
+                    state["department"] = department
+                if classification_level is not None:
+                    state["classification_level"] = classification_level
+                if uploader_clearance is not None:
+                    state["uploader_clearance"] = uploader_clearance
+                if user_id and not state.get("created_by"):
+                    state["created_by"] = user_id
                 state["error"] = None
                 state["failed_step"] = None
 
@@ -722,6 +839,7 @@ class RedisIngestQueueService:
             try:
                 latest_graph_state: Optional[Dict[str, Any]] = None
                 interrupted_state: Optional[Tuple[str, int, str]] = None
+                review_interrupt_emitted = False
                 async for mode, chunk in graph.astream(
                     state,
                     config=config,
@@ -729,15 +847,32 @@ class RedisIngestQueueService:
                 ):
                     if mode == "custom" and isinstance(chunk, dict):
                         evt_name = chunk.get("event", "message")
-                        if evt_name == "review_required":
-                            interrupted_state = (IngestStatus.REVIEW.value, 7, STEP_NAMES[6])
-                        elif evt_name == "duplicate_warning":
+                        if evt_name == "duplicate_warning":
                             interrupted_state = (IngestStatus.DUPLICATE_WARNING.value, 11, STEP_NAMES[10])
-                        elif evt_name in ("review_completed", "pipeline_completed"):
+                        elif evt_name == "pipeline_completed":
                             interrupted_state = None
                         await pipeline_manager.broadcast(doc_id, evt_name, chunk)
                     elif mode == "values" and isinstance(chunk, dict):
-                        latest_graph_state = chunk
+                        interrupts = chunk.get("__interrupt__")
+                        if interrupts:
+                            latest_graph_state = {k: v for k, v in chunk.items() if k != "__interrupt__"}
+                            if not review_interrupt_emitted:
+                                intr_obj = interrupts[0]
+                                intr_val = getattr(intr_obj, "value", intr_obj)
+                                if isinstance(intr_val, dict) and intr_val.get("event") == "review_required":
+                                    interrupted_state = (IngestStatus.REVIEW.value, 7, STEP_NAMES[6])
+                                    review_interrupt_emitted = True
+                                    # 广播前先同步内部 review_asset_oss_map，确保前端收到 review_required 立即拉切图时已就绪
+                                    mem_st = pipeline_manager.get_state(doc_id)
+                                    if mem_st is not None and latest_graph_state.get("review_asset_oss_map"):
+                                        mem_st["review_asset_oss_map"] = dict(latest_graph_state["review_asset_oss_map"])
+                                    await pipeline_manager.broadcast(doc_id, "review_required", intr_val)
+                        else:
+                            latest_graph_state = chunk
+                            if isinstance(chunk.get("review_asset_oss_map"), dict) and chunk["review_asset_oss_map"]:
+                                mem_st = pipeline_manager.get_state(doc_id)
+                                if mem_st is not None:
+                                    mem_st["review_asset_oss_map"] = dict(chunk["review_asset_oss_map"])
 
                 state["resume_from_step"] = None
                 if latest_graph_state:
@@ -746,7 +881,7 @@ class RedisIngestQueueService:
                         latest_graph_state["overall_status"] = interrupted_state[0]
                         latest_graph_state["current_step_index"] = interrupted_state[1]
                         latest_graph_state["current_step_name"] = interrupted_state[2]
-                    pipeline_manager.update_state(doc_id, latest_graph_state)
+                    await self._update_mem_state_with_db_truth(doc_id, latest_graph_state)
 
                 # 检查图结束后的最新态（BaseNode 捕获节点异常时会把 state["overall_status"] 置为 "failed" 并短路至 END）
                 final_mem_state = latest_graph_state or pipeline_manager.get_state(doc_id) or state
@@ -789,6 +924,9 @@ class RedisIngestQueueService:
                             user_id=user_id,
                             tenant_id=tenant_id,
                             request_id=request_id,
+                            kb_id=kb_id,
+                            classification_level=classification_level,
+                            uploader_clearance=uploader_clearance,
                         )
                         return
 
@@ -828,6 +966,9 @@ class RedisIngestQueueService:
                         user_id=user_id,
                         tenant_id=tenant_id,
                         request_id=request_id,
+                        kb_id=kb_id,
+                        classification_level=classification_level,
+                        uploader_clearance=uploader_clearance,
                     )
                     return
 

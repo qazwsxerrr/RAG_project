@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import { useAuthStore, PERMISSIONS } from '../stores/auth';
+import { useAuthStore, PERMISSIONS, GOVERNANCE_PERMISSIONS } from '../stores/auth';
 
 const routes = [
   {
@@ -31,6 +31,12 @@ const routes = [
     meta: { title: '渠道状态' },
   },
   {
+    path: '/access-control',
+    name: 'AccessControl',
+    component: () => import('../views/AccessControlView.vue'),
+    meta: { title: '权限治理中心', requiredAnyPermissions: GOVERNANCE_PERMISSIONS },
+  },
+  {
     path: '/auth/callback',
     name: 'AuthCallback',
     component: () => import('../views/AuthCallbackView.vue'),
@@ -48,7 +54,6 @@ router.beforeEach(async (to, from, next) => {
     document.title = `${to.meta.title} - 企业知识库`;
   }
 
-  // 免守卫白名单端点 (OIDC 回调等)
   if (to.meta.public || to.path === '/auth/callback') {
     return next();
   }
@@ -56,26 +61,32 @@ router.beforeEach(async (to, from, next) => {
   const authStore = useAuthStore();
   if (!authStore.token) {
     try {
-      await authStore.initAuth();
-      if (!authStore.token) {
-        sessionStorage.setItem('rag_auth_redirect', to.fullPath);
-        window.location.href = '/oauth2/authorization/corp-sso';
-        return;
-      }
+      await authStore.refreshToken({ redirectOnUnauthorized: false });
     } catch {
-      sessionStorage.setItem('rag_auth_redirect', to.fullPath);
-      window.location.href = '/oauth2/authorization/corp-sso';
+      // authStore.authError 已记录失败原因
+    }
+    if (!authStore.token) {
+      const errStatus = authStore.authError?.status;
+      if (errStatus !== 401 || authStore.authError?.isLoopBlocked) {
+        sessionStorage.setItem('rag_auth_redirect', to.fullPath);
+        return next('/auth/callback');
+      }
+      if (!authStore.redirectToSso({ redirectPath: to.fullPath })) {
+        return next('/auth/callback');
+      }
       return;
     }
   }
 
-  // 新建文档上传页需具备 doc:upload 权限；仅查看已有文档进度 (?doc_id=...) 则放行交由对象权限校验
   if (to.path === '/documents/new' && !to.query.doc_id && !authStore.hasPermission(PERMISSIONS.DOC_UPLOAD)) {
     return next('/documents');
   }
 
-  // 系统运维渠道监控页仅允许具备 system:admin 权限的管理员访问
   if (typeof to.meta.requiredPermission === 'string' && !authStore.hasPermission(to.meta.requiredPermission)) {
+    return next('/documents');
+  }
+
+  if (Array.isArray(to.meta.requiredAnyPermissions) && !authStore.hasAnyPermission(to.meta.requiredAnyPermissions)) {
     return next('/documents');
   }
 

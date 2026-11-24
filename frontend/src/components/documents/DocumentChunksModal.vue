@@ -199,6 +199,10 @@
                   @click="openLightbox(getAssetBlobUrl(chunk.asset_url))" 
                   loading="lazy"
                 />
+                <div v-else-if="getAssetError(chunk.asset_url)" class="flex flex-col items-center gap-1.5 py-5 text-xs text-amber-700">
+                  <span>切图加载失败：{{ getAssetError(chunk.asset_url) }}</span>
+                  <button type="button" @click="retryAsset(chunk.asset_url)" class="px-2.5 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-[11px] cursor-pointer">重试</button>
+                </div>
                 <span v-else class="text-xs text-slate-400 py-6">正在加载切图...</span>
                 <div class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900/80 text-white text-[11px] px-2.5 py-1 rounded flex items-center gap-1 pointer-events-none">
                   <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
@@ -256,6 +260,10 @@
                   @click="openLightbox(getAssetBlobUrl(chunk.asset_url))" 
                   loading="lazy"
                 />
+                <div v-else-if="getAssetError(chunk.asset_url)" class="flex flex-col items-center gap-1.5 py-5 text-xs text-amber-700">
+                  <span>切图加载失败：{{ getAssetError(chunk.asset_url) }}</span>
+                  <button type="button" @click="retryAsset(chunk.asset_url)" class="px-2.5 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-[11px] cursor-pointer">重试</button>
+                </div>
                 <span v-else class="text-xs text-slate-400 py-6">正在加载切图...</span>
                 <div class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900/80 text-white text-[11px] px-2.5 py-1 rounded flex items-center gap-1 pointer-events-none">
                   <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
@@ -318,6 +326,10 @@
                   @click="openLightbox(getAssetBlobUrl(chunk.asset_url))" 
                   loading="lazy"
                 />
+                <div v-else-if="getAssetError(chunk.asset_url)" class="flex flex-col items-center gap-1.5 py-5 text-xs text-amber-700">
+                  <span>配图加载失败：{{ getAssetError(chunk.asset_url) }}</span>
+                  <button type="button" @click="retryAsset(chunk.asset_url)" class="px-2.5 py-0.5 rounded bg-amber-100 hover:bg-amber-200 text-[11px] cursor-pointer">重试</button>
+                </div>
                 <span v-else class="text-xs text-slate-400 py-6">正在加载配图...</span>
                 <div class="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900/80 text-white text-[11px] px-2.5 py-1 rounded flex items-center gap-1 pointer-events-none">
                   <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
@@ -477,6 +489,16 @@ const assetBlobCache = createSecureBlobCache();
 
 function getAssetBlobUrl(assetUrl?: string): string {
   return assetBlobCache.getUrl(assetUrl);
+}
+
+function getAssetError(assetUrl?: string): string {
+  return assetBlobCache.getError(assetUrl);
+}
+
+function retryAsset(assetUrl?: string): void {
+  if (assetUrl) {
+    assetBlobCache.retry(assetUrl).catch(() => {});
+  }
 }
 
 function preloadVisibleChunkAssets() {
