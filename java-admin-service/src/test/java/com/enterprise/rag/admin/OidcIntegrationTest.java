@@ -52,32 +52,23 @@ class OidcIntegrationTest {
                 : support.userMappingService.mapAndProvision(session.oidcUser(), false).user();
         String userIdStr = beforeRecord.id().toString();
 
-        UUID manualDeptId = null;
         try {
-            support.jdbcTemplate.update("UPDATE sys_users SET is_active = TRUE, dept_path = ? WHERE id = ?",
-                    "/总公司/研发中心/技术部", beforeRecord.id());
+            support.jdbcTemplate.update("UPDATE sys_users SET is_active = TRUE WHERE id = ?", beforeRecord.id());
             support.redisRevocationSync.clearUserRevoked(userIdStr);
-
-            // 管理员在 sys_user_departments 中授予独立 MANUAL 跨部门归属（架构组）；
-            // IdP 实时刷新同步 source='IDP' 部门时，必须保留独立的 MANUAL 部门授权
-            IdentityMapper.DepartmentRecord archDept = support.identityMapper.ensureDepartmentPath(
-                    IdentityMapper.DEFAULT_TENANT_ID, "/总公司/研发中心/架构组");
-            manualDeptId = archDept.id();
-            support.jdbcTemplate.update(
-                    "INSERT INTO sys_user_departments (id, tenant_id, user_id, department_id, dept_path, is_primary, source, granted_by, created_at) " +
-                    "VALUES (?, ?, ?, ?, ?, FALSE, 'MANUAL', 'test_admin', NOW()) " +
-                    "ON CONFLICT (tenant_id, user_id, department_id, source) DO NOTHING",
-                    UUID.randomUUID(), IdentityMapper.DEFAULT_TENANT_ID, beforeRecord.id(), archDept.id(), archDept.path());
 
             Map<String, Object> me = support.authController.getMyProfile(
                     session.oidcUser(), session.authToken(), session.request(), session.response()
             );
             assertEquals(List.of("developer"), me.get("roles"));
+            assertEquals(1, ((Number) me.get("cv")).intValue());
             assertEquals("/总公司/研发中心/技术部", me.get("dept_path"));
             @SuppressWarnings("unchecked")
             List<String> deptPaths = (List<String>) me.get("dept_paths");
-            assertTrue(deptPaths.contains("/总公司/研发中心/技术部"), "必须包含 IdP 主部门");
-            assertTrue(deptPaths.contains("/总公司/研发中心/架构组"), "必须保留独立的 MANUAL 跨部门授权");
+            assertEquals(List.of("/总公司/研发中心/技术部"), deptPaths, "必须仅包含 IdP 同步部门");
+            @SuppressWarnings("unchecked")
+            Map<String, List<String>> dpa = (Map<String, List<String>>) me.get("dept_paths_by_action");
+            assertEquals(List.of("/总公司/研发中心/技术部"), dpa.get("READ"));
+            assertEquals(List.of("/总公司/研发中心/技术部"), dpa.get("UPLOAD"));
 
             // 2. 调用真实 Keycloak OIDC /protocol/openid-connect/revoke 吊销该会话的 AccessToken 与 RefreshToken
             OidcTestSupport.revokeTokenInRealKeycloak(session.accessToken(), "access_token");
@@ -112,16 +103,51 @@ class OidcIntegrationTest {
             assertTrue(permChangedAfterClear > preRevokeMs,
                     "清理 auth:revoked 时必须同步推进 auth:perm_changed_at，严防吊销前旧凭据复活");
             Jwt reloginDecoded = NimbusJwtDecoder.withPublicKey(support.rsaKey.toRSAPublicKey()).build().decode(reloginJwtStr);
+            assertEquals(1, ((Number) reloginDecoded.getClaim("cv")).intValue());
+            assertNull(reloginDecoded.getClaim("idp_roles"));
             Long reloginIatMs = reloginDecoded.getClaim("iat_ms");
             assertNotNull(reloginIatMs);
             assertTrue(reloginIatMs > permChangedAfterClear,
                     "重登录签发的新 JWT iat_ms 必须严格大于清理吊销时推进的 perm_changed_at");
         } finally {
-            if (manualDeptId != null) {
-                support.jdbcTemplate.update(
-                        "DELETE FROM sys_user_departments WHERE tenant_id = ? AND user_id = ? AND department_id = ? AND source = 'MANUAL'",
-                        IdentityMapper.DEFAULT_TENANT_ID, beforeRecord.id(), manualDeptId);
-            }
+            support.restoreUserState(snapshot);
+        }
+    }
+
+    @Test
+    void multiDeptStaffRealKeycloakPkceResolvesPrimaryDeptAndScopedActions() throws Exception {
+        OidcTestSupport.RealKeycloakSession session = support.loginViaRealKeycloakPkce("multi_dept_staff", "Rag@123456");
+        String externalSub = session.oidcUser().getSubject();
+        OidcTestSupport.UserStateSnapshot snapshot = support.snapshotUserState(externalSub);
+        try {
+            Map<String, Object> me = support.authController.getMyProfile(
+                    session.oidcUser(), session.authToken(), session.request(), session.response()
+            );
+            assertEquals(1, ((Number) me.get("cv")).intValue());
+            assertEquals("/总公司/研发中心/技术部", me.get("dept_path"));
+            @SuppressWarnings("unchecked")
+            List<String> deptPaths = (List<String>) me.get("dept_paths");
+            assertEquals(Set.of("/总公司/研发中心/技术部", "/总公司/职能中心/人事行政部"), Set.copyOf(deptPaths));
+            @SuppressWarnings("unchecked")
+            Map<String, List<String>> dpa = (Map<String, List<String>>) me.get("dept_paths_by_action");
+            assertEquals(List.of("/总公司/研发中心/技术部", "/总公司/职能中心/人事行政部"), dpa.get("READ"));
+            assertEquals(List.of("/总公司/研发中心/技术部"), dpa.get("UPLOAD"));
+            assertEquals(List.of("/总公司/研发中心/技术部"), dpa.get("REVIEW"));
+            assertEquals(List.of("/总公司/研发中心/技术部"), dpa.get("DELETE"));
+
+            Map<String, Object> tokResp = support.authController.exchangeToken(
+                    session.oidcUser(), session.authToken(), session.request(), session.response()
+            );
+            Jwt decoded = NimbusJwtDecoder.withPublicKey(support.rsaKey.toRSAPublicKey()).build()
+                    .decode((String) tokResp.get("access_token"));
+            assertEquals(1, ((Number) decoded.getClaim("cv")).intValue());
+            assertNull(decoded.getClaim("idp_roles"));
+            assertEquals("/总公司/研发中心/技术部", decoded.getClaimAsString("dept_path"));
+            @SuppressWarnings("unchecked")
+            Map<String, List<String>> jwtDpa = decoded.getClaim("dept_paths_by_action");
+            assertEquals(List.of("/总公司/研发中心/技术部", "/总公司/职能中心/人事行政部"), jwtDpa.get("READ"));
+            assertEquals(List.of("/总公司/研发中心/技术部"), jwtDpa.get("UPLOAD"));
+        } finally {
             support.restoreUserState(snapshot);
         }
     }
@@ -130,7 +156,8 @@ class OidcIntegrationTest {
     void transientIdpErrorReturns503WithoutRevokingUser() {
         String extId = "emp-transient-" + UUID.randomUUID();
         support.createdExternalIds.add(extId);
-        OidcUser oidcUser = AuthTestSupport.buildOidcUser(extId, "瞬时异常测试员", "/总公司/研发中心/技术部", null, List.of("developer"));
+        OidcUser oidcUser = AuthTestSupport.buildOidcUser(
+                extId, "瞬时异常测试员", "/总公司/研发中心/技术部", null, List.of("developer"), "STAFF");
         MappedIdentity initial = support.userMappingService.mapAndProvision(oidcUser, false);
         String userIdStr = initial.user().id().toString();
         support.touchedRedisUserIds.add(userIdStr);
@@ -169,12 +196,14 @@ class OidcIntegrationTest {
     void roleChangeWritesMillisecondPermChangedAndNewTokenIatMsExceedsIt() throws Exception {
         String extId = "emp-perm-ms-" + UUID.randomUUID();
         support.createdExternalIds.add(extId);
-        OidcUser initialUser = AuthTestSupport.buildOidcUser(extId, "毫秒边界测试员", "/总公司/研发中心/技术部", null, List.of("developer"));
+        OidcUser initialUser = AuthTestSupport.buildOidcUser(
+                extId, "毫秒边界测试员", "/总公司/研发中心/技术部", null, List.of("developer"), "STAFF");
         MappedIdentity initial = support.userMappingService.mapAndProvision(initialUser, false);
         String userIdStr = initial.user().id().toString();
         support.touchedRedisUserIds.add(userIdStr);
 
-        OidcUser downgradedUser = AuthTestSupport.buildOidcUser(extId, "毫秒边界测试员", "/总公司/研发中心/技术部", null, List.of("employee"));
+        OidcUser downgradedUser = AuthTestSupport.buildOidcUser(
+                extId, "毫秒边界测试员", "/总公司/研发中心/技术部", null, List.of("employee"), "STAFF");
         OAuth2AuthorizedClientManager passthroughManager = authorizeRequest -> new OAuth2AuthorizedClient(
                 support.corpSsoRegistration,
                 extId,
@@ -227,7 +256,7 @@ class OidcIntegrationTest {
         MockHttpServletRequest req = new MockHttpServletRequest();
         req.getSession(true);
         MockHttpServletResponse resp = new MockHttpServletResponse();
-        OidcUser dummy = AuthTestSupport.buildOidcUser("emp-no-auth", "测试", "/总公司/研发中心/技术部", null, List.of("developer"));
+        OidcUser dummy = AuthTestSupport.buildOidcUser("emp-no-auth", "测试", "/总公司/研发中心/技术部", null, List.of("developer"), "STAFF");
 
         // 未提供合法的 OAuth2AuthenticationToken 会话时，严禁回退旧身份签发，必须直接 401 并销毁 Session
         ResponseStatusException ex = assertThrows(ResponseStatusException.class,

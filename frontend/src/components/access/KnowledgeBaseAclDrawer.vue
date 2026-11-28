@@ -257,7 +257,7 @@ const isDeptPathUnderPrefix = (path: string, prefix: string): boolean =>
 const scopedDepartments = computed(() => {
   const activeDepts = props.departments.filter((d) => d.status === 'ACTIVE');
   if (isOrgWideGranter.value) return activeDepts;
-  const userDepts = (authStore.currentUser?.dept_paths || []).filter(Boolean);
+  const userDepts = (authStore.currentUser?.dept_paths_by_action?.MANAGE || []).filter(Boolean);
   if (userDepts.length === 0) return [];
   if (manageScope.value === 'DEPT_AND_SUB') {
     return activeDepts.filter((d) => userDepts.some((prefix) => isDeptPathUnderPrefix(d.path, prefix)));
@@ -268,7 +268,7 @@ const scopedDepartments = computed(() => {
 const isDeptPathInManageScope = (targetPath?: string | null): boolean => {
   if (isOrgWideGranter.value) return true;
   if (!targetPath) return false;
-  const userDepts = (authStore.currentUser?.dept_paths || []).filter(Boolean);
+  const userDepts = (authStore.currentUser?.dept_paths_by_action?.MANAGE || []).filter(Boolean);
   if (userDepts.length === 0) return false;
   if (manageScope.value === 'DEPT_AND_SUB') {
     return userDepts.some((prefix) => isDeptPathUnderPrefix(targetPath, prefix));

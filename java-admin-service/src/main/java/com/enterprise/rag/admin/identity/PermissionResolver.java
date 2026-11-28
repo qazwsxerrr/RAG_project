@@ -20,7 +20,6 @@ public class PermissionResolver {
             "system:admin",
             "kb:manage",
             "kb:grant",
-            "user:authz:manage",
             "security:classify",
             "security:declassify"
     );
@@ -55,12 +54,19 @@ public class PermissionResolver {
 
     public record ResolvedPermissions(
             Set<String> permissions,
-            Map<String, String> scopeByAction
+            Map<String, String> scopeByAction,
+            Map<String, List<String>> deptPathsByAction
     ) {
         public String scopeForAction(String action) {
             return scopeByAction.get(action);
         }
+
+        public List<String> deptPathsForAction(String action) {
+            return deptPathsByAction.getOrDefault(action, Collections.emptyList());
+        }
     }
+
+    private record RoleDeptCandidate(String roleScope, List<String> roleDepts) {}
 
     public static boolean isValidDataScope(String scope) {
         return scope != null && DATA_SCOPE_WEIGHTS.containsKey(scope.trim().toUpperCase(Locale.ROOT));
@@ -73,18 +79,29 @@ public class PermissionResolver {
         return DATA_SCOPE_WEIGHTS.getOrDefault(scope.trim().toUpperCase(Locale.ROOT), -1);
     }
 
-    public ResolvedPermissions resolve(Collection<String> roleCodes) {
-        return resolve(IdentityMapper.DEFAULT_TENANT_ID, roleCodes);
+    public static boolean isPathUnderPrefix(String path, String prefix) {
+        String normPath = IdentityMapper.normalizeDeptPath(path);
+        String normPrefix = IdentityMapper.normalizeDeptPath(prefix);
+        if (normPath == null || normPrefix == null || "/".equals(normPath) || "/".equals(normPrefix)) {
+            return false;
+        }
+        return normPath.equals(normPrefix) || normPath.startsWith(normPrefix + "/");
     }
 
     /**
-     * 多角色合并与按动作计算组织范围 (§2.2 & §3.2):
-     * 1. 所有有效角色的 permissions 取并集（任一角色含 "*" 则为 ["*"]）；
-     * 2. 对每个动作 (READ/UPLOAD/REVIEW/DELETE/MANAGE)，仅在授予对应权限点（含 "*"）的有效角色中取最宽 data_scope；
-     *    若没有任何角色授予该动作对应权限，则 scope_by_action 中不包含该动作（直接拒绝，ACL 不补发操作权限）；
-     * 3. 未在当前租户策略字典中对齐的角色码坚决报 403 拒绝签发。
+     * 多角色合并与 ABAC 职级/主部门/部门前缀三维准入判定 + 按动作计算组织范围与可及部门集合:
+     * 1. 校验 position_code ∈ role.allowed_positions（或 "*"）；
+     * 2. 若 role.primary_dept_only = true，校验 primaryDeptPath 非空；
+     * 3. 计算角色可及部门集合 D_r（B_r 按 allowed_dept_prefixes 过滤），若 data_scope = DEPT_AND_SUB 且 D_r 为空则拒绝 (403)；
+     * 4. 按动作聚合最宽 data_scope 及对应的 dept_paths_by_action[action]。
      */
-    public ResolvedPermissions resolve(String tenantId, Collection<String> roleCodes) {
+    public ResolvedPermissions resolve(
+            String tenantId,
+            Collection<String> roleCodes,
+            String positionCode,
+            String primaryDeptPath,
+            Collection<String> effectiveDeptPaths
+    ) {
         if (roleCodes == null || roleCodes.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【拒绝签发】有效角色列表为空，拒绝签发凭据");
         }
@@ -97,6 +114,25 @@ public class PermissionResolver {
         }
         if (distinctRoleCodes.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【拒绝签发】有效角色列表为空，拒绝签发凭据");
+        }
+
+        String cleanPosition = positionCode == null ? "" : positionCode.trim().toUpperCase(Locale.ROOT);
+        if (cleanPosition.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【拒绝签发】员工职级 position_code 缺失");
+        }
+        String normPrimary = IdentityMapper.normalizeDeptPath(primaryDeptPath);
+        if ("/".equals(normPrimary)) {
+            normPrimary = null;
+        }
+        List<String> normEffective = new ArrayList<>();
+        Set<String> seenDepts = new LinkedHashSet<>();
+        if (effectiveDeptPaths != null) {
+            for (String p : effectiveDeptPaths) {
+                String np = IdentityMapper.normalizeDeptPath(p);
+                if (np != null && !"/".equals(np) && seenDepts.add(np)) {
+                    normEffective.add(np);
+                }
+            }
         }
 
         String safeTenant = (tenantId == null || tenantId.isBlank()) ? IdentityMapper.DEFAULT_TENANT_ID : tenantId.trim();
@@ -113,6 +149,7 @@ public class PermissionResolver {
 
         Set<String> permsUnion = new LinkedHashSet<>();
         Map<String, String> scopeByAction = new LinkedHashMap<>();
+        Map<String, List<RoleDeptCandidate>> candidatesByAction = new LinkedHashMap<>();
 
         for (RoleRecord r : roles) {
             String normalizedScope = r.dataScope() == null ? "" : r.dataScope().trim().toUpperCase(Locale.ROOT);
@@ -124,7 +161,53 @@ public class PermissionResolver {
                 );
             }
 
-            Set<String> rolePerms = new LinkedHashSet<>(parseJsonArray(r.permissionsJson()));
+            List<String> allowedPositions = parseJsonArray(r.allowedPositionsJson());
+            boolean positionAllowed = allowedPositions.stream()
+                    .anyMatch(p -> "*".equals(p) || p.equalsIgnoreCase(cleanPosition));
+            if (!positionAllowed) {
+                throw new ResponseStatusException(
+                        HttpStatus.FORBIDDEN,
+                        "【拒绝签发】职级 [" + cleanPosition + "] 无权持有角色 [" + r.roleCode() + "]"
+                );
+            }
+
+            if (r.primaryDeptOnly() && (normPrimary == null || normPrimary.isBlank())) {
+                throw new ResponseStatusException(
+                        HttpStatus.FORBIDDEN,
+                        "【拒绝签发】角色 [" + r.roleCode() + "] 要求明确主部门 (primary_dept_only)"
+                );
+            }
+
+            List<String> baseDepts = r.primaryDeptOnly() ? List.of(normPrimary) : normEffective;
+            List<String> allowedPrefixes = parseJsonArray(r.allowedDeptPrefixesJson());
+            List<String> roleDepts;
+            if (allowedPrefixes.contains("*")) {
+                roleDepts = List.copyOf(baseDepts);
+            } else {
+                List<String> filtered = new ArrayList<>();
+                for (String dept : baseDepts) {
+                    boolean matches = allowedPrefixes.stream().anyMatch(pref -> isPathUnderPrefix(dept, pref));
+                    if (matches) {
+                        filtered.add(dept);
+                    }
+                }
+                roleDepts = List.copyOf(filtered);
+            }
+
+            if ("DEPT_AND_SUB".equals(normalizedScope) && roleDepts.isEmpty()) {
+                throw new ResponseStatusException(
+                        HttpStatus.FORBIDDEN,
+                        "【拒绝签发】角色 [" + r.roleCode() + "] 部门前缀约束不匹配当前有效归属部门"
+                );
+            }
+
+            List<String> parsedPerms = parseJsonArray(r.permissionsJson());
+            Set<String> rolePerms = new LinkedHashSet<>();
+            for (String p : parsedPerms) {
+                if (!"user:authz:manage".equals(p)) {
+                    rolePerms.add(p);
+                }
+            }
             permsUnion.addAll(rolePerms);
 
             boolean roleHasWildcard = rolePerms.contains("*");
@@ -136,6 +219,8 @@ public class PermissionResolver {
                     if (currentBest == null || roleScopeWeight > scopeWeight(currentBest)) {
                         scopeByAction.put(action, normalizedScope);
                     }
+                    candidatesByAction.computeIfAbsent(action, k -> new ArrayList<>())
+                            .add(new RoleDeptCandidate(normalizedScope, roleDepts));
                 }
             }
         }
@@ -146,7 +231,28 @@ public class PermissionResolver {
             permsUnion = Collections.unmodifiableSet(permsUnion);
         }
 
-        return new ResolvedPermissions(permsUnion, Collections.unmodifiableMap(scopeByAction));
+        Map<String, List<String>> deptPathsByAction = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : scopeByAction.entrySet()) {
+            String action = entry.getKey();
+            String bestScope = entry.getValue();
+            if ("DEPT_AND_SUB".equals(bestScope)) {
+                Set<String> merged = new TreeSet<>();
+                for (RoleDeptCandidate cand : candidatesByAction.getOrDefault(action, Collections.emptyList())) {
+                    if ("DEPT_AND_SUB".equals(cand.roleScope())) {
+                        merged.addAll(cand.roleDepts());
+                    }
+                }
+                deptPathsByAction.put(action, List.copyOf(merged));
+            } else {
+                deptPathsByAction.put(action, Collections.emptyList());
+            }
+        }
+
+        return new ResolvedPermissions(
+                permsUnion,
+                Collections.unmodifiableMap(scopeByAction),
+                Collections.unmodifiableMap(deptPathsByAction)
+        );
     }
 
     public static List<String> parseJsonArray(String json) {

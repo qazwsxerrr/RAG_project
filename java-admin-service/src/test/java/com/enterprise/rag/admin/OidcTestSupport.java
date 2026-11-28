@@ -170,7 +170,6 @@ final class OidcTestSupport implements AutoCloseable {
             boolean existed,
             UUID userId,
             boolean isActive,
-            String deptPath,
             String realName,
             String prevRevokedVal,
             long prevRevokedTtlSec,
@@ -181,7 +180,7 @@ final class OidcTestSupport implements AutoCloseable {
     UserStateSnapshot snapshotUserState(String externalId) {
         Optional<UserRecord> existing = identityMapper.findUser(IdentityMapper.DEFAULT_TENANT_ID, "oidc:corp-sso", externalId);
         if (existing.isEmpty()) {
-            return new UserStateSnapshot(externalId, false, null, true, null, null, null, -1L, null, -1L);
+            return new UserStateSnapshot(externalId, false, null, true, null, null, -1L, null, -1L);
         }
         UserRecord rec = existing.get();
         String uid = rec.id().toString();
@@ -196,7 +195,6 @@ final class OidcTestSupport implements AutoCloseable {
                 true,
                 rec.id(),
                 rec.isActive(),
-                rec.deptPath(),
                 rec.realName(),
                 revVal,
                 revTtl != null ? revTtl : -1L,
@@ -218,9 +216,8 @@ final class OidcTestSupport implements AutoCloseable {
             return;
         }
         jdbcTemplate.update(
-                "UPDATE sys_users SET is_active = ?, dept_path = ?, real_name = ? WHERE id = ?",
+                "UPDATE sys_users SET is_active = ?, real_name = ? WHERE id = ?",
                 snap.isActive(),
-                snap.deptPath(),
                 snap.realName(),
                 snap.userId()
         );

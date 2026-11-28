@@ -1,16 +1,16 @@
-"""backend/tests/test_step8_auth_permissions.py —— 企业级 RBAC/ABAC cv=2 鉴权、BOLA 隔离与跨语言契约回归测试集。
+"""backend/tests/test_step8_auth_permissions.py —— 企业级 RBAC/ABAC cv=1 鉴权、BOLA 隔离与跨语言契约回归测试集。
 
 严格验证（直连真实 PostgreSQL 16 + Redis + Aliyun OSS，零 Mock 降级）：
-1. RS256 非对称签名与 cv=2 契约强校验（拒绝 cv=1 旧版令牌、缺字段、过期、签名/发行方/受众错误）；
+1. RS256 非对称签名与 cv=1 契约强校验（拒绝 cv=2 遗留令牌、布尔 cv、缺 dept_paths_by_action/必填字段、过期、签名/发行方/受众错误）；
 2. To C 隔离：is_to_c=True 拒绝访问企业端 (403 Forbidden)；
 3. 部门路径段边界防御：`/公司/技术部` 绝不误匹配 `/公司/技术部2`；
-4. 细粒度权限拦截 (`require_permission`) 与 `/api/v1/auth/me` cv=2 档案返回；
-5. 跨语言契约验证：消费 Java `JavaIssuedTokenFixtureGenerator` 真实签发的 cv=2 RS256 JWT；
+4. 细粒度权限拦截 (`require_permission`) 与 `/api/v1/auth/me` cv=1 档案返回；
+5. 跨语言契约验证：消费 Java `JavaIssuedTokenFixtureGenerator` 真实签发的 cv=1 RS256 JWT；
 6. 路由级 BOLA 防越权拦截：`DELETE /documents/{doc_id}`、`GET /documents/{doc_id}/chunks`、`GET /documents/{doc_id}/preview`、`POST /stream-ticket`；
 7. 会话级 (Session-level) 同租户跨用户越权拦截；
 8. 账号停用 DB + Redis 闭环、最小 TTL (600s) 校验与恢复后旧凭据防复活；
-9. 真实阿里云 OSS Range 206 分片预览、cv=2 短票滑动续期、最大寿命上限与渠道监控权限收紧；
-10. 跨栈权限常量静态一致性扫描（V1/V2 SQL、Java PermissionResolver、Python Permissions、前端 PERMISSIONS）；
+9. 真实阿里云 OSS Range 206 分片预览、cv=1 短票滑动续期、最大寿命上限、旧短票拒绝与渠道监控权限收紧；
+10. 跨栈权限常量静态一致性扫描（V1/V2/V5 SQL、Java PermissionResolver、Python Permissions、前端 PERMISSIONS，确认 user:authz:manage 已退场）；
 11. 大模型租约托管客户端 (`model_credentials`)：缓存、10 并发去重与 Fail-Fast。
 """
 
@@ -129,7 +129,6 @@ async def _ephemeral_db_user(
             external_id=ext_id,
             id_source="oidc:test-step8",
             real_name=username,
-            dept_path=dept_path,
             position_code=position_code,
             authz_version=1,
             is_active=True,
@@ -145,7 +144,6 @@ async def _ephemeral_db_user(
                 department_id=dept.id,
                 dept_path=dept_path,
                 is_primary=True,
-                source="IDP",
             )
         )
         await db.commit()
@@ -178,13 +176,13 @@ async def _ephemeral_db_user(
 
 
 # ==============================================================================
-# 1. cv=2 RS256 令牌校验与 401/403 拦截测试
+# 1. cv=1 RS256 令牌校验与 401/403 拦截测试
 # ==============================================================================
 
 
 @pytest.mark.asyncio
-async def test_01_valid_cv2_rs256_token_and_db_truth_resolution():
-    """测试 1: 验证合法 cv=2 RS256 令牌与 PostgreSQL 单一事实源上下文构建"""
+async def test_01_valid_cv1_rs256_token_and_db_truth_resolution():
+    """测试 1: 验证合法 cv=1 RS256 令牌与 PostgreSQL 单一事实源上下文构建"""
     verify_jwt_setup_on_startup()
     async with _ephemeral_db_user(
         username="张工",
@@ -199,19 +197,20 @@ async def test_01_valid_cv2_rs256_token_and_db_truth_resolution():
             dept_path=u["dept_path"],
             dept_paths=[u["dept_path"]],
             roles=u["roles"],
-            idp_roles=u["roles"],
             position_code=u["position_code"],
             clearance_level=2,
             authz_ver=u["authz_ver"],
             policy_epoch=u["policy_epoch"],
-            cv=2,
+            cv=1,
         )
         ctx = await get_current_user(authorization=f"Bearer {token}")
         assert isinstance(ctx, EffectiveAuthzContext)
+        assert ctx.cv == 1
         assert ctx.user_id == u["user_id"]
         assert ctx.tenant_id == "default_tenant"
         assert ctx.dept_path == "/总公司/研发中心/技术部"
         assert "/总公司/研发中心/技术部" in ctx.dept_paths
+        assert ctx.dept_paths_by_action.get("READ") == ["/总公司/研发中心/技术部"]
         assert ctx.effective_clearance == 2
         assert ctx.has_permission("kb:retrieve") is True
         assert ctx.has_permission("doc:upload") is True
@@ -220,8 +219,8 @@ async def test_01_valid_cv2_rs256_token_and_db_truth_resolution():
 
 
 @pytest.mark.asyncio
-async def test_02_invalid_tampered_and_legacy_cv1_jwt_raises_401():
-    """测试 2: 缺失、损坏、过期、错签发方/受众、cv=1 旧令牌、缺必填字段均必须被 401 拦截"""
+async def test_02_invalid_tampered_and_legacy_cv2_jwt_raises_401():
+    """测试 2: 缺失、损坏、过期、错签发方/受众、cv=2 遗留令牌、缺 dept_paths_by_action/必填字段均必须被 401 拦截"""
     with pytest.raises(HTTPException) as exc:
         await get_current_user(authorization=None)
     assert exc.value.status_code == 401
@@ -249,14 +248,19 @@ async def test_02_invalid_tampered_and_legacy_cv1_jwt_raises_401():
         await get_current_user(authorization=f"Bearer {wrong_aud_token}")
     assert exc.value.status_code == 401
 
-    # 旧版 cv=1 令牌必须被拒绝（无兜底兼容）
-    legacy_cv1_token = make_rs256_test_token(cv=1)
+    # 遗留 cv=2 及布尔/非法 cv 令牌必须被拒绝（无兜底兼容）
+    legacy_cv2_token = make_rs256_test_token(cv=2)
     with pytest.raises(HTTPException) as exc:
-        await get_current_user(authorization=f"Bearer {legacy_cv1_token}")
+        await get_current_user(authorization=f"Bearer {legacy_cv2_token}")
     assert exc.value.status_code == 401
-    assert "cv=1" in exc.value.detail
+    assert "cv=2" in exc.value.detail
 
-    # 缺少 cv=2 必填声明 (如 scope_by_action)
+    bool_cv_token = make_rs256_test_token(custom_claims={"cv": True})
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user(authorization=f"Bearer {bool_cv_token}")
+    assert exc.value.status_code == 401
+
+    # 缺少 cv=1 必填声明 (如 scope_by_action 或 dept_paths_by_action)
     now_ms = int(time.time() * 1000)
     now = now_ms // 1000
     missing_claim_payload = {
@@ -265,6 +269,7 @@ async def test_02_invalid_tampered_and_legacy_cv1_jwt_raises_401():
         "username": "u1",
         "dept_path": "/public",
         "dept_paths": ["/public"],
+        "dept_paths_by_action": {},
         "position_code": "STAFF",
         "clearance_level": 2,
         "authz_ver": 1,
@@ -272,7 +277,7 @@ async def test_02_invalid_tampered_and_legacy_cv1_jwt_raises_401():
         "roles": [],
         "perms": [],
         "is_to_c": False,
-        "cv": 2,
+        "cv": 1,
         "typ": "access",
         "iat": now,
         "iat_ms": now_ms,
@@ -286,6 +291,15 @@ async def test_02_invalid_tampered_and_legacy_cv1_jwt_raises_401():
     assert exc.value.status_code == 401
     assert "scope_by_action" in exc.value.detail
 
+    missing_dpa_payload = dict(missing_claim_payload)
+    missing_dpa_payload.pop("dept_paths_by_action")
+    missing_dpa_payload["scope_by_action"] = {"READ": "DEPT_AND_SUB"}
+    missing_dpa_token = jwt.encode(missing_dpa_payload, PRIVATE_KEY_PEM, algorithm="RS256")
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user(authorization=f"Bearer {missing_dpa_token}")
+    assert exc.value.status_code == 401
+    assert "dept_paths_by_action" in exc.value.detail
+
 
 @pytest.mark.asyncio
 async def test_03_to_c_user_isolation_forbidden_403():
@@ -296,7 +310,7 @@ async def test_03_to_c_user_isolation_forbidden_403():
         username="终端用户",
         dept_path="/public",
         is_to_c=True,
-        cv=2,
+        cv=1,
     )
     with pytest.raises(HTTPException) as exc:
         await get_current_user(authorization=f"Bearer {toc_token}")
@@ -315,7 +329,7 @@ def test_04_dept_path_segment_boundary_defense():
 
 @pytest.mark.asyncio
 async def test_05_auth_me_and_permission_enforcement():
-    """测试 5: /api/v1/auth/me 返回 cv=2 完整档案，且 require_permission 精确拦截缺失权限点"""
+    """测试 5: /api/v1/auth/me 返回 cv=1 完整档案，且 require_permission 精确拦截缺失权限点"""
     test_app = FastAPI()
     test_app.include_router(auth_router, prefix="/api/v1")
 
@@ -336,11 +350,10 @@ async def test_05_auth_me_and_permission_enforcement():
             dept_path=u["dept_path"],
             dept_paths=[u["dept_path"]],
             roles=u["roles"],
-            idp_roles=u["roles"],
             perms=["kb:retrieve"],
             authz_ver=u["authz_ver"],
             policy_epoch=u["policy_epoch"],
-            cv=2,
+            cv=1,
         )
         transport = httpx.ASGITransport(app=test_app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -348,11 +361,13 @@ async def test_05_auth_me_and_permission_enforcement():
             assert r_me.status_code == 200
             body = r_me.json()
             assert body["user_id"] == u["user_id"]
-            assert body["cv"] == 2
+            assert body["cv"] == 1
+            assert "idp_roles" not in body
             assert body["position_code"] == "STAFF"
             assert body["effective_clearance"] == 2
             assert "/总公司/研发中心/技术部" in body["dept_paths"]
             assert isinstance(body["scope_by_action"], dict)
+            assert isinstance(body["dept_paths_by_action"], dict)
 
             r_del = await client.get("/api/v1/protected-delete", headers={"Authorization": f"Bearer {token}"})
             assert r_del.status_code == 403
@@ -360,28 +375,30 @@ async def test_05_auth_me_and_permission_enforcement():
 
 
 # ==============================================================================
-# 2. 跨语言契约验证 (Java NimbusJwtEncoder cv=2 -> Python PyJWT 消费)
+# 2. 跨语言契约验证 (Java NimbusJwtEncoder cv=1 -> Python PyJWT 消费)
 # ==============================================================================
 
 
 @pytest.mark.asyncio
-async def test_06_cross_language_java_issued_cv2_tokens_contract():
-    """测试 6: 消费 Java JavaIssuedTokenFixtureGenerator 签发的真实 cv=2 RS256 JWT Fixture"""
+async def test_06_cross_language_java_issued_cv1_tokens_contract():
+    """测试 6: 消费 Java JavaIssuedTokenFixtureGenerator 签发的真实 cv=1 RS256 JWT Fixture"""
     fixture_path = Path(__file__).resolve().parent / "fixtures" / "java_issued_tokens.json"
     generate_hint = (
         "请先在 java-admin-service 目录执行 "
-        "mvn -Dtest=JavaIssuedTokenFixtureGenerator test 生成最新 cv=2 JWT fixture"
+        "mvn -Dtest=JavaIssuedTokenFixtureGenerator test 生成最新 cv=1 JWT fixture"
     )
     assert fixture_path.is_file(), generate_hint
     tokens = json.loads(fixture_path.read_text(encoding="utf-8"))
 
-    # 先校验所有活跃令牌的 cv=2 声明与短有效期 (<= 30 min)
+    # 先校验所有活跃令牌的 cv=1 声明与短有效期 (<= 30 min)
     for key_name in ("developer_token", "accountant_token", "admin_token", "to_c_token"):
         unverified = jwt.decode(tokens[key_name], options={"verify_signature": False})
-        assert unverified["cv"] == 2, f"{key_name} 必须为 cv=2 契约"
+        assert unverified["cv"] == 1, f"{key_name} 必须为 cv=1 契约"
+        assert "idp_roles" not in unverified, f"{key_name} 不得包含已下线的 idp_roles"
         assert 60 <= (int(unverified["exp"]) - int(unverified["iat"])) <= 1800
         assert "iat_ms" in unverified
         assert "scope_by_action" in unverified
+        assert "dept_paths_by_action" in unverified
         assert "dept_paths" in unverified
         assert "position_code" in unverified
         assert "clearance_level" in unverified
@@ -406,7 +423,6 @@ async def test_06_cross_language_java_issued_cv2_tokens_contract():
                     external_id=f"java-fixture-{uid.hex[:8]}",
                     id_source="oidc:java-fixture",
                     real_name=str(claims["username"]),
-                    dept_path=str(claims["dept_path"]),
                     position_code=str(claims["position_code"]),
                     authz_version=int(claims["authz_ver"]),
                     is_active=True,
@@ -430,7 +446,6 @@ async def test_06_cross_language_java_issued_cv2_tokens_contract():
                             department_id=dept.id,
                             dept_path=dept.path,
                             is_primary=True,
-                            source="IDP",
                         )
                     )
                 created_user_ids.append(uid)
@@ -438,7 +453,6 @@ async def test_06_cross_language_java_issued_cv2_tokens_contract():
                 # 同步 authz_version 与 policy_epoch 以匹配刚生成的 fixture
                 existing.authz_version = int(claims["authz_ver"])
             if epoch is not None and int(claims["policy_epoch"]) != epoch_val:
-                # fixture 是最新从同库生成的，若略有偏移则记录
                 pass
         await db.commit()
 
@@ -547,7 +561,6 @@ async def test_07_document_routes_bola_and_permission_interception():
                 dept_path=tech_u["dept_path"],
                 dept_paths=[tech_u["dept_path"]],
                 roles=tech_u["roles"],
-                idp_roles=tech_u["roles"],
                 authz_ver=tech_u["authz_ver"],
                 policy_epoch=tech_u["policy_epoch"],
             )
@@ -557,7 +570,6 @@ async def test_07_document_routes_bola_and_permission_interception():
                 dept_path=emp_u["dept_path"],
                 dept_paths=[emp_u["dept_path"]],
                 roles=emp_u["roles"],
-                idp_roles=emp_u["roles"],
                 authz_ver=emp_u["authz_ver"],
                 policy_epoch=emp_u["policy_epoch"],
             )
@@ -616,7 +628,6 @@ async def test_08_session_routes_cross_user_isolation():
             dept_path=ua["dept_path"],
             dept_paths=[ua["dept_path"]],
             roles=ua["roles"],
-            idp_roles=ua["roles"],
             authz_ver=ua["authz_ver"],
             policy_epoch=ua["policy_epoch"],
         )
@@ -626,7 +637,6 @@ async def test_08_session_routes_cross_user_isolation():
             dept_path=ub["dept_path"],
             dept_paths=[ub["dept_path"]],
             roles=ub["roles"],
-            idp_roles=ub["roles"],
             authz_ver=ub["authz_ver"],
             policy_epoch=ub["policy_epoch"],
         )
@@ -692,7 +702,6 @@ async def test_09_account_deactivation_db_and_redis_closed_loop():
             dept_path=target_u["dept_path"],
             dept_paths=[target_u["dept_path"]],
             roles=target_u["roles"],
-            idp_roles=target_u["roles"],
             authz_ver=target_u["authz_ver"],
             policy_epoch=target_u["policy_epoch"],
         )
@@ -702,7 +711,6 @@ async def test_09_account_deactivation_db_and_redis_closed_loop():
             dept_path=admin_u["dept_path"],
             dept_paths=[admin_u["dept_path"]],
             roles=admin_u["roles"],
-            idp_roles=admin_u["roles"],
             position_code="EXECUTIVE",
             clearance_level=4,
             authz_ver=admin_u["authz_ver"],
@@ -774,7 +782,6 @@ async def test_09_account_deactivation_db_and_redis_closed_loop():
                 dept_path=target_u["dept_path"],
                 dept_paths=[target_u["dept_path"]],
                 roles=target_u["roles"],
-                idp_roles=target_u["roles"],
                 authz_ver=new_ver,
                 policy_epoch=target_u["policy_epoch"],
                 custom_claims={"iat_ms": max(int(time.time() * 1000), perm_changed_ms + 5)},
@@ -849,6 +856,7 @@ async def test_10_real_oss_range_preview_sliding_ticket_and_channel_monitoring()
     test_app.include_router(documents_router, prefix="/api/v1")
 
     ticket = None
+    legacy_ticket = f"legacy_cv2_{uuid.uuid4().hex}"
     try:
         async with _ephemeral_db_user(
             username="研发预览测试员",
@@ -862,7 +870,6 @@ async def test_10_real_oss_range_preview_sliding_ticket_and_channel_monitoring()
                 dept_path=emp_u["dept_path"],
                 dept_paths=[emp_u["dept_path"]],
                 roles=emp_u["roles"],
-                idp_roles=emp_u["roles"],
                 authz_ver=emp_u["authz_ver"],
                 policy_epoch=emp_u["policy_epoch"],
             )
@@ -878,7 +885,7 @@ async def test_10_real_oss_range_preview_sliding_ticket_and_channel_monitoring()
                 )
                 assert r_reset.status_code == 403
 
-                # 签发单文档 cv=2 preview 短票
+                # 签发单文档 cv=1 preview 短票
                 tk_resp = await client.post(
                     f"/api/v1/documents/{doc_id}/stream-ticket",
                     json={"purpose": "preview"},
@@ -901,10 +908,35 @@ async def test_10_real_oss_range_preview_sliding_ticket_and_channel_monitoring()
                 assert range_resp.headers["content-range"] == f"bytes 0-15/{len(real_pdf_bytes)}"
                 assert range_resp.content == real_pdf_bytes[:16]
 
-                # 超过最大绝对寿命上限 -> 401
+                # 拒绝非 cv=1 流式短票及内嵌 user.cv=2 快照
                 redis_cli = get_redis_client()
+                await redis_cli.set(
+                    f"{STREAM_TICKET_KEY_PREFIX}{legacy_ticket}",
+                    json.dumps({
+                        "cv": 2,
+                        "purpose": "preview",
+                        "doc_id": str(doc_id),
+                        "issued_at": int(time.time()),
+                        "user": {
+                            "user_id": emp_u["user_id"],
+                            "tenant_id": "default_tenant",
+                            "cv": 2,
+                            "roles": ["employee"],
+                            "authz_ver": 1,
+                            "policy_epoch": 1,
+                            "token_iat_ms": 0,
+                        },
+                    }),
+                    ex=60,
+                )
+                legacy_tk_resp = await client.get(f"/api/v1/documents/{doc_id}/preview?ticket={legacy_ticket}")
+                assert legacy_tk_resp.status_code == 401
+
+                # 超过最大绝对寿命上限 -> 401
                 raw_rec = json.loads(await redis_cli.get(f"{STREAM_TICKET_KEY_PREFIX}{ticket}"))
-                assert raw_rec["cv"] == 2
+                assert raw_rec["cv"] == 1
+                assert raw_rec["user"]["cv"] == 1
+                assert "idp_roles" not in raw_rec["user"]
                 raw_rec["issued_at"] = int(time.time()) - int(settings.STREAM_TICKET_MAX_LIFETIME_SECONDS) - 5
                 await redis_cli.set(f"{STREAM_TICKET_KEY_PREFIX}{ticket}", json.dumps(raw_rec), ex=120)
                 expired_cap_resp = await client.get(
@@ -913,6 +945,7 @@ async def test_10_real_oss_range_preview_sliding_ticket_and_channel_monitoring()
                 )
                 assert expired_cap_resp.status_code == 401
     finally:
+        await get_redis_client().delete(f"{STREAM_TICKET_KEY_PREFIX}{legacy_ticket}")
         if ticket:
             await get_redis_client().delete(f"{STREAM_TICKET_KEY_PREFIX}{ticket}")
         try:
@@ -928,8 +961,9 @@ async def test_10_real_oss_range_preview_sliding_ticket_and_channel_monitoring()
 
 
 def test_11_cross_stack_permission_constants_static_alignment():
-    """测试 11: 静态扫描 V1/V2 SQL、Java PermissionResolver、Python Permissions 与前端 PERMISSIONS 字典对齐"""
+    """测试 11: 静态扫描 V1/V2/V5 SQL、Java PermissionResolver、Python Permissions 与前端 PERMISSIONS 字典对齐"""
     repo_root = Path(__file__).resolve().parent.parent.parent
+    assert "user:authz:manage" not in KNOWN_PERMISSION_VALUES
 
     for sql_rel in (
         "java-admin-service/src/main/resources/db/migration/V1__rbac.sql",
@@ -937,7 +971,13 @@ def test_11_cross_stack_permission_constants_static_alignment():
     ):
         sql_text = (repo_root / sql_rel).read_text(encoding="utf-8")
         sql_perms = set(re.findall(r'"(\*|[a-z]+(?::[a-z_]+)+)"', sql_text))
+        sql_perms.discard("user:authz:manage")
         assert sql_perms.issubset(KNOWN_PERMISSION_VALUES), f"{sql_rel} 存在未知权限点: {sql_perms - KNOWN_PERMISSION_VALUES}"
+
+    v5_text = (repo_root / "java-admin-service/src/main/resources/db/migration/V5__abac_attribute_constraints.sql").read_text(
+        encoding="utf-8"
+    )
+    assert '"user:authz:manage"' not in v5_text
 
     java_resolver = (
         repo_root / "java-admin-service/src/main/java/com/enterprise/rag/admin/identity/PermissionResolver.java"
@@ -949,6 +989,7 @@ def test_11_cross_stack_permission_constants_static_alignment():
 
     fe_auth = (repo_root / "frontend/src/stores/auth.ts").read_text(encoding="utf-8")
     assert "withTokenUrl" not in fe_auth
+    assert "user:authz:manage" not in fe_auth
     fe_perms = set(
         re.findall(r"'(\*|[a-z]+(?::[a-z_]+)+)'", fe_auth.split("PERMISSIONS =")[1].split("as const")[0])
     )

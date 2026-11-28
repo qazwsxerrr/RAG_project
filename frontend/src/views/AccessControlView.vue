@@ -124,24 +124,98 @@
     <div v-if="activeTab === 'policy' && isSystemAdmin" class="space-y-6">
       <PositionLevelPanel :positions="positions" @changed="refreshAfterPolicyChange" />
 
-      <div class="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-3">
-        <h3 class="text-sm font-bold text-slate-900">企业角色权限与数据范围</h3>
+      <div class="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4">
+        <div class="border-b border-slate-100 pb-3">
+          <h3 class="text-sm font-bold text-slate-900">企业角色权限与 ABAC 准入策略</h3>
+          <p class="text-xs text-slate-500 mt-0.5">
+            配置角色的数据范围、允许持有的职级集合、允许部门路径前缀及是否强制主部门，保存后全租户策略版本即时推进
+          </p>
+        </div>
+
+        <div v-if="roleErrorMsg" class="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700">{{ roleErrorMsg }}</div>
+        <div v-if="roleSuccessMsg" class="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-700">{{ roleSuccessMsg }}</div>
+
         <div class="border border-slate-200 rounded-xl overflow-hidden overflow-x-auto">
           <table class="w-full text-left text-xs">
             <thead class="bg-slate-50 text-[11px] text-slate-500 border-b border-slate-200 whitespace-nowrap">
               <tr>
-                <th class="py-2.5 px-4">企业角色编码</th>
-                <th class="py-2.5 px-4">角色名称</th>
-                <th class="py-2.5 px-4">数据范围</th>
-                <th class="py-2.5 px-4">功能权限集合</th>
+                <th class="py-2.5 px-3">角色编码 / 名称</th>
+                <th class="py-2.5 px-3">数据范围</th>
+                <th class="py-2.5 px-3">功能权限</th>
+                <th class="py-2.5 px-3">允许职级</th>
+                <th class="py-2.5 px-3">允许部门前缀</th>
+                <th class="py-2.5 px-3">仅限主部门</th>
+                <th class="py-2.5 px-3 text-right">操作</th>
               </tr>
             </thead>
-            <tbody class="divide-y divide-slate-100">
-              <tr v-for="r in roles" :key="r.roleCode">
-                <td class="py-2.5 px-4 font-mono font-semibold text-slate-800 whitespace-nowrap">{{ r.roleCode }}</td>
-                <td class="py-2.5 px-4 text-slate-700 whitespace-nowrap">{{ r.roleName }}</td>
-                <td class="py-2.5 px-4 text-[11px] text-indigo-700 whitespace-nowrap">{{ formatDataScopeLabel(r.dataScope) }}</td>
-                <td class="py-2.5 px-4 text-[11px] text-slate-500">{{ formatPermissionsLabel(r.permissionsJson) }}</td>
+            <tbody class="divide-y divide-slate-100 align-top">
+              <tr v-for="r in editableRoles" :key="r.roleCode" :data-role-row="r.roleCode" class="hover:bg-slate-50/70">
+                <td class="py-3 px-3 whitespace-nowrap space-y-1">
+                  <div class="font-mono font-semibold text-slate-800">{{ r.roleCode }}</div>
+                  <input
+                    v-model="r.roleName"
+                    type="text"
+                    class="p-1 rounded border border-slate-200 bg-white w-28 text-xs outline-none"
+                  />
+                </td>
+                <td class="py-3 px-3 whitespace-nowrap">
+                  <select v-model="r.dataScope" class="p-1.5 rounded border border-slate-200 bg-white text-xs outline-none">
+                    <option value="ALL_ORG">全公司 (ALL_ORG)</option>
+                    <option value="DEPT_AND_SUB">本部门及下级 (DEPT_AND_SUB)</option>
+                    <option value="CUSTOM_ACL">仅显式授权 (CUSTOM_ACL)</option>
+                  </select>
+                </td>
+                <td class="py-3 px-3 text-[11px] text-slate-500 max-w-[180px]">
+                  {{ formatPermissionList(r.permissions) }}
+                </td>
+                <td class="py-3 px-3 min-w-[220px] space-y-1.5">
+                  <label class="inline-flex items-center gap-1.5 text-[11px] font-medium text-indigo-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      :checked="r.allowAllPositions"
+                      @change="toggleRoleAllPositions(r, ($event.target as HTMLInputElement).checked)"
+                    />
+                    <span>不限职级 (*)</span>
+                  </label>
+                  <div v-if="!r.allowAllPositions" class="flex flex-wrap gap-x-2.5 gap-y-1 pt-0.5">
+                    <label
+                      v-for="pos in positionOptions"
+                      :key="pos.positionCode"
+                      class="inline-flex items-center gap-1 text-[11px] text-slate-600 cursor-pointer whitespace-nowrap"
+                    >
+                      <input
+                        type="checkbox"
+                        :checked="r.selectedPositions.includes(pos.positionCode)"
+                        @change="toggleRolePositionItem(r, pos.positionCode, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>{{ pos.positionName }}</span>
+                    </label>
+                  </div>
+                </td>
+                <td class="py-3 px-3 min-w-[180px]">
+                  <input
+                    v-model="r.allowedDeptPrefixesInput"
+                    type="text"
+                    placeholder="* 或 /总公司/研发中心（逗号分隔）"
+                    class="w-full p-1.5 rounded border border-slate-200 bg-white font-mono text-[11px] outline-none"
+                  />
+                </td>
+                <td class="py-3 px-3 whitespace-nowrap">
+                  <label class="inline-flex items-center gap-1.5 text-[11px] text-slate-700 cursor-pointer">
+                    <input type="checkbox" v-model="r.primaryDeptOnly" />
+                    <span>{{ r.primaryDeptOnly ? '是' : '否' }}</span>
+                  </label>
+                </td>
+                <td class="py-3 px-3 text-right whitespace-nowrap">
+                  <button
+                    type="button"
+                    :disabled="savingRoleCode === r.roleCode"
+                    @click="saveRole(r)"
+                    class="px-3 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium disabled:opacity-50 cursor-pointer"
+                  >
+                    {{ savingRoleCode === r.roleCode ? '保存中...' : '保存' }}
+                  </button>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -270,6 +344,7 @@ import type {
   AdminPosition,
   AdminRole,
   AdminUserSummary,
+  DataScope,
   KbVisibility,
 } from '../types/authz';
 import ClassificationBadge from '../components/common/ClassificationBadge.vue';
@@ -329,7 +404,6 @@ const PERM_LABEL_MAP: Record<string, string> = {
   'doc:review': '解析审核',
   'kb:manage': '知识库管理',
   'kb:grant': '访问授权',
-  'user:authz:manage': '人员权限治理',
   'security:classify': '文档定密/升密',
   'security:declassify': '文档降密',
   'system:admin': '系统管理',
@@ -344,17 +418,120 @@ const userNameById = computed(() => {
 });
 
 const formatVisibilityLabel = (v: string): string => VISIBILITY_LABEL_MAP[v] || v;
-const formatDataScopeLabel = (scope: string): string => DATA_SCOPE_LABEL_MAP[scope] || scope;
-const formatPermissionsLabel = (jsonStr: string): string => {
-  try {
-    const arr = JSON.parse(jsonStr);
-    if (Array.isArray(arr)) {
-      return arr.map((p) => PERM_LABEL_MAP[String(p)] || String(p)).join('、') || '-';
-    }
-  } catch {
-    // ignore parse error
+const formatPermissionList = (perms: string[]): string =>
+  perms.map((p) => PERM_LABEL_MAP[p] || p).join('、') || '-';
+
+interface EditableRoleRow {
+  roleCode: string;
+  roleName: string;
+  dataScope: DataScope;
+  permissions: string[];
+  allowAllPositions: boolean;
+  selectedPositions: string[];
+  allowedDeptPrefixesInput: string;
+  primaryDeptOnly: boolean;
+}
+
+const DEFAULT_POSITION_OPTIONS = [
+  { positionCode: 'INTERN_EXT', positionName: '实习 / 外部协作' },
+  { positionCode: 'STAFF', positionName: '普通员工' },
+  { positionCode: 'SUPERVISOR', positionName: '部门主管' },
+  { positionCode: 'MANAGER', positionName: '部门经理' },
+  { positionCode: 'DIRECTOR', positionName: '总监' },
+  { positionCode: 'EXECUTIVE', positionName: '公司高管' },
+];
+
+const positionOptions = computed(() =>
+  positions.value.length > 0
+    ? positions.value.map((p) => ({ positionCode: p.positionCode, positionName: p.positionName }))
+    : DEFAULT_POSITION_OPTIONS
+);
+
+const editableRoles = ref<EditableRoleRow[]>([]);
+const savingRoleCode = ref('');
+const roleErrorMsg = ref('');
+const roleSuccessMsg = ref('');
+
+watch(
+  roles,
+  (list) => {
+    editableRoles.value = list.map((r) => {
+      let perms: string[] = [];
+      try {
+        const parsed = JSON.parse(r.permissionsJson || '[]');
+        if (Array.isArray(parsed)) {
+          perms = parsed.map((p) => String(p)).filter((p) => p && p !== 'user:authz:manage');
+        }
+      } catch {
+        perms = [];
+      }
+      const allowedPos = Array.isArray(r.allowedPositions) && r.allowedPositions.length > 0
+        ? r.allowedPositions.map(String)
+        : ['*'];
+      const allowAll = allowedPos.includes('*');
+      const allowedPrefs = Array.isArray(r.allowedDeptPrefixes) && r.allowedDeptPrefixes.length > 0
+        ? r.allowedDeptPrefixes.map(String)
+        : ['*'];
+      return {
+        roleCode: r.roleCode,
+        roleName: r.roleName,
+        dataScope: r.dataScope,
+        permissions: perms,
+        allowAllPositions: allowAll,
+        selectedPositions: allowAll ? [] : allowedPos,
+        allowedDeptPrefixesInput: allowedPrefs.join(', '),
+        primaryDeptOnly: Boolean(r.primaryDeptOnly),
+      };
+    });
+  },
+  { immediate: true, deep: true }
+);
+
+const toggleRoleAllPositions = (row: EditableRoleRow, checked: boolean) => {
+  row.allowAllPositions = checked;
+  if (checked) {
+    row.selectedPositions = [];
   }
-  return jsonStr || '-';
+};
+
+const toggleRolePositionItem = (row: EditableRoleRow, posCode: string, checked: boolean) => {
+  row.allowAllPositions = false;
+  if (checked) {
+    if (!row.selectedPositions.includes(posCode)) {
+      row.selectedPositions = [...row.selectedPositions, posCode];
+    }
+  } else {
+    row.selectedPositions = row.selectedPositions.filter((p) => p !== posCode);
+  }
+};
+
+const saveRole = async (row: EditableRoleRow) => {
+  savingRoleCode.value = row.roleCode;
+  roleErrorMsg.value = '';
+  roleSuccessMsg.value = '';
+  try {
+    const allowedPositions = row.allowAllPositions ? ['*'] : [...row.selectedPositions];
+    const allowedDeptPrefixes = row.allowedDeptPrefixesInput
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    await accessControlApi.upsertRole({
+      roleCode: row.roleCode,
+      roleName: row.roleName.trim() || row.roleCode,
+      dataScope: row.dataScope,
+      permissions: row.permissions,
+      allowedPositions,
+      allowedDeptPrefixes,
+      primaryDeptOnly: row.primaryDeptOnly,
+      reason: `治理中心更新角色 ${row.roleCode} ABAC 策略`,
+    });
+    await refreshAfterPolicyChange();
+    roleSuccessMsg.value = `角色 ${row.roleName || row.roleCode} (${row.roleCode}) 策略已保存并生效，全租户策略版本已推进。`;
+  } catch (err: any) {
+    roleErrorMsg.value = err.message || `保存角色 ${row.roleCode} 策略失败`;
+  } finally {
+    savingRoleCode.value = '';
+  }
 };
 const formatAuditOperator = (userId?: string | null): string => {
   if (!userId) return '-';
@@ -395,7 +572,7 @@ const manageableDepartments = computed(() => {
   if (canManageAllOrg.value) {
     return activeDepts;
   }
-  const userDepts = (authStore.currentUser?.dept_paths || []).filter(Boolean);
+  const userDepts = (authStore.currentUser?.dept_paths_by_action?.MANAGE || []).filter(Boolean);
   if (userDepts.length === 0) return [];
   const manageScope = authStore.currentUser?.scope_by_action?.MANAGE;
   if (manageScope === 'DEPT_AND_SUB') {

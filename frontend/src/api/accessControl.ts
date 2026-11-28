@@ -8,6 +8,7 @@ import type {
   AdminPosition,
   AdminRole,
   AdminUserSummary,
+  DataScope,
   GrantEffect,
   GrantSubjectType,
   KbAction,
@@ -44,6 +45,8 @@ export const accessControlApi = {
     positionName: string;
     rankOrder: number;
     defaultClearanceLevel: number;
+    minAllowedClearance: number;
+    maxAllowedClearance: number;
     description?: string;
     reason?: string;
   }): Promise<AdminPosition> {
@@ -51,6 +54,18 @@ export const accessControlApi = {
   },
   async listRoles(): Promise<AdminRole[]> {
     return apiClient.get('/admin/roles');
+  },
+  async upsertRole(payload: {
+    roleCode: string;
+    roleName: string;
+    dataScope: DataScope;
+    permissions: string[];
+    allowedPositions: string[];
+    allowedDeptPrefixes: string[];
+    primaryDeptOnly: boolean;
+    reason?: string;
+  }): Promise<AdminRole> {
+    return apiClient.put('/admin/roles', payload);
   },
 
   async listKnowledgeBases(): Promise<AdminKnowledgeBase[]> {

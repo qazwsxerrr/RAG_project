@@ -113,12 +113,12 @@ async def _mint_token_for_user(
     extra_roles: Optional[List[str]] = None,
     roles_override: Optional[List[str]] = None,
 ) -> str:
-    """根据数据库当前真实版本号、策略纪元与企业 IdP 角色样例为指定测试账号签发 cv=2 RS256 令牌"""
+    """根据数据库当前真实版本号、策略纪元与企业 IdP 角色样例为指定测试账号签发 cv=1 RS256 令牌"""
     tenant_id = manifest["tenant_id"]
     u_meta = manifest["users"][user_key]
     uid = uuid.UUID(u_meta["id"])
     base_roles = list(roles_override) if roles_override is not None else list(u_meta.get("roles") or [])
-    idp_roles = list(dict.fromkeys(base_roles + list(extra_roles or [])))
+    roles = list(dict.fromkeys(base_roles + list(extra_roles or [])))
 
     async with AsyncSessionLocal() as db:
         u = await db.get(SysUser, uid)
@@ -128,12 +128,16 @@ async def _mint_token_for_user(
 
         ud_rows = (
             await db.execute(
-                select(UserDepartment.dept_path).where(
+                select(UserDepartment.dept_path, UserDepartment.is_primary)
+                .where(
                     UserDepartment.tenant_id == tenant_id,
                     UserDepartment.user_id == uid,
                 )
+                .order_by(UserDepartment.is_primary.desc(), UserDepartment.created_at.asc())
             )
-        ).scalars().all()
+        ).all()
+        primary_dept = next((p for p, is_prim in ud_rows if is_prim), "")
+        dept_paths_list = list(dict.fromkeys([p for p, _ in ud_rows if p]))
 
         pos = await db.get(Position, (tenant_id, u.position_code))
         eff_level = int(pos.default_clearance_level)
@@ -142,16 +146,15 @@ async def _mint_token_for_user(
             user_id=str(uid),
             tenant_id=tenant_id,
             username=u.real_name,
-            dept_path=u.dept_path,
-            dept_paths=list(dict.fromkeys(ud_rows)),
-            roles=idp_roles,
-            idp_roles=idp_roles,
+            dept_path=primary_dept,
+            dept_paths=dept_paths_list,
+            roles=roles,
             perms=["kb:retrieve"],
             position_code=u.position_code,
             clearance_level=eff_level,
             authz_ver=int(u.authz_version),
             policy_epoch=policy_epoch,
-            cv=2,
+            cv=1,
         )
 
 
@@ -496,7 +499,6 @@ async def test_03_multi_role_action_bucket_and_multi_dept_dual_source():
                     department_id=hr_dept_id,
                     dept_path="/公司/人事行政部",
                     is_primary=False,
-                    source="IDP",
                 )
             )
             await db.commit()
@@ -931,6 +933,8 @@ async def test_05_acl_expiry_cross_tenant_redis_history_dedup_mcp_no_oss_url():
                     position_name="高管",
                     rank_order=60,
                     default_clearance_level=4,
+                    min_allowed_clearance=4,
+                    max_allowed_clearance=4,
                 )
             )
             db.add(
@@ -950,7 +954,6 @@ async def test_05_acl_expiry_cross_tenant_redis_history_dedup_mcp_no_oss_url():
                     external_id=f"ext-{other_tenant}",
                     id_source="oidc:other",
                     real_name="外部租户高管",
-                    dept_path="/公司/技术部",
                     position_code="EXECUTIVE",
                     authz_version=1,
                     is_active=True,
@@ -965,7 +968,6 @@ async def test_05_acl_expiry_cross_tenant_redis_history_dedup_mcp_no_oss_url():
                     department_id=other_dept_id,
                     dept_path="/公司/技术部",
                     is_primary=True,
-                    source="IDP",
                 )
             )
             await db.commit()
@@ -977,7 +979,6 @@ async def test_05_acl_expiry_cross_tenant_redis_history_dedup_mcp_no_oss_url():
             dept_path="/公司/技术部",
             dept_paths=["/公司/技术部"],
             roles=["executive"],
-            idp_roles=["executive"],
             position_code="EXECUTIVE",
             clearance_level=4,
             authz_ver=1,
@@ -1411,6 +1412,12 @@ async def test_08_review_security_hardening_regressions():
             update={
                 "dept_path": "/公司/无部门库的新部门",
                 "dept_paths": ["/公司/无部门库的新部门"],
+                "dept_paths_by_action": {
+                    "READ": ["/公司/无部门库的新部门"],
+                    "UPLOAD": ["/公司/无部门库的新部门"],
+                    "REVIEW": ["/公司/无部门库的新部门"],
+                    "DELETE": ["/公司/无部门库的新部门"],
+                },
             }
         )
         async with AsyncSessionLocal() as db:
@@ -1618,7 +1625,6 @@ async def test_09_second_review_fixes_regression(local_rsa_jwt_env):
             dept_path="/公司/总裁办",
             dept_paths=["/公司/总裁办"],
             roles=[no_declassify_role],
-            idp_roles=[no_declassify_role],
             position_code="EXECUTIVE",
             clearance_level=4,
             authz_ver=int(exec_user.authz_version),
@@ -1817,7 +1823,6 @@ async def test_09_second_review_fixes_regression(local_rsa_jwt_env):
             dept_path="/公司/技术部",
             dept_paths=["/公司/技术部"],
             roles=[custom_acl_role],
-            idp_roles=[custom_acl_role],
             position_code="STAFF",
             clearance_level=2,
             authz_ver=int(staff_user.authz_version),
@@ -1950,7 +1955,6 @@ async def test_09_second_review_fixes_regression(local_rsa_jwt_env):
             dept_path="/公司/技术部",
             dept_paths=["/公司/技术部"],
             roles=[upload_only_role],
-            idp_roles=[upload_only_role],
             position_code="STAFF",
             clearance_level=2,
             authz_ver=int(staff_user.authz_version),
@@ -2214,6 +2218,9 @@ async def test_11_kb_grant_review_fixes_and_concurrency(local_rsa_jwt_env):
                     "roleName": "废弃范围角色",
                     "dataScope": "DEPT_ONLY",
                     "permissions": ["kb:retrieve"],
+                    "allowedPositions": ["*"],
+                    "allowedDeptPrefixes": ["*"],
+                    "primaryDeptOnly": False,
                 },
                 headers={"Authorization": f"Bearer {ops_tok}"},
             )
@@ -2301,7 +2308,7 @@ async def test_11_kb_grant_review_fixes_and_concurrency(local_rsa_jwt_env):
             )
             assert r_del_ext_read.status_code == 200, r_del_ext_read.text
 
-            # 11.3 已停用部门与 sys_users.dept_path 展示字段不得被算作内部归属
+            # 11.3 已停用部门不得被算作内部归属，且其 DISABLED 主部门不回退猜成副部门
             disabled_dept_id = uuid.uuid4()
             disabled_dept_path = f"/公司/技术部/已停用测试组_{uuid.uuid4().hex[:6]}"
             temp_user_id = uuid.uuid4()
@@ -2326,7 +2333,6 @@ async def test_11_kb_grant_review_fixes_and_concurrency(local_rsa_jwt_env):
                         external_id=f"disabled_dept_user_{uuid.uuid4().hex[:6]}",
                         id_source="test",
                         real_name="停用部门调岗员工",
-                        dept_path=disabled_dept_path,
                         is_active=True,
                         position_code="STAFF",
                         authz_version=1,
@@ -2341,7 +2347,6 @@ async def test_11_kb_grant_review_fixes_and_concurrency(local_rsa_jwt_env):
                         department_id=disabled_dept_id,
                         dept_path=disabled_dept_path,
                         is_primary=True,
-                        source="IDP",
                     ),
                     UserDepartment(
                         id=uuid.uuid4(),
@@ -2350,7 +2355,6 @@ async def test_11_kb_grant_review_fixes_and_concurrency(local_rsa_jwt_env):
                         department_id=uuid.UUID(finance_dept_id),
                         dept_path="/公司/财务部",
                         is_primary=False,
-                        source="IDP",
                     ),
                 ])
                 await db.commit()
@@ -2377,7 +2381,7 @@ async def test_11_kb_grant_review_fixes_and_concurrency(local_rsa_jwt_env):
             assert r_users.status_code == 200, r_users.text
             temp_user_row = next(u for u in r_users.json() if u["userId"] == str(temp_user_id))
             assert temp_user_row["effectiveDeptPaths"] == ["/公司/财务部"]
-            assert temp_user_row["primaryDeptPath"] == "/公司/财务部"
+            assert temp_user_row["primaryDeptPath"] == ""
 
             # 11.4 新增命中自身的 DENY MANAGE 防自锁（RESTRICTED 与 DEPARTMENT 均拦截）
             r_self_deny_dept = await client.post(
@@ -2755,3 +2759,295 @@ async def test_13_review_asset_map_citation_table_and_inactive_events_ticket(loc
     assert dumped["is_table"] is True
     assert dumped["table_html"] == "<table><tr><th>A</th></tr><tr><td>1</td></tr></table>"
     assert "raw_oss_url" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_14_abac_position_dept_prefix_primary_only_and_governance_regression():
+    """
+    第 14 组端到端回归：验证企业 ABAC 三维准入策略、动作级部门分桶及控制面治理约束：
+    1. 角色职级准入拦截（STAFF 持 admin / dept_manager -> 403）；
+    2. 多部门员工在 READ vs UPLOAD/DELETE 间按 allowed_dept_prefixes 严格分桶（不越界）；
+    3. primary_dept_only=TRUE 主部门收口（仅主部门获 MANAGE，副部门库建库/授 ACL 均 403；无明确主部门时 403 不猜测）；
+    4. PUT /api/v1/admin/roles 合法保存、policy_epoch 推进、非法参数 400、以及持有 system:admin 角色防自提权 403；
+    5. PUT /api/v1/admin/positions 严格校验证 min_allowed_clearance <= defaultClearanceLevel <= max_allowed_clearance (400/200)。
+    """
+    from rag_kb.core.authz import assert_kb_access
+    from rag_kb.core.constants import KbAction
+
+    reg_tenant = f"abac_reg_{uuid.uuid4().hex[:8]}"
+    p_tech = "/公司/研发中心/技术部"
+    p_hr = "/公司/职能中心/人事行政部"
+    p_fin = "/公司/职能中心/财务部"
+
+    dept_tech_id = uuid.uuid4()
+    dept_hr_id = uuid.uuid4()
+    dept_fin_id = uuid.uuid4()
+    kb_tech_id = uuid.uuid4()
+    kb_hr_id = uuid.uuid4()
+    uid_staff_multi = uuid.uuid4()
+    uid_staff_fin = uuid.uuid4()
+    uid_mgr_dual = uuid.uuid4()
+    uid_mgr_noprim = uuid.uuid4()
+    uid_exec_admin = uuid.uuid4()
+    uid_limited_admin = uuid.uuid4()
+
+    created_kb_ids: List[uuid.UUID] = [kb_tech_id, kb_hr_id]
+
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(TenantPolicyEpoch(tenant_id=reg_tenant, policy_epoch=1))
+            db.add_all([
+                Department(id=dept_tech_id, tenant_id=reg_tenant, name="技术部", path=p_tech, sort_order=10, status="ACTIVE"),
+                Department(id=dept_hr_id, tenant_id=reg_tenant, name="人事行政部", path=p_hr, sort_order=20, status="ACTIVE"),
+                Department(id=dept_fin_id, tenant_id=reg_tenant, name="财务部", path=p_fin, sort_order=30, status="ACTIVE"),
+            ])
+            db.add_all([
+                Position(tenant_id=reg_tenant, position_code="INTERN_EXT", position_name="实习", rank_order=10, default_clearance_level=1, min_allowed_clearance=1, max_allowed_clearance=1),
+                Position(tenant_id=reg_tenant, position_code="STAFF", position_name="普通员工", rank_order=20, default_clearance_level=2, min_allowed_clearance=1, max_allowed_clearance=2),
+                Position(tenant_id=reg_tenant, position_code="SUPERVISOR", position_name="主管", rank_order=30, default_clearance_level=2, min_allowed_clearance=2, max_allowed_clearance=3),
+                Position(tenant_id=reg_tenant, position_code="MANAGER", position_name="部门经理", rank_order=40, default_clearance_level=3, min_allowed_clearance=3, max_allowed_clearance=3),
+                Position(tenant_id=reg_tenant, position_code="DIRECTOR", position_name="总监", rank_order=50, default_clearance_level=3, min_allowed_clearance=3, max_allowed_clearance=3),
+                Position(tenant_id=reg_tenant, position_code="EXECUTIVE", position_name="高管", rank_order=60, default_clearance_level=4, min_allowed_clearance=4, max_allowed_clearance=4),
+            ])
+            db.add_all([
+                Role(
+                    tenant_id=reg_tenant, role_code="employee", role_name="员工", data_scope="DEPT_AND_SUB",
+                    permissions=["kb:retrieve"], allowed_positions=["*"], allowed_dept_prefixes=["*"], primary_dept_only=False,
+                ),
+                Role(
+                    tenant_id=reg_tenant, role_code="developer", role_name="研发工程师", data_scope="DEPT_AND_SUB",
+                    permissions=["kb:retrieve", "doc:upload", "doc:review", "doc:delete"],
+                    allowed_positions=["INTERN_EXT", "STAFF", "SUPERVISOR", "MANAGER", "DIRECTOR"],
+                    allowed_dept_prefixes=["/公司/研发中心"], primary_dept_only=False,
+                ),
+                Role(
+                    tenant_id=reg_tenant, role_code="dept_manager", role_name="部门经理", data_scope="DEPT_AND_SUB",
+                    permissions=["kb:retrieve", "doc:upload", "doc:review", "doc:delete", "kb:manage", "kb:grant"],
+                    allowed_positions=["MANAGER", "DIRECTOR"],
+                    allowed_dept_prefixes=["*"], primary_dept_only=True,
+                ),
+                Role(
+                    tenant_id=reg_tenant, role_code="admin", role_name="管理员", data_scope="ALL_ORG",
+                    permissions=["*"], allowed_positions=["DIRECTOR", "EXECUTIVE"],
+                    allowed_dept_prefixes=["*"], primary_dept_only=False,
+                ),
+                Role(
+                    tenant_id=reg_tenant, role_code="limited_sys_admin", role_name="研发策略管理员", data_scope="DEPT_AND_SUB",
+                    permissions=["kb:retrieve", "kb:manage", "kb:grant", "system:admin"],
+                    allowed_positions=["MANAGER"], allowed_dept_prefixes=["/公司/研发中心"], primary_dept_only=True,
+                ),
+            ])
+            await db.flush()
+            db.add_all([
+                SysUser(id=uid_staff_multi, tenant_id=reg_tenant, external_id="abac-staff-multi", id_source="oidc:reg", real_name="兼职研发", position_code="STAFF", is_active=True, authz_version=1),
+                SysUser(id=uid_staff_fin, tenant_id=reg_tenant, external_id="abac-staff-fin", id_source="oidc:reg", real_name="财务专员", position_code="STAFF", is_active=True, authz_version=1),
+                SysUser(id=uid_mgr_dual, tenant_id=reg_tenant, external_id="abac-mgr-dual", id_source="oidc:reg", real_name="双部门经理", position_code="MANAGER", is_active=True, authz_version=1),
+                SysUser(id=uid_mgr_noprim, tenant_id=reg_tenant, external_id="abac-mgr-noprim", id_source="oidc:reg", real_name="缺主部门经理", position_code="MANAGER", is_active=True, authz_version=1),
+                SysUser(id=uid_exec_admin, tenant_id=reg_tenant, external_id="abac-exec-adm", id_source="oidc:reg", real_name="高管超管", position_code="EXECUTIVE", is_active=True, authz_version=1),
+                SysUser(id=uid_limited_admin, tenant_id=reg_tenant, external_id="abac-lim-adm", id_source="oidc:reg", real_name="受限策略管理员", position_code="MANAGER", is_active=True, authz_version=1),
+            ])
+            await db.flush()
+            db.add_all([
+                UserDepartment(id=uuid.uuid4(), tenant_id=reg_tenant, user_id=uid_staff_multi, department_id=dept_tech_id, dept_path=p_tech, is_primary=True),
+                UserDepartment(id=uuid.uuid4(), tenant_id=reg_tenant, user_id=uid_staff_multi, department_id=dept_hr_id, dept_path=p_hr, is_primary=False),
+                UserDepartment(id=uuid.uuid4(), tenant_id=reg_tenant, user_id=uid_staff_fin, department_id=dept_fin_id, dept_path=p_fin, is_primary=True),
+                UserDepartment(id=uuid.uuid4(), tenant_id=reg_tenant, user_id=uid_mgr_dual, department_id=dept_tech_id, dept_path=p_tech, is_primary=True),
+                UserDepartment(id=uuid.uuid4(), tenant_id=reg_tenant, user_id=uid_mgr_dual, department_id=dept_hr_id, dept_path=p_hr, is_primary=False),
+                UserDepartment(id=uuid.uuid4(), tenant_id=reg_tenant, user_id=uid_mgr_noprim, department_id=dept_tech_id, dept_path=p_tech, is_primary=False),
+                UserDepartment(id=uuid.uuid4(), tenant_id=reg_tenant, user_id=uid_mgr_noprim, department_id=dept_hr_id, dept_path=p_hr, is_primary=False),
+                UserDepartment(id=uuid.uuid4(), tenant_id=reg_tenant, user_id=uid_exec_admin, department_id=dept_tech_id, dept_path=p_tech, is_primary=True),
+                UserDepartment(id=uuid.uuid4(), tenant_id=reg_tenant, user_id=uid_limited_admin, department_id=dept_tech_id, dept_path=p_tech, is_primary=True),
+            ])
+            kb_tech = KnowledgeBase(
+                id=kb_tech_id, tenant_id=reg_tenant, name="技术研发库",
+                owner_department_id=dept_tech_id, owner_dept_path=p_tech,
+                visibility="DEPARTMENT", min_classification_level=1, default_doc_level=2, max_doc_level=4, status="ACTIVE",
+            )
+            kb_hr = KnowledgeBase(
+                id=kb_hr_id, tenant_id=reg_tenant, name="人事制度库",
+                owner_department_id=dept_hr_id, owner_dept_path=p_hr,
+                visibility="DEPARTMENT", min_classification_level=1, default_doc_level=2, max_doc_level=4, status="ACTIVE",
+            )
+            db.add_all([kb_tech, kb_hr])
+            await db.commit()
+
+        clear_authz_cache(tenant_id=reg_tenant)
+
+        # 1. 职级准入拦截：STAFF 持有 admin 或 dept_manager -> 403
+        for bad_role in ("admin", "dept_manager"):
+            bad_tok = make_rs256_test_token(
+                user_id=str(uid_staff_multi), tenant_id=reg_tenant, username="兼职研发",
+                dept_path=p_tech, dept_paths=[p_tech, p_hr], roles=[bad_role], position_code="STAFF",
+            )
+            with pytest.raises(HTTPException) as exc_pos:
+                await get_current_user(authorization=f"Bearer {bad_tok}")
+            assert exc_pos.value.status_code == 403
+
+        # 2. 多部门员工动作分桶：READ=[hr, tech], UPLOAD/DELETE=[tech]；仅财务部持 developer -> 403
+        multi_tok = make_rs256_test_token(
+            user_id=str(uid_staff_multi), tenant_id=reg_tenant, username="兼职研发",
+            dept_path=p_tech, dept_paths=[p_tech, p_hr], roles=["developer", "employee"], position_code="STAFF",
+        )
+        multi_ctx = await get_current_user(authorization=f"Bearer {multi_tok}")
+        assert multi_ctx.dept_paths_by_action["READ"] == sorted([p_hr, p_tech])
+        assert multi_ctx.dept_paths_by_action["UPLOAD"] == [p_tech]
+        assert multi_ctx.dept_paths_by_action["DELETE"] == [p_tech]
+
+        async with AsyncSessionLocal() as db:
+            kb_t_row = await db.get(KnowledgeBase, kb_tech_id)
+            kb_h_row = await db.get(KnowledgeBase, kb_hr_id)
+            await assert_kb_access(db, multi_ctx, kb_t_row, KbAction.UPLOAD.value, audit_denial=False)
+            await assert_kb_access(db, multi_ctx, kb_h_row, KbAction.READ.value, audit_denial=False)
+            with pytest.raises(HTTPException) as exc_up_hr:
+                await assert_kb_access(db, multi_ctx, kb_h_row, KbAction.UPLOAD.value, audit_denial=False)
+            assert exc_up_hr.value.status_code == 403
+
+        fin_dev_tok = make_rs256_test_token(
+            user_id=str(uid_staff_fin), tenant_id=reg_tenant, username="财务专员",
+            dept_path=p_fin, dept_paths=[p_fin], roles=["developer"], position_code="STAFF",
+        )
+        with pytest.raises(HTTPException) as exc_fin_dev:
+            await get_current_user(authorization=f"Bearer {fin_dev_tok}")
+        assert exc_fin_dev.value.status_code == 403
+
+        # 3. primary_dept_only 收口：双部门 MANAGER 仅对主部门(技术部)享 MANAGE，副部门(人事)建库/ACL 均 403；无主部门 MANAGER 403
+        app = _build_test_app()
+        transport = httpx.ASGITransport(app=app)
+        dual_mgr_tok = make_rs256_test_token(
+            user_id=str(uid_mgr_dual), tenant_id=reg_tenant, username="双部门经理",
+            dept_path=p_tech, dept_paths=[p_tech, p_hr], roles=["dept_manager", "employee"],
+            position_code="MANAGER", clearance_level=3,
+        )
+        dual_mgr_ctx = await get_current_user(authorization=f"Bearer {dual_mgr_tok}")
+        assert dual_mgr_ctx.dept_paths_by_action["READ"] == sorted([p_hr, p_tech])
+        assert dual_mgr_ctx.dept_paths_by_action["MANAGE"] == [p_tech]
+
+        noprim_tok = make_rs256_test_token(
+            user_id=str(uid_mgr_noprim), tenant_id=reg_tenant, username="缺主部门经理",
+            dept_path="", dept_paths=[p_tech, p_hr], roles=["dept_manager"], position_code="MANAGER", clearance_level=3,
+        )
+        with pytest.raises(HTTPException) as exc_noprim:
+            await get_current_user(authorization=f"Bearer {noprim_tok}")
+        assert exc_noprim.value.status_code == 403
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r_up_list = await client.get("/api/v1/knowledge-bases?action=UPLOAD", headers={"Authorization": f"Bearer {multi_tok}"})
+            assert r_up_list.status_code == 200
+            assert [k["id"] for k in r_up_list.json()] == [str(kb_tech_id)]
+
+            r_hr_kb_create = await client.post(
+                "/api/v1/admin/knowledge-bases",
+                json={"name": "越权副部门建库", "ownerDepartmentId": str(dept_hr_id), "visibility": "DEPARTMENT"},
+                headers={"Authorization": f"Bearer {dual_mgr_tok}"},
+            )
+            assert r_hr_kb_create.status_code == 403
+
+            r_hr_grant = await client.post(
+                f"/api/v1/admin/knowledge-bases/{kb_hr_id}/grants",
+                json={"subjectType": "USER", "subjectId": str(uid_staff_multi), "action": "READ", "effect": "ALLOW"},
+                headers={"Authorization": f"Bearer {dual_mgr_tok}"},
+            )
+            assert r_hr_grant.status_code == 403
+
+            r_tech_kb_create = await client.post(
+                "/api/v1/admin/knowledge-bases",
+                json={"name": f"主部门合规库_{uuid.uuid4().hex[:6]}", "ownerDepartmentId": str(dept_tech_id), "visibility": "DEPARTMENT"},
+                headers={"Authorization": f"Bearer {dual_mgr_tok}"},
+            )
+            assert r_tech_kb_create.status_code == 201, r_tech_kb_create.text
+            created_kb_ids.append(uuid.UUID(r_tech_kb_create.json()["id"]))
+
+            # 4. PUT /admin/roles 合法保存 + 参数校验 (400) + policy_epoch 推进 + 自提权拦截 (403)
+            exec_tok_e2 = make_rs256_test_token(
+                user_id=str(uid_exec_admin), tenant_id=reg_tenant, username="高管超管",
+                dept_path=p_tech, dept_paths=[p_tech], roles=["admin"], perms=["*"],
+                scope_by_action={"READ": "ALL_ORG", "MANAGE": "ALL_ORG"},
+                position_code="EXECUTIVE", clearance_level=4, policy_epoch=2,
+            )
+            for bad_role_body in (
+                {"roleCode": "developer", "roleName": "研发", "dataScope": "DEPT_AND_SUB", "permissions": ["kb:retrieve"], "allowedPositions": ["NON_EXIST_POS"], "allowedDeptPrefixes": ["*"], "primaryDeptOnly": False},
+                {"roleCode": "developer", "roleName": "研发", "dataScope": "DEPT_AND_SUB", "permissions": ["kb:retrieve"], "allowedPositions": [], "allowedDeptPrefixes": ["*"], "primaryDeptOnly": False},
+                {"roleCode": "developer", "roleName": "研发", "dataScope": "DEPT_AND_SUB", "permissions": ["kb:retrieve"], "allowedPositions": ["*"], "allowedDeptPrefixes": ["relative/no_slash"], "primaryDeptOnly": False},
+                {"roleCode": "kb_admin", "roleName": "废弃", "dataScope": "DEPT_AND_SUB", "permissions": ["kb:retrieve"], "allowedPositions": ["*"], "allowedDeptPrefixes": ["*"], "primaryDeptOnly": False},
+                {"roleCode": "developer", "roleName": "研发", "dataScope": "DEPT_AND_SUB", "permissions": ["user:authz:manage"], "allowedPositions": ["*"], "allowedDeptPrefixes": ["*"], "primaryDeptOnly": False},
+            ):
+                r_bad = await client.put("/api/v1/admin/roles", json=bad_role_body, headers={"Authorization": f"Bearer {exec_tok_e2}"})
+                assert r_bad.status_code == 400, f"应返回 400: {bad_role_body} -> {r_bad.status_code} {r_bad.text}"
+
+            r_role_ok = await client.put(
+                "/api/v1/admin/roles",
+                json={
+                    "roleCode": "developer",
+                    "roleName": "研发工程师(严管版)",
+                    "dataScope": "DEPT_AND_SUB",
+                    "permissions": ["kb:retrieve", "doc:upload"],
+                    "allowedPositions": ["STAFF", "MANAGER"],
+                    "allowedDeptPrefixes": ["/公司/研发中心/技术部"],
+                    "primaryDeptOnly": True,
+                },
+                headers={"Authorization": f"Bearer {exec_tok_e2}"},
+            )
+            assert r_role_ok.status_code == 200, r_role_ok.text
+            saved_role = r_role_ok.json()
+            assert saved_role["allowedPositions"] == ["STAFF", "MANAGER"]
+            assert saved_role["allowedDeptPrefixes"] == ["/公司/研发中心/技术部"]
+            assert saved_role["primaryDeptOnly"] is True
+
+            # 验证 policy_epoch 已推进至 3，旧 policy_epoch=2 令牌立即 401
+            r_stale_ep = await client.get("/api/v1/admin/roles", headers={"Authorization": f"Bearer {exec_tok_e2}"})
+            assert r_stale_ep.status_code == 401
+
+            lim_tok = make_rs256_test_token(
+                user_id=str(uid_limited_admin), tenant_id=reg_tenant, username="受限策略管理员",
+                dept_path=p_tech, dept_paths=[p_tech], roles=["limited_sys_admin"],
+                perms=["kb:retrieve", "kb:manage", "kb:grant", "system:admin"],
+                position_code="MANAGER", clearance_level=3, policy_epoch=3,
+            )
+            for self_esc_body in (
+                {"roleCode": "limited_sys_admin", "roleName": "扩职级", "dataScope": "DEPT_AND_SUB", "permissions": ["kb:retrieve", "kb:manage", "kb:grant", "system:admin"], "allowedPositions": ["STAFF", "MANAGER"], "allowedDeptPrefixes": ["/公司/研发中心"], "primaryDeptOnly": True},
+                {"roleCode": "limited_sys_admin", "roleName": "扩部门", "dataScope": "DEPT_AND_SUB", "permissions": ["kb:retrieve", "kb:manage", "kb:grant", "system:admin"], "allowedPositions": ["MANAGER"], "allowedDeptPrefixes": ["*"], "primaryDeptOnly": True},
+                {"roleCode": "limited_sys_admin", "roleName": "放宽主部门", "dataScope": "DEPT_AND_SUB", "permissions": ["kb:retrieve", "kb:manage", "kb:grant", "system:admin"], "allowedPositions": ["MANAGER"], "allowedDeptPrefixes": ["/公司/研发中心"], "primaryDeptOnly": False},
+            ):
+                r_esc = await client.put("/api/v1/admin/roles", json=self_esc_body, headers={"Authorization": f"Bearer {lim_tok}"})
+                assert r_esc.status_code == 403, f"应触发 403 防自提权: {self_esc_body} -> {r_esc.status_code}"
+
+            # 5. PUT /admin/positions 职级密级边界校验 [min_allowed_clearance, max_allowed_clearance]
+            exec_tok_e3 = make_rs256_test_token(
+                user_id=str(uid_exec_admin), tenant_id=reg_tenant, username="高管超管",
+                dept_path=p_tech, dept_paths=[p_tech], roles=["admin"], perms=["*"],
+                scope_by_action={"READ": "ALL_ORG", "MANAGE": "ALL_ORG"},
+                position_code="EXECUTIVE", clearance_level=4, policy_epoch=3,
+            )
+            r_pos_list = await client.get("/api/v1/admin/positions", headers={"Authorization": f"Bearer {exec_tok_e3}"})
+            assert r_pos_list.status_code == 200
+            staff_pos = next(p for p in r_pos_list.json() if p["positionCode"] == "STAFF")
+            assert (staff_pos["minAllowedClearance"], staff_pos["maxAllowedClearance"]) == (1, 2)
+
+            for bad_pos_body in (
+                {"positionCode": "STAFF", "positionName": "普通员工", "rankOrder": 20, "defaultClearanceLevel": 3, "minAllowedClearance": 1, "maxAllowedClearance": 2},
+                {"positionCode": "SUPERVISOR", "positionName": "主管", "rankOrder": 30, "defaultClearanceLevel": 1, "minAllowedClearance": 2, "maxAllowedClearance": 3},
+                {"positionCode": "STAFF", "positionName": "普通员工", "rankOrder": 20, "defaultClearanceLevel": 2, "minAllowedClearance": 3, "maxAllowedClearance": 2},
+            ):
+                r_bad_pos = await client.put("/api/v1/admin/positions", json=bad_pos_body, headers={"Authorization": f"Bearer {exec_tok_e3}"})
+                assert r_bad_pos.status_code == 400, f"职级越界应报 400: {bad_pos_body} -> {r_bad_pos.status_code}"
+
+            r_pos_ok = await client.put(
+                "/api/v1/admin/positions",
+                json={"positionCode": "SUPERVISOR", "positionName": "主管", "rankOrder": 30, "defaultClearanceLevel": 3, "minAllowedClearance": 2, "maxAllowedClearance": 3},
+                headers={"Authorization": f"Bearer {exec_tok_e3}"},
+            )
+            assert r_pos_ok.status_code == 200, r_pos_ok.text
+            assert r_pos_ok.json()["defaultClearanceLevel"] == 3
+    finally:
+        clear_authz_cache(tenant_id=reg_tenant)
+        async with AsyncSessionLocal() as db:
+            await db.execute(delete(AuditLog).where(AuditLog.tenant_id == reg_tenant))
+            await db.execute(delete(KbGrant).where(KbGrant.tenant_id == reg_tenant))
+            await db.execute(delete(KnowledgeBase).where(KnowledgeBase.id.in_(created_kb_ids)))
+            await db.execute(delete(UserDepartment).where(UserDepartment.tenant_id == reg_tenant))
+            await db.execute(delete(SysUser).where(SysUser.tenant_id == reg_tenant))
+            await db.execute(delete(Role).where(Role.tenant_id == reg_tenant))
+            await db.execute(delete(Position).where(Position.tenant_id == reg_tenant))
+            await db.execute(delete(Department).where(Department.tenant_id == reg_tenant))
+            await db.execute(delete(TenantPolicyEpoch).where(TenantPolicyEpoch.tenant_id == reg_tenant))
+            await db.commit()

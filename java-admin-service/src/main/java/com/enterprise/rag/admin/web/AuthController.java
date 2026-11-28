@@ -283,7 +283,7 @@ public class AuthController {
     }
 
     /**
-     * 会话换短期 cv=2 业务 JWT（含多部门、按动作范围 scope_by_action、职级、有效密级、双版本号）
+     * 会话换短期 cv=1 业务 JWT（含多部门、按动作范围 scope_by_action、按动作部门集合 dept_paths_by_action、职级、有效密级、双版本号）
      */
     @PostMapping("/api/admin/auth/token")
     public Map<String, Object> exchangeToken(
@@ -294,7 +294,6 @@ public class AuthController {
     ) {
         RefreshedOidcSession refreshed = refreshOidcIdentityStrict(oidcUser, authentication, request, response);
         MappedIdentity mapped = userMappingService.mapAndProvision(refreshed.oidcUser(), refreshed.deptsChangedInIdp());
-        ResolvedPermissions perms = permissionResolver.resolve(mapped.user().tenantId(), mapped.roleCodes());
 
         Instant now = Instant.now();
         String userIdStr = mapped.user().id().toString();
@@ -313,17 +312,17 @@ public class AuthController {
                 .claim("username", mapped.user().realName())
                 .claim("tenant_id", mapped.user().tenantId())
                 .claim("roles", mapped.roleCodes())
-                .claim("idp_roles", mapped.idpRoleCodes())
-                .claim("perms", new ArrayList<>(perms.permissions()))
+                .claim("perms", new ArrayList<>(mapped.permissions()))
                 .claim("dept_path", mapped.primaryDeptPath())
                 .claim("dept_paths", mapped.effectiveDeptPaths())
-                .claim("scope_by_action", perms.scopeByAction())
+                .claim("dept_paths_by_action", mapped.deptPathsByAction())
+                .claim("scope_by_action", mapped.scopeByAction())
                 .claim("position_code", mapped.user().positionCode())
                 .claim("clearance_level", mapped.effectiveClearance())
                 .claim("authz_ver", mapped.user().authzVersion())
                 .claim("policy_epoch", mapped.policyEpoch())
                 .claim("is_to_c", false)
-                .claim("cv", 2)
+                .claim("cv", 1)
                 .claim("typ", "access")
                 .claim("iat_ms", issuedAtMs)
                 .issuedAt(now)
@@ -344,7 +343,7 @@ public class AuthController {
     }
 
     /**
-     * 回显当前 OIDC 登录员工完整多维权限画像
+     * 回显当前 OIDC 登录员工完整多维权限画像 (cv=1)
      */
     @GetMapping("/api/admin/users/me")
     public Map<String, Object> getMyProfile(
@@ -355,7 +354,6 @@ public class AuthController {
     ) {
         RefreshedOidcSession refreshed = refreshOidcIdentityStrict(oidcUser, authentication, request, response);
         MappedIdentity mapped = userMappingService.mapAndProvision(refreshed.oidcUser(), refreshed.deptsChangedInIdp());
-        ResolvedPermissions perms = permissionResolver.resolve(mapped.user().tenantId(), mapped.roleCodes());
         if (refreshed.deptsChangedInIdp() || refreshed.rolesChangedInIdp()
                 || mapped.idpDepartmentsMutated() || mapped.positionMutated()) {
             redisRevocationSync.markPermissionChanged(mapped.user().id().toString(), System.currentTimeMillis());
@@ -367,15 +365,16 @@ public class AuthController {
         me.put("username", mapped.user().realName());
         me.put("dept_path", mapped.primaryDeptPath());
         me.put("dept_paths", mapped.effectiveDeptPaths());
-        me.put("scope_by_action", perms.scopeByAction());
+        me.put("dept_paths_by_action", mapped.deptPathsByAction());
+        me.put("scope_by_action", mapped.scopeByAction());
         me.put("position_code", mapped.user().positionCode());
         me.put("clearance_level", mapped.effectiveClearance());
         me.put("authz_ver", mapped.user().authzVersion());
         me.put("policy_epoch", mapped.policyEpoch());
         me.put("roles", mapped.roleCodes());
-        me.put("perms", perms.permissions());
+        me.put("perms", mapped.permissions());
         me.put("is_to_c", false);
-        me.put("cv", 2);
+        me.put("cv", 1);
         return me;
     }
 

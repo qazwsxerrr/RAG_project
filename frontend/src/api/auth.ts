@@ -22,6 +22,7 @@ export interface UserProfile {
   username: string;
   dept_path: string;
   dept_paths: string[];
+  dept_paths_by_action: Partial<Record<KbAction, string[]>>;
   scope_by_action: Partial<Record<KbAction, DataScope>>;
   position_code: string;
   clearance_level: number;

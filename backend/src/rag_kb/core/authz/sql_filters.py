@@ -151,7 +151,8 @@ def build_kb_access_condition(
     if action_upper == KbAction.READ.value or action_scope == DataScope.ALL_ORG.value:
         visibility_branches.append(KnowledgeBase.visibility == "PUBLIC")
 
-    dept_scope_cond = _build_dept_scope_match(action_scope, getattr(ctx, "dept_paths", []) or [])
+    dept_paths_map = getattr(ctx, "dept_paths_by_action", None) or {}
+    dept_scope_cond = _build_dept_scope_match(action_scope, dept_paths_map.get(action_upper, []))
     visibility_branches.append(
         and_(
             KnowledgeBase.visibility == "DEPARTMENT",
@@ -177,7 +178,8 @@ def build_kb_source_type_expr(ctx: Any, action: str = KbAction.READ.value):
     """返回知识库授权来源标签 (PUBLIC / DEPARTMENT / SHARED_ACL) 的 SQL 表达式"""
     action_upper = str(action).upper().strip()
     action_scope = (getattr(ctx, "scope_by_action", None) or {}).get(action_upper, "")
-    dept_match = _build_dept_scope_match(action_scope, getattr(ctx, "dept_paths", []) or [])
+    dept_paths_map = getattr(ctx, "dept_paths_by_action", None) or {}
+    dept_match = _build_dept_scope_match(action_scope, dept_paths_map.get(action_upper, []))
     return case(
         (
             and_(

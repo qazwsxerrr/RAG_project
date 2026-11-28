@@ -12,7 +12,6 @@ export const PERMISSIONS = {
   SYSTEM_ADMIN: 'system:admin',
   KB_MANAGE: 'kb:manage',
   KB_GRANT: 'kb:grant',
-  USER_AUTHZ_MANAGE: 'user:authz:manage',
   SECURITY_CLASSIFY: 'security:classify',
   SECURITY_DECLASSIFY: 'security:declassify',
 } as const;
@@ -20,7 +19,6 @@ export const PERMISSIONS = {
 export const GOVERNANCE_PERMISSIONS = [
   PERMISSIONS.KB_MANAGE,
   PERMISSIONS.KB_GRANT,
-  PERMISSIONS.USER_AUTHZ_MANAGE,
   PERMISSIONS.SYSTEM_ADMIN,
 ] as const;
 
@@ -161,6 +159,10 @@ export const useAuthStore = defineStore('auth', () => {
             payload.scope_by_action && typeof payload.scope_by_action === 'object'
               ? (payload.scope_by_action as Partial<Record<KbAction, DataScope>>)
               : {};
+          const rawDeptPathsByAction =
+            payload.dept_paths_by_action && typeof payload.dept_paths_by_action === 'object'
+              ? (payload.dept_paths_by_action as Partial<Record<KbAction, string[]>>)
+              : {};
 
           currentUser.value = {
             user_id: String(payload.sub),
@@ -168,6 +170,7 @@ export const useAuthStore = defineStore('auth', () => {
             username: String(payload.username || ''),
             dept_path: primaryDept,
             dept_paths: rawDeptPaths,
+            dept_paths_by_action: rawDeptPathsByAction,
             scope_by_action: rawScopeMap,
             position_code: String(payload.position_code || 'STAFF'),
             clearance_level: Number(payload.clearance_level ?? 2),
@@ -176,7 +179,7 @@ export const useAuthStore = defineStore('auth', () => {
             roles: Array.isArray(payload.roles) ? payload.roles.map(String) : [],
             perms: Array.isArray(payload.perms) ? payload.perms.map(String) : [],
             is_to_c: Boolean(payload.is_to_c),
-            cv: Number(payload.cv ?? 2),
+            cv: Number(payload.cv ?? 1),
           };
           return resp.access_token;
         }

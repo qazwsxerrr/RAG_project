@@ -22,7 +22,6 @@ class Permissions(str, Enum):
     SYSTEM_ADMIN = "system:admin"
     KB_MANAGE = "kb:manage"
     KB_GRANT = "kb:grant"
-    USER_AUTHZ_MANAGE = "user:authz:manage"
     SECURITY_CLASSIFY = "security:classify"
     SECURITY_DECLASSIFY = "security:declassify"
 

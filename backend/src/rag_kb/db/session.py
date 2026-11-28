@@ -70,12 +70,12 @@ INITIAL_DEPARTMENTS = [
 ]
 
 INITIAL_POSITIONS = [
-    ("INTERN_EXT", "实习 / 外部协作", 10, 1, "可看 L1 全员公开制度"),
-    ("STAFF", "普通员工", 20, 2, "可看 L1 + 所属多部门及获授知识库内 L1-L2 文档"),
-    ("SUPERVISOR", "部门主管", 30, 2, "默认 L2，可在后台动态调整"),
-    ("MANAGER", "部门经理", 40, 3, "可看有权部门/知识库内 L1-L3 文档"),
-    ("DIRECTOR", "总监", 50, 3, "覆盖中心及下属多部门 L1-L3 文档"),
-    ("EXECUTIVE", "公司高管", 60, 4, "满足 L1-L4 密级门槛，仍遵守知识库范围与受限库 ACL"),
+    ("INTERN_EXT", "实习 / 外部协作", 10, 1, 1, 1, "可看 L1 全员公开制度"),
+    ("STAFF", "普通员工", 20, 2, 1, 2, "可看 L1 + 所属多部门及获授知识库内 L1-L2 文档"),
+    ("SUPERVISOR", "部门主管", 30, 2, 2, 3, "默认 L2，可在后台动态调整"),
+    ("MANAGER", "部门经理", 40, 3, 3, 3, "可看有权部门/知识库内 L1-L3 文档"),
+    ("DIRECTOR", "总监", 50, 3, 3, 3, "覆盖中心及下属多部门 L1-L3 文档"),
+    ("EXECUTIVE", "公司高管", 60, 4, 4, 4, "满足 L1-L4 密级门槛，仍遵守知识库范围与受限库 ACL"),
 ]
 
 
@@ -85,7 +85,7 @@ async def seed_tenant_defaults(session: AsyncSession, tenant_id: str) -> None:
     if not epoch_row:
         session.add(TenantPolicyEpoch(tenant_id=tenant_id, policy_epoch=1))
 
-    for code, name, rank_order, default_level, desc in INITIAL_POSITIONS:
+    for code, name, rank_order, default_level, min_level, max_level, desc in INITIAL_POSITIONS:
         pos = await session.get(Position, (tenant_id, code))
         if not pos:
             session.add(
@@ -95,6 +95,8 @@ async def seed_tenant_defaults(session: AsyncSession, tenant_id: str) -> None:
                     position_name=name,
                     rank_order=rank_order,
                     default_clearance_level=default_level,
+                    min_allowed_clearance=min_level,
+                    max_allowed_clearance=max_level,
                     description=desc,
                 )
             )

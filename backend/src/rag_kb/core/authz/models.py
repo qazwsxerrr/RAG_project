@@ -12,7 +12,7 @@ from rag_kb.db.models import KnowledgeBase
 
 
 class EffectiveAuthzContext(BaseModel):
-    """经 PostgreSQL 实时核验与策略字典重算后的当前用户有效权限上下文 (cv=2)"""
+    """经 PostgreSQL 实时核验与策略字典重算后的当前用户有效权限上下文 (cv=1)"""
 
     user_id: str
     tenant_id: str = "default_tenant"
@@ -20,9 +20,9 @@ class EffectiveAuthzContext(BaseModel):
     is_active: bool = True
     dept_path: str = ""
     dept_paths: List[str] = Field(default_factory=list)
+    dept_paths_by_action: Dict[str, List[str]] = Field(default_factory=dict)
     dept_ids: List[str] = Field(default_factory=list)
     roles: List[str] = Field(default_factory=list)
-    idp_roles: List[str] = Field(default_factory=list)
     perms: List[str] = Field(default_factory=list)
     scope_by_action: Dict[str, str] = Field(default_factory=dict)
     position_code: str = "STAFF"
@@ -30,7 +30,7 @@ class EffectiveAuthzContext(BaseModel):
     authz_ver: int = 1
     policy_epoch: int = 1
     is_to_c: bool = False
-    cv: int = 2
+    cv: int = 1
     token_iat_ms: int = 0
     token_exp: int = 0
     delegated_agent_id: Optional[str] = None
@@ -48,11 +48,11 @@ class EffectiveAuthzContext(BaseModel):
             "user_id": self.user_id,
             "tenant_id": self.tenant_id,
             "username": self.username,
-            "idp_roles": list(self.idp_roles),
             "roles": list(self.roles),
+            "dept_paths_by_action": {str(k): list(v) for k, v in (self.dept_paths_by_action or {}).items()},
             "authz_ver": self.authz_ver,
             "policy_epoch": self.policy_epoch,
-            "cv": 2,
+            "cv": 1,
             "token_iat_ms": self.token_iat_ms,
             "token_exp": self.token_exp,
             "delegated_agent_id": self.delegated_agent_id,

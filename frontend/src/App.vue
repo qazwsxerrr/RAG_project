@@ -216,7 +216,7 @@
               {{ formatPositionLabel(authStore.currentUser.position_code) }}
             </span>
             <span class="truncate text-slate-400" :title="formatRolesTooltip(authStore.currentUser.roles)">
-              {{ formatRolesShort(authStore.currentUser.roles) }}
+              {{ formatRolesShort(authStore.currentUser.roles, authStore.currentUser.position_code) }}
             </span>
           </div>
           <div class="flex items-center justify-between gap-2">
@@ -315,18 +315,24 @@ const setRenameInputRef = (el: unknown) => {
 };
 
 const POSITION_LABEL_MAP: Record<string, string> = {
-  EXECUTIVE: '高管',
+  INTERN_EXT: '实习 / 外部协作',
+  STAFF: '普通员工',
+  SUPERVISOR: '部门主管',
   MANAGER: '部门经理',
-  STAFF: '正式员工',
+  DIRECTOR: '总监',
+  EXECUTIVE: '公司高管',
 };
 
 const ROLE_LABEL_MAP: Record<string, string> = {
   admin: '系统管理员',
-  dept_manager: '部门管理员',
+  security_admin: '安全合规管理员',
+  dept_manager: '部门经理',
+  dept_reviewer: '部门审核员',
   developer: '研发人员',
   accountant: '财务人员',
-  executive: '高管',
-  employee: '员工',
+  executive: '公司高管',
+  employee: '普通员工',
+  c_user: '普通员工',
 };
 
 const formatPositionLabel = (code?: string): string => {
@@ -334,9 +340,13 @@ const formatPositionLabel = (code?: string): string => {
   return POSITION_LABEL_MAP[key] || key;
 };
 
-const formatRolesShort = (roles?: string[]): string => {
+const formatRolesShort = (roles?: string[], positionCode?: string): string => {
   if (!roles || roles.length === 0) return '员工';
-  return roles.slice(0, 2).map((r) => ROLE_LABEL_MAP[r] || r).join(' · ');
+  const posLabel = formatPositionLabel(positionCode);
+  const mapped = [...new Set(roles.map((r) => ROLE_LABEL_MAP[r] || r))];
+  const filtered = mapped.filter((label) => label !== posLabel);
+  const display = filtered.length > 0 ? filtered : mapped;
+  return display.slice(0, 2).join(' · ');
 };
 
 const formatRolesTooltip = (roles?: string[]): string => {

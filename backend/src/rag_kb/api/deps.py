@@ -197,7 +197,7 @@ async def assert_token_not_revoked_or_stale(
 
 
 async def issue_stream_ticket(user: EffectiveAuthzContext, doc_id: str, purpose: str) -> tuple[str, int]:
-    """签发绑定 user_id + doc_id + purpose + cv=2 的短期受限只读票据"""
+    """签发绑定 user_id + doc_id + purpose + cv=1 的短期受限只读票据"""
     if purpose not in ("preview", "events"):
         raise ValueError(f"不支持的短票用途: {purpose}")
     await assert_token_not_revoked_or_stale(user.user_id, token_iat_ms=user.token_iat_ms)
@@ -205,7 +205,7 @@ async def issue_stream_ticket(user: EffectiveAuthzContext, doc_id: str, purpose:
     ttl = max(15, min(300, int(settings.STREAM_TICKET_TTL_SECONDS)))
     redis_cli = get_redis_client()
     record = {
-        "cv": 2,
+        "cv": 1,
         "purpose": purpose,
         "doc_id": str(doc_id),
         "issued_at": int(time.time()),
@@ -226,8 +226,8 @@ async def verify_stream_ticket(
     db: Optional[AsyncSession] = None,
 ) -> EffectiveAuthzContext:
     """
-    校验单资源受限短票 (cv=2)：
-    1. 拒绝旧版 cv!=2 短票；
+    校验单资源受限短票 (cv=1)：
+    1. 严格拒绝非 cv=1 短票与遗留快照；
     2. 严格比对 doc_id、purpose 与最大有效时长上限；
     3. 实时核对 PostgreSQL 双版本/账号状态/自然到期并重算 EffectiveAuthzContext，再核对 Redis 吊销状态；
     4. 路由层在拿到上下文后继续执行 assert_doc_access 对象级复核（单文档改密或 ACL 撤销即时拦截！）。
@@ -247,11 +247,12 @@ async def verify_stream_ticket(
             detail="【鉴权失败】流式访问短票不存在或已过期，请重新打开",
         )
     data = json.loads(raw)
-    if int(data.get("cv") or 0) != 2:
+    raw_ticket_cv = data.get("cv")
+    if isinstance(raw_ticket_cv, bool) or raw_ticket_cv != 1:
         await redis_cli.delete(redis_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="【鉴权失败】旧版流式短票已作废，请刷新重新获取",
+            detail=f"【鉴权失败】流式短票契约版本不受支持 cv={raw_ticket_cv}（仅接受 cv=1），请刷新重新获取",
         )
     if data.get("doc_id") != str(expected_doc_id) or data.get("purpose") != expected_purpose:
         raise HTTPException(
@@ -274,12 +275,26 @@ async def verify_stream_ticket(
             detail="【鉴权失败】单次预览会话已达最大有效时长，请重新打开文档",
         )
 
-    user_snap = data.get("user") or {}
-    if int(user_snap.get("cv") or 0) != 2:
+    user_snap = data.get("user")
+    if not isinstance(user_snap, dict):
         await redis_cli.delete(redis_key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="【鉴权失败】短票用户契约版本非法，请重新获取",
+            detail="【鉴权失败】流式短票缺少有效用户快照，请重新获取",
+        )
+    snap_cv = user_snap.get("cv")
+    if isinstance(snap_cv, bool) or snap_cv != 1:
+        await redis_cli.delete(redis_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"【鉴权失败】短票用户契约版本非法 cv={snap_cv}（仅接受 cv=1），请重新获取",
+        )
+    snap_roles = user_snap.get("roles")
+    if not isinstance(snap_roles, list):
+        await redis_cli.delete(redis_key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="【鉴权失败】短票用户快照缺少合法 roles 数组，请重新获取",
         )
 
     async def _load(session: AsyncSession) -> EffectiveAuthzContext:
@@ -288,7 +303,7 @@ async def verify_stream_ticket(
             user_id=str(user_snap["user_id"]),
             tenant_id=str(user_snap["tenant_id"]),
             username=str(user_snap.get("username") or ""),
-            idp_roles=list(user_snap.get("idp_roles") or user_snap.get("roles") or []),
+            roles=[str(r) for r in snap_roles],
             token_authz_ver=int(user_snap["authz_ver"]),
             token_policy_epoch=int(user_snap["policy_epoch"]),
             token_iat_ms=int(user_snap["token_iat_ms"]),
@@ -420,7 +435,7 @@ async def authenticate_bearer_header(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # cv=2 必填声明校验（拒绝 cv=1 旧版令牌）
+    # cv=1 企业 ABAC 必填声明校验（严格拒绝旧版 cv!=1 令牌）
     required_claims = [
         "sub",
         "username",
@@ -429,6 +444,7 @@ async def authenticate_bearer_header(
         "perms",
         "dept_path",
         "dept_paths",
+        "dept_paths_by_action",
         "scope_by_action",
         "position_code",
         "clearance_level",
@@ -458,10 +474,10 @@ async def authenticate_bearer_header(
         )
 
     cv = payload["cv"]
-    if cv != 2:
+    if isinstance(cv, bool) or cv != 1:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"【鉴权失败】不受支持的契约版本 cv={cv}（仅接受 cv=2）",
+            detail=f"【鉴权失败】不受支持的契约版本 cv={cv}（仅接受 cv=1）",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -481,6 +497,16 @@ async def authenticate_bearer_header(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="【鉴权失败】JWT dept_paths 字段类型必须为数组",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    dept_paths_by_action_claim = payload["dept_paths_by_action"]
+    if not isinstance(dept_paths_by_action_claim, dict) or any(
+        not isinstance(v, list) or any(not isinstance(item, str) for item in v)
+        for v in dept_paths_by_action_claim.values()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="【鉴权失败】JWT dept_paths_by_action 字段必须为动作到字符串数组的映射",
             headers={"WWW-Authenticate": "Bearer"},
         )
     scope_by_action_claim = payload["scope_by_action"]
@@ -533,8 +559,7 @@ async def authenticate_bearer_header(
     elif payload.get("client_id"):
         delegated_agent_id = str(payload["client_id"]).strip() or None
 
-    raw_idp_roles = payload.get("idp_roles")
-    idp_roles = list(raw_idp_roles) if isinstance(raw_idp_roles, list) else list(payload["roles"])
+    token_roles = [str(r) for r in payload["roles"]]
 
     # 1. PostgreSQL 单一事实源双版本校验与自然到期重算（优先于 Redis，即使 Redis 未同步也能拦截旧授权）
     if db is not None:
@@ -543,7 +568,7 @@ async def authenticate_bearer_header(
             user_id=user_id_str,
             tenant_id=tenant_id_str,
             username=str(payload["username"]),
-            idp_roles=idp_roles,
+            roles=token_roles,
             token_authz_ver=token_authz_ver,
             token_policy_epoch=token_policy_epoch,
             token_iat_ms=token_iat_ms,
@@ -557,7 +582,7 @@ async def authenticate_bearer_header(
                 user_id=user_id_str,
                 tenant_id=tenant_id_str,
                 username=str(payload["username"]),
-                idp_roles=idp_roles,
+                roles=token_roles,
                 token_authz_ver=token_authz_ver,
                 token_policy_epoch=token_policy_epoch,
                 token_iat_ms=token_iat_ms,

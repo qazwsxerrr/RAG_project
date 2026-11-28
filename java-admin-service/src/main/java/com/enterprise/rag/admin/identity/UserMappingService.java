@@ -1,8 +1,12 @@
 package com.enterprise.rag.admin.identity;
 
+import com.enterprise.rag.admin.identity.PermissionResolver.ResolvedPermissions;
 import com.enterprise.rag.admin.mapper.IdentityMapper;
+import com.enterprise.rag.admin.mapper.IdentityMapper.PositionRecord;
+import com.enterprise.rag.admin.mapper.IdentityMapper.RoleRecord;
 import com.enterprise.rag.admin.mapper.IdentityMapper.UserDepartmentRecord;
 import com.enterprise.rag.admin.mapper.IdentityMapper.UserRecord;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.oauth2.core.oidc.OidcUserInfo;
 import org.springframework.security.oauth2.core.oidc.user.OidcUser;
@@ -21,16 +25,29 @@ public class UserMappingService {
 
     private final IdentityMapper identityMapper;
     private final RedisRevocationSync redisRevocationSync;
+    private final PermissionResolver permissionResolver;
 
-    public UserMappingService(IdentityMapper identityMapper, RedisRevocationSync redisRevocationSync) {
+    @Autowired
+    public UserMappingService(
+            IdentityMapper identityMapper,
+            RedisRevocationSync redisRevocationSync,
+            PermissionResolver permissionResolver
+    ) {
         this.identityMapper = Objects.requireNonNull(identityMapper, "identityMapper 不能为空");
         this.redisRevocationSync = Objects.requireNonNull(redisRevocationSync, "redisRevocationSync 不能为空");
+        this.permissionResolver = Objects.requireNonNull(permissionResolver, "permissionResolver 不能为空");
+    }
+
+    public UserMappingService(IdentityMapper identityMapper, RedisRevocationSync redisRevocationSync) {
+        this(identityMapper, redisRevocationSync, new PermissionResolver(identityMapper));
     }
 
     public record MappedIdentity(
             UserRecord user,
-            List<String> idpRoleCodes,
             List<String> roleCodes,
+            Set<String> permissions,
+            Map<String, String> scopeByAction,
+            Map<String, List<String>> deptPathsByAction,
             String primaryDeptPath,
             List<String> effectiveDeptPaths,
             int effectiveClearance,
@@ -57,28 +74,104 @@ public class UserMappingService {
                 "employee_" + externalId.substring(0, Math.min(8, externalId.length()))
         );
 
-        List<String> idpDeptPaths = extractDeptPaths(oidcUser);
-        boolean hasRootDeptMarker = idpDeptPaths.contains("/");
-        List<String> concreteIdpDepts = idpDeptPaths.stream()
-                .filter(p -> p != null && !p.isBlank() && !"/".equals(p))
-                .toList();
-        List<String> idpRoleCodes = extractRoleCodes(oidcUser);
-        String optionalPositionCode = extractPositionCode(oidcUser);
+        String positionCode = extractPositionCode(oidcUser);
+        if (positionCode == null || positionCode.isBlank()) {
+            revokeExistingUserIfPresent(tenantId, externalId);
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【拒绝建档】企业 IdP 未下发有效职级 position_code");
+        }
+        identityMapper.ensureDefaultPositionsIfMissing(tenantId);
+        Optional<PositionRecord> posOpt = identityMapper.findPosition(tenantId, positionCode);
+        if (posOpt.isEmpty()) {
+            revokeExistingUserIfPresent(tenantId, externalId);
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "【拒绝建档】企业 IdP 下发的职级 [" + positionCode + "] 未在 sys_positions 注册"
+            );
+        }
+
+        List<String> roleCodes = extractRoleCodes(oidcUser);
+        if (roleCodes.isEmpty()) {
+            revokeExistingUserIfPresent(tenantId, externalId);
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【拒绝签发】企业 IdP 未分配任何有效角色");
+        }
+        List<RoleRecord> roleRecords = identityMapper.listRoles(tenantId, roleCodes);
+        if (roleRecords.size() != new LinkedHashSet<>(roleCodes).size()) {
+            Set<String> found = new LinkedHashSet<>();
+            for (RoleRecord rr : roleRecords) {
+                found.add(rr.roleCode());
+            }
+            Set<String> missing = new LinkedHashSet<>(roleCodes);
+            missing.removeAll(found);
+            revokeExistingUserIfPresent(tenantId, externalId);
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【拒绝签发】未知角色码未在租户策略字典对齐: " + missing);
+        }
+
+        List<String> belongingPaths = extractBelongingDeptPaths(oidcUser);
+        boolean hasRootDeptMarker = belongingPaths.contains("/");
+        List<String> concreteIdpDepts = new ArrayList<>(
+                belongingPaths.stream().filter(p -> p != null && !p.isBlank() && !"/".equals(p)).toList()
+        );
+
+        String explicitPrimary;
+        try {
+            explicitPrimary = extractExplicitPrimaryDeptPath(oidcUser);
+        } catch (ResponseStatusException ex) {
+            revokeExistingUserIfPresent(tenantId, externalId);
+            throw ex;
+        }
+        if ("/".equals(explicitPrimary)) {
+            if (!concreteIdpDepts.isEmpty()) {
+                revokeExistingUserIfPresent(tenantId, externalId);
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【拒绝建档】IdP 主部门属性 dept_path 不能为根路径 /");
+            }
+            hasRootDeptMarker = true;
+            explicitPrimary = "";
+        }
+
+        if (!concreteIdpDepts.isEmpty() && !explicitPrimary.isBlank() && !concreteIdpDepts.contains(explicitPrimary)) {
+            revokeExistingUserIfPresent(tenantId, externalId);
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "【拒绝建档】IdP 主部门 dept_path [" + explicitPrimary + "] 不在员工所属部门集合 " + concreteIdpDepts + " 中"
+            );
+        }
+        if (concreteIdpDepts.isEmpty() && !hasRootDeptMarker && !explicitPrimary.isBlank()) {
+            concreteIdpDepts.add(explicitPrimary);
+        }
 
         if (concreteIdpDepts.isEmpty() && !hasRootDeptMarker) {
             revokeExistingUserIfPresent(tenantId, externalId);
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【拒绝建档】企业 IdP 未下发有效部门路径 (dept_paths/dept_path/groups)");
         }
-        if (idpRoleCodes.isEmpty()) {
+
+        boolean requiresPrimaryDept = roleRecords.stream().anyMatch(RoleRecord::primaryDeptOnly);
+        if (concreteIdpDepts.size() >= 2 && requiresPrimaryDept && explicitPrimary.isBlank()) {
             revokeExistingUserIfPresent(tenantId, externalId);
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【拒绝签发】企业 IdP 未分配任何有效角色");
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "【拒绝建档】多部门员工持有要求明确主部门的角色 (primary_dept_only)，IdP 必须显式下发单值 dept_path"
+            );
         }
 
-        String initialDisplayDept = !concreteIdpDepts.isEmpty() ? concreteIdpDepts.getFirst() : "";
+        String desiredPrimaryDeptPath;
+        if (concreteIdpDepts.size() == 1) {
+            desiredPrimaryDeptPath = concreteIdpDepts.getFirst();
+        } else if (!explicitPrimary.isBlank()) {
+            desiredPrimaryDeptPath = explicitPrimary;
+        } else {
+            desiredPrimaryDeptPath = "";
+        }
+
+        // 前置校验 ABAC 三维策略，未通过则拒绝建档/登录并吊销存量用户
+        try {
+            permissionResolver.resolve(tenantId, roleCodes, positionCode, desiredPrimaryDeptPath, concreteIdpDepts);
+        } catch (ResponseStatusException ex) {
+            revokeExistingUserIfPresent(tenantId, externalId);
+            throw ex;
+        }
+
         Optional<UserRecord> existingBefore = identityMapper.findUser(tenantId, "oidc:corp-sso", externalId);
-        UserRecord user = identityMapper.upsertUser(
-                tenantId, "oidc:corp-sso", externalId, realName, initialDisplayDept, optionalPositionCode, false
-        );
+        UserRecord user = identityMapper.upsertUser(tenantId, "oidc:corp-sso", externalId, realName, positionCode);
         boolean positionMutated = existingBefore.isPresent()
                 && !Objects.equals(existingBefore.get().positionCode(), user.positionCode());
 
@@ -87,8 +180,9 @@ public class UserMappingService {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "【拒绝签发】该员工账号已被停用，禁止签发业务令牌");
         }
 
-        // 每次换票均比对最新 IdP 部门与数据库 source='IDP' 记录，防止离线调岗后仍保留原部门权限
-        boolean idpDeptsMutated = identityMapper.syncIdpUserDepartments(tenantId, user.id(), concreteIdpDepts);
+        boolean idpDeptsMutated = identityMapper.syncIdpUserDepartments(
+                tenantId, user.id(), concreteIdpDepts, desiredPrimaryDeptPath
+        );
 
         List<UserDepartmentRecord> effectiveDepts = identityMapper.listActiveUserDepartments(tenantId, user.id());
         LinkedHashMap<UUID, String> dedupDepts = new LinkedHashMap<>();
@@ -101,9 +195,12 @@ public class UserMappingService {
         }
         List<String> effectiveDeptPaths = List.copyOf(dedupDepts.values());
 
-        if (!Objects.equals(user.deptPath(), primaryDeptPath)) {
-            identityMapper.updateUserDisplayDeptPath(tenantId, user.id(), primaryDeptPath);
-            user = identityMapper.findUserById(tenantId, user.id()).orElse(user);
+        ResolvedPermissions resolved;
+        try {
+            resolved = permissionResolver.resolve(tenantId, roleCodes, user.positionCode(), primaryDeptPath, effectiveDeptPaths);
+        } catch (ResponseStatusException ex) {
+            redisRevocationSync.markUserRevoked(user.id().toString());
+            throw ex;
         }
 
         if (idpDeptsMutated) {
@@ -115,10 +212,19 @@ public class UserMappingService {
         long policyEpoch = identityMapper.getTenantPolicyEpoch(tenantId);
         redisRevocationSync.clearUserRevoked(user.id().toString());
 
-        List<String> rolesCopy = List.copyOf(idpRoleCodes);
+        List<String> rolesCopy = List.copyOf(roleCodes);
         return new MappedIdentity(
-                user, rolesCopy, rolesCopy, primaryDeptPath, effectiveDeptPaths,
-                effectiveClearance, policyEpoch, idpDeptsMutated, positionMutated
+                user,
+                rolesCopy,
+                resolved.permissions(),
+                resolved.scopeByAction(),
+                resolved.deptPathsByAction(),
+                primaryDeptPath,
+                effectiveDeptPaths,
+                effectiveClearance,
+                policyEpoch,
+                idpDeptsMutated,
+                positionMutated
         );
     }
 
@@ -137,13 +243,30 @@ public class UserMappingService {
 
     public static List<String> extractDeptPaths(OidcUser oidcUser) {
         if (oidcUser == null) return Collections.emptyList();
+        Set<String> paths = new LinkedHashSet<>(extractBelongingDeptPaths(oidcUser));
+        Object rawSingle = readFreshClaim(oidcUser, "dept_path");
+        if (rawSingle instanceof Collection<?> col) {
+            for (Object item : col) {
+                if (item != null) {
+                    String norm = IdentityMapper.normalizeDeptPath(String.valueOf(item));
+                    if (norm != null) paths.add(norm);
+                }
+            }
+        } else if (rawSingle != null) {
+            String normSingle = IdentityMapper.normalizeDeptPath(String.valueOf(rawSingle));
+            if (normSingle != null) paths.add(normSingle);
+        }
+        return List.copyOf(paths);
+    }
+
+    /** 仅从 dept_paths 与 /corp/* 组提取员工实际归属部门集合（严禁与主部门 dept_path 混并前跳过归属校验） */
+    public static List<String> extractBelongingDeptPaths(OidcUser oidcUser) {
+        if (oidcUser == null) return Collections.emptyList();
         Set<String> paths = new LinkedHashSet<>();
         for (String item : readStringListClaim(oidcUser, "dept_paths")) {
             String norm = IdentityMapper.normalizeDeptPath(item);
             if (norm != null) paths.add(norm);
         }
-        String normSingle = IdentityMapper.normalizeDeptPath(readStringClaim(oidcUser, "dept_path"));
-        if (normSingle != null) paths.add(normSingle);
         for (String g : readStringListClaim(oidcUser, "groups")) {
             if (g != null && g.startsWith("/corp/")) {
                 String mapped = IdentityMapper.normalizeDeptPath(g.substring("/corp".length()));
@@ -151,6 +274,50 @@ public class UserMappingService {
             }
         }
         return List.copyOf(paths);
+    }
+
+    /** 严格提取单值主部门属性 dept_path，若为多值冲突或非法格式直接抛 403 */
+    public static String extractExplicitPrimaryDeptPath(OidcUser oidcUser) {
+        if (oidcUser == null) return "";
+        Object raw = readFreshClaim(oidcUser, "dept_path");
+        if (raw == null) {
+            return "";
+        }
+        if (raw instanceof Collection<?> col) {
+            Set<String> distinct = new LinkedHashSet<>();
+            for (Object item : col) {
+                if (item == null) continue;
+                String trimmed = String.valueOf(item).trim();
+                if (trimmed.isEmpty()) continue;
+                String norm = IdentityMapper.normalizeDeptPath(trimmed);
+                if (norm == null) {
+                    throw new ResponseStatusException(
+                            HttpStatus.FORBIDDEN,
+                            "【拒绝建档】IdP 主部门属性 dept_path 格式非法: " + trimmed
+                    );
+                }
+                distinct.add(norm);
+            }
+            if (distinct.size() > 1) {
+                throw new ResponseStatusException(
+                        HttpStatus.FORBIDDEN,
+                        "【拒绝建档】IdP 主部门属性 dept_path 存在多值冲突: " + distinct
+                );
+            }
+            return distinct.isEmpty() ? "" : distinct.iterator().next();
+        }
+        String trimmed = String.valueOf(raw).trim();
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+        String norm = IdentityMapper.normalizeDeptPath(trimmed);
+        if (norm == null) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "【拒绝建档】IdP 主部门属性 dept_path 格式非法: " + trimmed
+            );
+        }
+        return norm;
     }
 
     public static String extractPositionCode(OidcUser oidcUser) {

@@ -43,6 +43,8 @@ export interface AdminPosition {
   positionName: string;
   rankOrder: number;
   defaultClearanceLevel: number;
+  minAllowedClearance: number;
+  maxAllowedClearance: number;
   description?: string | null;
   updatedAt?: string;
 }
@@ -53,6 +55,9 @@ export interface AdminRole {
   roleName: string;
   dataScope: DataScope;
   permissionsJson: string;
+  allowedPositions: string[];
+  allowedDeptPrefixes: string[];
+  primaryDeptOnly: boolean;
 }
 
 /** 从企业 IdP/HR 同步到本地影子表的只读员工摘要 */

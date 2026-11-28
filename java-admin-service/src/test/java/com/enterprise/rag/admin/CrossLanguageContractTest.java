@@ -71,6 +71,11 @@ class CrossLanguageContractTest {
                 "DELETE", "DEPT_AND_SUB"
         );
         List<String> deptPaths = List.of("/总公司/研发中心/技术部", "/总公司/职能中心/人事行政部");
+        Map<String, List<String>> deptPathsByAction = Map.of(
+                "READ", List.of(),
+                "UPLOAD", List.of("/总公司/研发中心/技术部"),
+                "DELETE", List.of("/总公司/研发中心/技术部")
+        );
 
         JwtClaimsSet claims = JwtClaimsSet.builder()
                 .issuer("rag-admin")
@@ -79,17 +84,17 @@ class CrossLanguageContractTest {
                 .claim("username", "多维契约测试员工")
                 .claim("tenant_id", "default_tenant")
                 .claim("roles", List.of("developer", "executive"))
-                .claim("idp_roles", List.of("developer"))
                 .claim("perms", List.of("kb:retrieve", "doc:upload", "doc:delete"))
                 .claim("dept_path", "/总公司/研发中心/技术部")
                 .claim("dept_paths", deptPaths)
+                .claim("dept_paths_by_action", deptPathsByAction)
                 .claim("scope_by_action", scopeByAction)
                 .claim("position_code", "MANAGER")
                 .claim("clearance_level", 3)
                 .claim("authz_ver", 7L)
                 .claim("policy_epoch", 12L)
                 .claim("is_to_c", false)
-                .claim("cv", 2)
+                .claim("cv", 1)
                 .claim("typ", "access")
                 .claim("iat_ms", now.toEpochMilli())
                 .issuedAt(now)
@@ -107,14 +112,15 @@ class CrossLanguageContractTest {
         }
         assertEquals(List.of("rag-engine"), decoded.getAudience());
         assertEquals(List.of("developer", "executive"), decoded.getClaimAsStringList("roles"));
-        assertEquals(List.of("developer"), decoded.getClaimAsStringList("idp_roles"));
+        assertNull(decoded.getClaim("idp_roles"), "去 V1 后 JWT 不得继续下发冗余 idp_roles 声明");
         assertEquals(deptPaths, decoded.getClaimAsStringList("dept_paths"));
+        assertEquals(deptPathsByAction, decoded.getClaim("dept_paths_by_action"));
         assertEquals(scopeByAction, decoded.getClaim("scope_by_action"));
         assertEquals(3, ((Number) decoded.getClaim("clearance_level")).intValue());
         assertEquals(7L, ((Number) decoded.getClaim("authz_ver")).longValue());
         assertEquals(12L, ((Number) decoded.getClaim("policy_epoch")).longValue());
         assertEquals(false, decoded.getClaimAsBoolean("is_to_c"));
-        assertEquals(2, ((Number) decoded.getClaim("cv")).intValue());
+        assertEquals(1, ((Number) decoded.getClaim("cv")).intValue());
         assertEquals(now.toEpochMilli(), ((Number) decoded.getClaim("iat_ms")).longValue());
         assertEquals(now, decoded.getIssuedAt());
         assertEquals(now.plusSeconds(600), decoded.getExpiresAt());
@@ -135,6 +141,12 @@ class CrossLanguageContractTest {
                 "张工", "default_tenant", "/总公司/研发中心/技术部",
                 List.of("developer"), List.of("kb:retrieve", "doc:upload", "doc:delete", "doc:review"),
                 Map.of("READ", "DEPT_AND_SUB", "UPLOAD", "DEPT_AND_SUB", "DELETE", "DEPT_AND_SUB", "REVIEW", "DEPT_AND_SUB"),
+                Map.of(
+                        "READ", List.of("/总公司/研发中心/技术部"),
+                        "UPLOAD", List.of("/总公司/研发中心/技术部"),
+                        "DELETE", List.of("/总公司/研发中心/技术部"),
+                        "REVIEW", List.of("/总公司/研发中心/技术部")
+                ),
                 "STAFF", 2, false
         ));
         fixture.put("accountant_token", encodeFixtureToken(
@@ -143,14 +155,16 @@ class CrossLanguageContractTest {
                 "王会计", "default_tenant", "/总公司/职能中心/财务部",
                 List.of("employee"), List.of("kb:retrieve"),
                 Map.of("READ", "DEPT_AND_SUB"),
+                Map.of("READ", List.of("/总公司/职能中心/财务部")),
                 "STAFF", 2, false
         ));
         fixture.put("admin_token", encodeFixtureToken(
                 encoder, header, now, 600,
                 UUID.nameUUIDFromBytes("java-fixture-adm".getBytes(StandardCharsets.UTF_8)).toString(),
                 "系统管理员", "default_tenant", "/总公司/研发中心/技术部",
-                List.of("admin"), List.of("kb:retrieve", "kb:manage", "kb:grant", "user:authz:manage", "system:admin"),
-                Map.of("READ", "ALL_ORG", "MANAGE", "ALL_ORG"),
+                List.of("admin"), List.of("*"),
+                Map.of("READ", "ALL_ORG", "UPLOAD", "ALL_ORG", "REVIEW", "ALL_ORG", "DELETE", "ALL_ORG", "MANAGE", "ALL_ORG"),
+                Map.of("READ", List.of(), "UPLOAD", List.of(), "REVIEW", List.of(), "DELETE", List.of(), "MANAGE", List.of()),
                 "EXECUTIVE", 4, false
         ));
         fixture.put("to_c_token", encodeFixtureToken(
@@ -159,6 +173,7 @@ class CrossLanguageContractTest {
                 "外部ToC用户", "default_tenant", "/public",
                 List.of("employee"), List.of("kb:retrieve"),
                 Map.of("READ", "CUSTOM_ACL"),
+                Map.of("READ", List.of()),
                 "INTERN_EXT", 1, true
         ));
         fixture.put("expired_token", encodeFixtureToken(
@@ -167,6 +182,7 @@ class CrossLanguageContractTest {
                 "过期测试员工", "default_tenant", "/public",
                 List.of("employee"), List.of("kb:retrieve"),
                 Map.of("READ", "DEPT_AND_SUB"),
+                Map.of("READ", List.of("/public")),
                 "STAFF", 2, false
         ));
 
@@ -189,6 +205,7 @@ class CrossLanguageContractTest {
             List<String> roles,
             List<String> perms,
             Map<String, String> scopeByAction,
+            Map<String, List<String>> deptPathsByAction,
             String positionCode,
             int clearanceLevel,
             boolean isToC
@@ -200,17 +217,17 @@ class CrossLanguageContractTest {
                 .claim("username", username)
                 .claim("tenant_id", tenantId)
                 .claim("roles", roles)
-                .claim("idp_roles", roles)
                 .claim("perms", perms)
                 .claim("dept_path", deptPath)
                 .claim("dept_paths", List.of(deptPath))
+                .claim("dept_paths_by_action", deptPathsByAction)
                 .claim("scope_by_action", scopeByAction)
                 .claim("position_code", positionCode)
                 .claim("clearance_level", clearanceLevel)
                 .claim("authz_ver", 1L)
                 .claim("policy_epoch", 1L)
                 .claim("is_to_c", isToC)
-                .claim("cv", 2)
+                .claim("cv", 1)
                 .claim("typ", "access")
                 .claim("iat_ms", issuedAt.toEpochMilli())
                 .issuedAt(issuedAt)

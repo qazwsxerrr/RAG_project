@@ -78,6 +78,12 @@ class Position(Base):
     __tablename__ = "sys_positions"
     __table_args__ = (
         CheckConstraint("default_clearance_level BETWEEN 1 AND 4", name="chk_sys_positions_level"),
+        CheckConstraint(
+            "min_allowed_clearance BETWEEN 1 AND 4 AND max_allowed_clearance BETWEEN 1 AND 4 "
+            "AND min_allowed_clearance <= default_clearance_level "
+            "AND default_clearance_level <= max_allowed_clearance",
+            name="chk_sys_positions_clearance_bounds",
+        ),
     )
 
     tenant_id: Mapped[str] = mapped_column(String(64), primary_key=True, default="default_tenant")
@@ -85,6 +91,8 @@ class Position(Base):
     position_name: Mapped[str] = mapped_column(String(100), nullable=False)
     rank_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     default_clearance_level: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    min_allowed_clearance: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    max_allowed_clearance: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -108,6 +116,9 @@ class Role(Base):
     role_name: Mapped[str] = mapped_column(String(100), nullable=False)
     data_scope: Mapped[str] = mapped_column(String(20), nullable=False)
     permissions: Mapped[List[str]] = mapped_column(JSONB, nullable=False, default=list)
+    allowed_positions: Mapped[List[str]] = mapped_column(JSONB, nullable=False, default=lambda: ["*"])
+    allowed_dept_prefixes: Mapped[List[str]] = mapped_column(JSONB, nullable=False, default=lambda: ["*"])
+    primary_dept_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class SysUser(Base):
@@ -128,9 +139,8 @@ class SysUser(Base):
     external_id: Mapped[str] = mapped_column(String(128), nullable=False)
     id_source: Mapped[str] = mapped_column(String(32), nullable=False)
     real_name: Mapped[str] = mapped_column(String(50), nullable=False)
-    dept_path: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    position_code: Mapped[str] = mapped_column(String(50), nullable=False, default="STAFF")
+    position_code: Mapped[str] = mapped_column(String(50), nullable=False)
     authz_version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -140,11 +150,10 @@ class SysUser(Base):
 
 
 class UserDepartment(Base):
-    """员工多部门归属表 (sys_user_departments，双来源 IDP / MANUAL 共存)"""
+    """员工多部门归属表 (sys_user_departments，由外部企业 IdP 同步维护)"""
     __tablename__ = "sys_user_departments"
     __table_args__ = (
-        UniqueConstraint("tenant_id", "user_id", "department_id", "source", name="uq_user_dept_source"),
-        CheckConstraint("source IN ('IDP', 'MANUAL')", name="chk_user_dept_source"),
+        UniqueConstraint("tenant_id", "user_id", "department_id", name="uq_user_dept"),
         ForeignKeyConstraint(
             ["tenant_id", "user_id"],
             ["sys_users.tenant_id", "sys_users.id"],
@@ -166,9 +175,6 @@ class UserDepartment(Base):
     department_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     dept_path: Mapped[str] = mapped_column(String(255), nullable=False)
     is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    source: Mapped[str] = mapped_column(String(16), nullable=False)
-    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    granted_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

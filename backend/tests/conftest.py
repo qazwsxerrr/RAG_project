@@ -48,6 +48,7 @@ def make_rs256_test_token(
     username: str = "测试研发工程师",
     dept_path: str = "/总公司/研发中心/技术部",
     dept_paths: Optional[List[str]] = None,
+    dept_paths_by_action: Optional[Dict[str, List[str]]] = None,
     scope_by_action: Optional[Dict[str, str]] = None,
     data_scope: Optional[str] = None,
     position_code: str = "STAFF",
@@ -55,21 +56,18 @@ def make_rs256_test_token(
     authz_ver: int = 1,
     policy_epoch: int = 1,
     roles: Optional[list] = None,
-    idp_roles: Optional[list] = None,
     perms: Optional[list] = None,
     is_to_c: bool = False,
-    cv: int = 2,
+    cv: int = 1,
     exp_delta: int = 3600,
     issuer: str = "rag-admin",
     audience: str = "rag-engine",
     key_pem: Optional[str] = None,
     custom_claims: Optional[dict] = None,
 ) -> str:
-    """共享 RS256 测试令牌签发工具（默认签发 cv=2 多维权限契约，支持显式指定 cv=1 做负向测试）"""
+    """共享 RS256 测试令牌签发工具（默认签发 cv=1 企业 ABAC 契约，支持显式指定 cv=2 做回归拦截测试）"""
     if roles is None:
         roles = ["developer"]
-    if idp_roles is None:
-        idp_roles = list(roles)
     if perms is None:
         perms = ["kb:retrieve", "doc:upload", "doc:delete", "doc:review"]
     if dept_paths is None:
@@ -85,6 +83,12 @@ def make_rs256_test_token(
             "MANAGE": mapped_scope,
         }
 
+    if dept_paths_by_action is None:
+        dept_paths_by_action = {
+            act: (list(dept_paths) if str(sc).upper() == "DEPT_AND_SUB" else [])
+            for act, sc in scope_by_action.items()
+        }
+
     private_pem = key_pem or _get_test_rsa_keypair_pems()[0]
     global _LAST_ISSUED_TOKEN_MS
     now_ms = max(int(time.time() * 1000), _LAST_ISSUED_TOKEN_MS + 1)
@@ -96,13 +100,13 @@ def make_rs256_test_token(
         "username": username,
         "dept_path": dept_path,
         "dept_paths": dept_paths,
+        "dept_paths_by_action": dept_paths_by_action,
         "scope_by_action": scope_by_action,
         "position_code": position_code,
         "clearance_level": clearance_level,
         "authz_ver": authz_ver,
         "policy_epoch": policy_epoch,
         "roles": roles,
-        "idp_roles": idp_roles,
         "perms": perms,
         "is_to_c": is_to_c,
         "cv": cv,

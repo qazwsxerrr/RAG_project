@@ -70,7 +70,14 @@ final class AuthTestSupport {
         return map;
     }
 
-    static OidcUser buildOidcUser(String sub, String username, String deptPath, List<String> groups, List<String> roles) {
+    static OidcUser buildOidcUser(
+            String sub,
+            String username,
+            String deptPath,
+            List<String> groups,
+            List<String> roles,
+            String positionCode
+    ) {
         Map<String, Object> claims = new HashMap<>();
         claims.put("sub", sub);
         claims.put("preferred_username", username);
@@ -82,6 +89,9 @@ final class AuthTestSupport {
         }
         if (roles != null) {
             claims.put("roles", roles);
+        }
+        if (positionCode != null) {
+            claims.put("position_code", positionCode);
         }
         OidcIdToken idToken = new OidcIdToken("mapping-test-input", Instant.now(), Instant.now().plusSeconds(3600), claims);
         return new DefaultOidcUser(List.of(new SimpleGrantedAuthority("ROLE_USER")), idToken, "preferred_username");

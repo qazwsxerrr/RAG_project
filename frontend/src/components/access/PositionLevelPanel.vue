@@ -33,12 +33,13 @@
             <td class="py-2.5 px-4 whitespace-nowrap">
               <div class="flex items-center gap-2.5">
                 <select v-model.number="pos.defaultClearanceLevel" class="p-1.5 rounded border border-slate-200 bg-white min-w-[132px] whitespace-nowrap outline-none">
-                  <option :value="1">L1 全员公开</option>
-                  <option :value="2">L2 部门内部</option>
-                  <option :value="3">L3 管理层机密</option>
-                  <option :value="4">L4 核心绝密</option>
+                  <option :value="1" :disabled="1 < pos.minAllowedClearance || 1 > pos.maxAllowedClearance">L1 全员公开</option>
+                  <option :value="2" :disabled="2 < pos.minAllowedClearance || 2 > pos.maxAllowedClearance">L2 部门内部</option>
+                  <option :value="3" :disabled="3 < pos.minAllowedClearance || 3 > pos.maxAllowedClearance">L3 管理层机密</option>
+                  <option :value="4" :disabled="4 < pos.minAllowedClearance || 4 > pos.maxAllowedClearance">L4 核心绝密</option>
                 </select>
                 <ClassificationBadge :level="pos.defaultClearanceLevel" />
+                <span class="text-[11px] text-slate-400 font-mono">[L{{ pos.minAllowedClearance }}~L{{ pos.maxAllowedClearance }}]</span>
               </div>
             </td>
             <td class="py-2.5 px-4 text-right">
@@ -95,6 +96,8 @@ const savePosition = async (pos: AdminPosition) => {
       positionName: pos.positionName,
       rankOrder: pos.rankOrder,
       defaultClearanceLevel: pos.defaultClearanceLevel,
+      minAllowedClearance: pos.minAllowedClearance,
+      maxAllowedClearance: pos.maxAllowedClearance,
       description: pos.description || undefined,
       reason: `治理中心调整职级 ${pos.positionCode} 默认密级为 L${pos.defaultClearanceLevel}`,
     });

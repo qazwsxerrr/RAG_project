@@ -33,7 +33,6 @@ public class IdentityMapper {
             String externalId,
             String idSource,
             String realName,
-            String deptPath,
             boolean isActive,
             String positionCode,
             long authzVersion,
@@ -46,7 +45,10 @@ public class IdentityMapper {
             String roleCode,
             String roleName,
             String dataScope,
-            String permissionsJson
+            String permissionsJson,
+            String allowedPositionsJson,
+            String allowedDeptPrefixesJson,
+            boolean primaryDeptOnly
     ) {}
 
     public record DepartmentRecord(
@@ -66,6 +68,8 @@ public class IdentityMapper {
             String positionName,
             int rankOrder,
             int defaultClearanceLevel,
+            int minAllowedClearance,
+            int maxAllowedClearance,
             String description,
             Instant updatedAt
     ) {}
@@ -77,9 +81,6 @@ public class IdentityMapper {
             UUID departmentId,
             String deptPath,
             boolean isPrimary,
-            String source,
-            Instant expiresAt,
-            String grantedBy,
             Instant createdAt
     ) {}
 
@@ -89,7 +90,6 @@ public class IdentityMapper {
             rs.getString("external_id"),
             rs.getString("id_source"),
             rs.getString("real_name"),
-            rs.getString("dept_path"),
             rs.getBoolean("is_active"),
             rs.getString("position_code"),
             rs.getLong("authz_version"),
@@ -102,7 +102,10 @@ public class IdentityMapper {
             rs.getString("role_code"),
             rs.getString("role_name"),
             rs.getString("data_scope"),
-            rs.getString("permissions")
+            rs.getString("permissions"),
+            rs.getString("allowed_positions"),
+            rs.getString("allowed_dept_prefixes"),
+            rs.getBoolean("primary_dept_only")
     );
 
     private final RowMapper<DepartmentRecord> deptRowMapper = (rs, rowNum) -> new DepartmentRecord(
@@ -122,6 +125,8 @@ public class IdentityMapper {
             rs.getString("position_name"),
             rs.getInt("rank_order"),
             rs.getInt("default_clearance_level"),
+            rs.getInt("min_allowed_clearance"),
+            rs.getInt("max_allowed_clearance"),
             rs.getString("description"),
             toInstant(rs.getTimestamp("updated_at"))
     );
@@ -133,9 +138,6 @@ public class IdentityMapper {
             (UUID) rs.getObject("department_id"),
             rs.getString("dept_path"),
             rs.getBoolean("is_primary"),
-            rs.getString("source"),
-            toInstant(rs.getTimestamp("expires_at")),
-            rs.getString("granted_by"),
             toInstant(rs.getTimestamp("created_at"))
     );
 
@@ -144,7 +146,7 @@ public class IdentityMapper {
     }
 
     public Optional<UserRecord> findUser(String tenantId, String idSource, String externalId) {
-        String sql = "SELECT id, tenant_id, external_id, id_source, real_name, dept_path, is_active, " +
+        String sql = "SELECT id, tenant_id, external_id, id_source, real_name, is_active, " +
                      "position_code, authz_version, last_login_at, created_at " +
                      "FROM sys_users WHERE tenant_id = ? AND id_source = ? AND external_id = ?";
         List<UserRecord> list = jdbcTemplate.query(sql, userRowMapper, tenantId, idSource, externalId);
@@ -152,7 +154,7 @@ public class IdentityMapper {
     }
 
     public Optional<UserRecord> findUserById(String tenantId, UUID userId) {
-        String sql = "SELECT id, tenant_id, external_id, id_source, real_name, dept_path, is_active, " +
+        String sql = "SELECT id, tenant_id, external_id, id_source, real_name, is_active, " +
                      "position_code, authz_version, last_login_at, created_at " +
                      "FROM sys_users WHERE tenant_id = ? AND id = ?";
         List<UserRecord> list = jdbcTemplate.query(sql, userRowMapper, tenantId, userId);
@@ -163,7 +165,7 @@ public class IdentityMapper {
         if (realName == null || realName.isBlank()) {
             return Optional.empty();
         }
-        String sql = "SELECT id, tenant_id, external_id, id_source, real_name, dept_path, is_active, " +
+        String sql = "SELECT id, tenant_id, external_id, id_source, real_name, is_active, " +
                      "position_code, authz_version, last_login_at, created_at " +
                      "FROM sys_users WHERE tenant_id = ? AND id_source = ? AND LOWER(real_name) = LOWER(?) " +
                      "ORDER BY last_login_at DESC NULLS LAST, created_at DESC LIMIT 1";
@@ -172,51 +174,47 @@ public class IdentityMapper {
     }
 
     /**
-     * 企业 IdP 登录时自动建档并对齐姓名、展示部门与职级（企业人事/IdP 为身份单一事实源）。
+     * 企业 IdP 登录时自动建档并对齐姓名与职级（严禁缺失 position_code 或历史职级/STAFF 兜底）。
      */
     public UserRecord upsertUser(
             String tenantId,
             String idSource,
             String externalId,
             String realName,
-            String displayDeptPath,
-            String optionalPositionCode,
-            boolean syncDisplayDeptPath
+            String positionCode
     ) {
         String safeTenant = (tenantId == null || tenantId.isBlank()) ? DEFAULT_TENANT_ID : tenantId.trim();
-        String safeDisplayDept = displayDeptPath == null ? "" : displayDeptPath.trim();
         ensureDefaultPositionsIfMissing(safeTenant);
 
-        String validIdpPosition = null;
-        if (optionalPositionCode != null && !optionalPositionCode.isBlank()) {
-            String candidate = optionalPositionCode.trim().toUpperCase(Locale.ROOT);
-            if (findPosition(safeTenant, candidate).isEmpty()) {
-                throw new ResponseStatusException(
-                        HttpStatus.FORBIDDEN,
-                        "【拒绝签发】企业 IdP 下发的职级 [" + candidate + "] 未在 sys_positions 中配置映射，请先在权限治理中心配置"
-                );
-            }
-            validIdpPosition = candidate;
+        if (positionCode == null || positionCode.isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "【拒绝签发】企业 IdP 未下发有效职级 position_code"
+            );
+        }
+        String validIdpPosition = positionCode.trim().toUpperCase(Locale.ROOT);
+        if (findPosition(safeTenant, validIdpPosition).isEmpty()) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "【拒绝签发】企业 IdP 下发的职级 [" + validIdpPosition + "] 未在 sys_positions 中配置映射，请先在权限治理中心配置"
+            );
         }
 
         Optional<UserRecord> existing = findUser(safeTenant, idSource, externalId);
         if (existing.isPresent()) {
             UserRecord u = existing.get();
-            String nextPos = validIdpPosition != null ? validIdpPosition : u.positionCode();
-            String nextDept = syncDisplayDeptPath ? safeDisplayDept : u.deptPath();
             boolean nameChanged = !Objects.equals(u.realName(), realName);
-            boolean deptChanged = !Objects.equals(u.deptPath(), nextDept);
-            boolean positionChanged = !Objects.equals(u.positionCode(), nextPos);
+            boolean positionChanged = !Objects.equals(u.positionCode(), validIdpPosition);
             boolean lastLoginStale = u.lastLoginAt() == null
                     || Duration.between(u.lastLoginAt(), Instant.now()).compareTo(Duration.ofMinutes(5)) >= 0;
-            if (!nameChanged && !deptChanged && !positionChanged && !lastLoginStale) {
+            if (!nameChanged && !positionChanged && !lastLoginStale) {
                 return u;
             }
             jdbcTemplate.update(
-                    "UPDATE sys_users SET real_name = ?, dept_path = ?, position_code = ?, " +
+                    "UPDATE sys_users SET real_name = ?, position_code = ?, " +
                     "authz_version = authz_version + ?, last_login_at = NOW() " +
                     "WHERE tenant_id = ? AND id = ?",
-                    realName, nextDept, nextPos, positionChanged ? 1 : 0, safeTenant, u.id()
+                    realName, validIdpPosition, positionChanged ? 1 : 0, safeTenant, u.id()
             );
             return findUserById(safeTenant, u.id()).orElse(u);
         }
@@ -225,39 +223,29 @@ public class IdentityMapper {
         Optional<UserRecord> sameNameExisting = findUserByRealName(safeTenant, idSource, realName);
         if (sameNameExisting.isPresent()) {
             UserRecord u = sameNameExisting.get();
-            String nextPos = validIdpPosition != null ? validIdpPosition : u.positionCode();
-            String nextDept = syncDisplayDeptPath ? safeDisplayDept : u.deptPath();
-            boolean positionChanged = !Objects.equals(u.positionCode(), nextPos);
+            boolean positionChanged = !Objects.equals(u.positionCode(), validIdpPosition);
             jdbcTemplate.update(
-                    "UPDATE sys_users SET external_id = ?, real_name = ?, dept_path = ?, position_code = ?, " +
+                    "UPDATE sys_users SET external_id = ?, real_name = ?, position_code = ?, " +
                     "authz_version = authz_version + ?, last_login_at = NOW() " +
                     "WHERE tenant_id = ? AND id = ?",
-                    externalId, realName, nextDept, nextPos, positionChanged ? 1 : 0, safeTenant, u.id()
+                    externalId, realName, validIdpPosition, positionChanged ? 1 : 0, safeTenant, u.id()
             );
             return findUserById(safeTenant, u.id()).orElse(u);
         }
 
-        String resolvedPosition = validIdpPosition != null ? validIdpPosition : "STAFF";
         UUID newId = UUID.randomUUID();
-        String insertSql = "INSERT INTO sys_users (id, tenant_id, external_id, id_source, real_name, dept_path, " +
+        String insertSql = "INSERT INTO sys_users (id, tenant_id, external_id, id_source, real_name, " +
                            "is_active, position_code, authz_version, last_login_at, created_at) " +
-                           "VALUES (?, ?, ?, ?, ?, ?, TRUE, ?, 1, NOW(), NOW()) " +
+                           "VALUES (?, ?, ?, ?, ?, TRUE, ?, 1, NOW(), NOW()) " +
                            "ON CONFLICT (tenant_id, id_source, external_id) DO NOTHING";
         int inserted = jdbcTemplate.update(
-                insertSql, newId, safeTenant, externalId, idSource, realName, safeDisplayDept, resolvedPosition
+                insertSql, newId, safeTenant, externalId, idSource, realName, validIdpPosition
         );
         if (inserted > 0) {
             return findUserById(safeTenant, newId).orElseThrow();
         }
         return findUser(safeTenant, idSource, externalId)
                 .orElseThrow(() -> new IllegalStateException("用户并发建档后读取失败: " + externalId));
-    }
-
-    public void updateUserDisplayDeptPath(String tenantId, UUID userId, String primaryDeptPath) {
-        jdbcTemplate.update(
-                "UPDATE sys_users SET dept_path = ? WHERE tenant_id = ? AND id = ?",
-                primaryDeptPath == null ? "" : primaryDeptPath.trim(), tenantId, userId
-        );
     }
 
     public long incrementUserAuthzVersion(String tenantId, UUID userId) {
@@ -354,21 +342,26 @@ public class IdentityMapper {
         return list.isEmpty() ? Optional.empty() : Optional.of(list.getFirst());
     }
 
-    /** 查询员工全部持久化的 source='IDP' 部门关系（含已停用部门，用于与上游 IdP 声明做精准差量比对） */
-    public List<UserDepartmentRecord> listPersistedIdpUserDepartments(String tenantId, UUID userId) {
+    /** 查询员工全部持久化部门关系（含已停用部门，用于与上游 IdP 声明做精准差量比对） */
+    public List<UserDepartmentRecord> listPersistedUserDepartments(String tenantId, UUID userId) {
         String sql = "SELECT ud.id, ud.tenant_id, ud.user_id, ud.department_id, " +
                      "COALESCE(d.path, ud.dept_path) AS dept_path, " +
-                     "ud.is_primary, ud.source, ud.expires_at, ud.granted_by, ud.created_at " +
+                     "ud.is_primary, ud.created_at " +
                      "FROM sys_user_departments ud " +
                      "LEFT JOIN sys_departments d ON d.tenant_id = ud.tenant_id AND d.id = ud.department_id " +
-                     "WHERE ud.tenant_id = ? AND ud.user_id = ? AND ud.source = 'IDP' " +
+                     "WHERE ud.tenant_id = ? AND ud.user_id = ? " +
                      "ORDER BY ud.is_primary DESC, ud.created_at ASC";
         return jdbcTemplate.query(sql, userDeptRowMapper, tenantId, userId);
     }
 
-    /** 同步企业 IdP 下发的员工多部门归属（比对全部持久化 source='IDP' 记录，保留独立 MANUAL 授权） */
+    /** 同步企业 IdP 下发的员工多部门归属与主部门标记（变更部门集合或主部门切换均触发重建） */
     @Transactional
-    public boolean syncIdpUserDepartments(String tenantId, UUID userId, List<String> idpDeptPaths) {
+    public boolean syncIdpUserDepartments(
+            String tenantId,
+            UUID userId,
+            List<String> idpDeptPaths,
+            String primaryDeptPath
+    ) {
         List<String> normalizedPaths = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
         if (idpDeptPaths != null) {
@@ -379,25 +372,47 @@ public class IdentityMapper {
                 }
             }
         }
-        List<UserDepartmentRecord> existingIdp = listPersistedIdpUserDepartments(tenantId, userId);
-        List<String> existingIdpPaths = existingIdp.stream().map(UserDepartmentRecord::deptPath).toList();
-        boolean primaryAligned = normalizedPaths.isEmpty()
-                || (existingIdp.size() == normalizedPaths.size() && existingIdp.getFirst().isPrimary());
-        if (existingIdpPaths.equals(normalizedPaths) && primaryAligned) {
+        String normPrimary = normalizeDeptPath(primaryDeptPath);
+        if ("/".equals(normPrimary)) {
+            normPrimary = null;
+        }
+
+        List<UserDepartmentRecord> existing = listPersistedUserDepartments(tenantId, userId);
+        boolean unchanged = existing.size() == normalizedPaths.size();
+        if (unchanged) {
+            Map<String, Boolean> existingPrimaryByPath = new LinkedHashMap<>();
+            for (UserDepartmentRecord rec : existing) {
+                String existingNorm = normalizeDeptPath(rec.deptPath());
+                if (existingNorm != null) {
+                    existingPrimaryByPath.put(existingNorm, rec.isPrimary());
+                }
+            }
+            for (String path : normalizedPaths) {
+                Boolean wasPrimary = existingPrimaryByPath.get(path);
+                boolean expectPrimary = normPrimary != null && path.equals(normPrimary);
+                if (wasPrimary == null || wasPrimary != expectPrimary) {
+                    unchanged = false;
+                    break;
+                }
+            }
+        }
+        if (unchanged) {
             return false;
         }
+
         jdbcTemplate.update(
-                "DELETE FROM sys_user_departments WHERE tenant_id = ? AND user_id = ? AND source = 'IDP'",
+                "DELETE FROM sys_user_departments WHERE tenant_id = ? AND user_id = ?",
                 tenantId, userId
         );
-        for (int i = 0; i < normalizedPaths.size(); i++) {
-            DepartmentRecord dept = ensureDepartmentPath(tenantId, normalizedPaths.get(i));
+        for (String path : normalizedPaths) {
+            DepartmentRecord dept = ensureDepartmentPath(tenantId, path);
+            boolean isPrimary = normPrimary != null && dept.path().equals(normPrimary);
             jdbcTemplate.update(
-                    "INSERT INTO sys_user_departments (id, tenant_id, user_id, department_id, dept_path, is_primary, source, expires_at, granted_by, created_at) " +
-                    "VALUES (?, ?, ?, ?, ?, ?, 'IDP', NULL, 'oidc:sync', NOW()) " +
-                    "ON CONFLICT (tenant_id, user_id, department_id, source) DO UPDATE " +
-                    "SET dept_path = EXCLUDED.dept_path, is_primary = EXCLUDED.is_primary, expires_at = NULL",
-                    UUID.randomUUID(), tenantId, userId, dept.id(), dept.path(), i == 0
+                    "INSERT INTO sys_user_departments (id, tenant_id, user_id, department_id, dept_path, is_primary, created_at) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, NOW()) " +
+                    "ON CONFLICT (tenant_id, user_id, department_id) DO UPDATE " +
+                    "SET dept_path = EXCLUDED.dept_path, is_primary = EXCLUDED.is_primary",
+                    UUID.randomUUID(), tenantId, userId, dept.id(), dept.path(), isPrimary
             );
         }
         return true;
@@ -405,19 +420,19 @@ public class IdentityMapper {
 
     public List<UserDepartmentRecord> listActiveUserDepartments(String tenantId, UUID userId) {
         String sql = "SELECT ud.id, ud.tenant_id, ud.user_id, ud.department_id, d.path AS dept_path, " +
-                     "ud.is_primary, ud.source, ud.expires_at, ud.granted_by, ud.created_at " +
+                     "ud.is_primary, ud.created_at " +
                      "FROM sys_user_departments ud " +
                      "JOIN sys_departments d ON d.tenant_id = ud.tenant_id AND d.id = ud.department_id " +
                      "WHERE ud.tenant_id = ? AND ud.user_id = ? " +
                      "  AND d.status = 'ACTIVE' " +
-                     "  AND (ud.expires_at IS NULL OR ud.expires_at > NOW()) " +
                      "ORDER BY ud.is_primary DESC, ud.created_at ASC";
         return jdbcTemplate.query(sql, userDeptRowMapper, tenantId, userId);
     }
 
     public Optional<PositionRecord> findPosition(String tenantId, String positionCode) {
         List<PositionRecord> list = jdbcTemplate.query(
-                "SELECT tenant_id, position_code, position_name, rank_order, default_clearance_level, description, updated_at " +
+                "SELECT tenant_id, position_code, position_name, rank_order, default_clearance_level, " +
+                "min_allowed_clearance, max_allowed_clearance, description, updated_at " +
                 "FROM sys_positions WHERE tenant_id = ? AND position_code = ?",
                 positionRowMapper, tenantId, positionCode
         );
@@ -434,7 +449,10 @@ public class IdentityMapper {
     }
 
     public Optional<RoleRecord> findRole(String tenantId, String roleCode) {
-        String sql = "SELECT tenant_id, role_code, role_name, data_scope, permissions::text AS permissions " +
+        String sql = "SELECT tenant_id, role_code, role_name, data_scope, permissions::text AS permissions, " +
+                     "allowed_positions::text AS allowed_positions, " +
+                     "allowed_dept_prefixes::text AS allowed_dept_prefixes, " +
+                     "primary_dept_only " +
                      "FROM sys_roles WHERE tenant_id = ? AND role_code = ?";
         List<RoleRecord> list = jdbcTemplate.query(sql, roleRowMapper, tenantId, roleCode);
         return list.isEmpty() ? Optional.empty() : Optional.of(list.getFirst());
@@ -447,7 +465,10 @@ public class IdentityMapper {
         String safeTenant = (tenantId == null || tenantId.isBlank()) ? DEFAULT_TENANT_ID : tenantId.trim();
         List<String> distinctCodes = new ArrayList<>(new LinkedHashSet<>(roleCodes));
         String placeholders = String.join(",", Collections.nCopies(distinctCodes.size(), "?"));
-        String sql = "SELECT tenant_id, role_code, role_name, data_scope, permissions::text AS permissions " +
+        String sql = "SELECT tenant_id, role_code, role_name, data_scope, permissions::text AS permissions, " +
+                     "allowed_positions::text AS allowed_positions, " +
+                     "allowed_dept_prefixes::text AS allowed_dept_prefixes, " +
+                     "primary_dept_only " +
                      "FROM sys_roles WHERE tenant_id = ? AND role_code IN (" + placeholders + ")";
         Object[] args = new Object[distinctCodes.size() + 1];
         args[0] = safeTenant;
@@ -457,18 +478,18 @@ public class IdentityMapper {
         return jdbcTemplate.query(sql, roleRowMapper, args);
     }
 
-    private void ensureDefaultPositionsIfMissing(String tenantId) {
+    public void ensureDefaultPositionsIfMissing(String tenantId) {
         if (findPosition(tenantId, "STAFF").isPresent()) {
             return;
         }
         jdbcTemplate.update(
-                "INSERT INTO sys_positions (tenant_id, position_code, position_name, rank_order, default_clearance_level, description) VALUES " +
-                "(?, 'INTERN_EXT', '实习 / 外部协作', 10, 1, '全员公开 L1'), " +
-                "(?, 'STAFF',      '普通员工',       20, 2, '部门内部 L1-L2'), " +
-                "(?, 'SUPERVISOR', '部门主管',       30, 2, '默认 L2，可按职级动态配置'), " +
-                "(?, 'MANAGER',    '部门经理',       40, 3, '管理层机密 L1-L3'), " +
-                "(?, 'DIRECTOR',   '总监',           50, 3, '中心及下属部门 L1-L3'), " +
-                "(?, 'EXECUTIVE',  '公司高管',       60, 4, '高层核心机密 L1-L4') " +
+                "INSERT INTO sys_positions (tenant_id, position_code, position_name, rank_order, default_clearance_level, min_allowed_clearance, max_allowed_clearance, description) VALUES " +
+                "(?, 'INTERN_EXT', '实习 / 外部协作', 10, 1, 1, 1, '全员公开 L1'), " +
+                "(?, 'STAFF',      '普通员工',       20, 2, 1, 2, '部门内部 L1-L2'), " +
+                "(?, 'SUPERVISOR', '部门主管',       30, 2, 2, 3, '默认 L2，可按职级动态配置'), " +
+                "(?, 'MANAGER',    '部门经理',       40, 3, 3, 3, '管理层机密 L1-L3'), " +
+                "(?, 'DIRECTOR',   '总监',           50, 3, 3, 3, '中心及下属部门 L1-L3'), " +
+                "(?, 'EXECUTIVE',  '公司高管',       60, 4, 4, 4, '高层核心机密 L1-L4') " +
                 "ON CONFLICT (tenant_id, position_code) DO NOTHING",
                 tenantId, tenantId, tenantId, tenantId, tenantId, tenantId
         );

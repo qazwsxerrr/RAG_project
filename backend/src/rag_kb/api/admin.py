@@ -29,6 +29,7 @@ from rag_kb.core.authz.sql_filters import build_kb_access_condition
 from rag_kb.core.constants import (
     ACTION_TO_PERMISSION,
     DATA_SCOPE_WEIGHTS,
+    KNOWN_PERMISSION_VALUES,
     DataScope,
     KbAction,
     Permissions,
@@ -62,6 +63,8 @@ class UpsertPositionReq(BaseModel):
     positionName: str = Field(..., min_length=1, max_length=100)
     rankOrder: int = Field(default=20, ge=0, le=9999)
     defaultClearanceLevel: int = Field(..., ge=1, le=4)
+    minAllowedClearance: Optional[int] = Field(default=None, ge=1, le=4)
+    maxAllowedClearance: Optional[int] = Field(default=None, ge=1, le=4)
     description: Optional[str] = None
     reason: Optional[str] = None
 
@@ -71,6 +74,9 @@ class UpsertRoleReq(BaseModel):
     roleName: str = Field(..., min_length=1, max_length=100)
     dataScope: str
     permissions: List[str] = Field(default_factory=list)
+    allowedPositions: Optional[List[str]] = None
+    allowedDeptPrefixes: Optional[List[str]] = None
+    primaryDeptOnly: Optional[bool] = None
     reason: Optional[str] = None
 
 
@@ -220,6 +226,7 @@ def _serialize_position(p: Position) -> Dict[str, Any]:
     return {
         "tenantId": p.tenant_id, "positionCode": p.position_code, "positionName": p.position_name,
         "rankOrder": int(p.rank_order), "defaultClearanceLevel": int(p.default_clearance_level),
+        "minAllowedClearance": int(p.min_allowed_clearance), "maxAllowedClearance": int(p.max_allowed_clearance),
         "description": p.description, "updatedAt": _iso(p.updated_at),
     }
 
@@ -228,6 +235,9 @@ def _serialize_role(r: Role) -> Dict[str, Any]:
     return {
         "tenantId": r.tenant_id, "roleCode": r.role_code, "roleName": r.role_name,
         "dataScope": r.data_scope, "permissionsJson": json.dumps(r.permissions or [], ensure_ascii=False),
+        "allowedPositions": list(r.allowed_positions or ["*"]),
+        "allowedDeptPrefixes": list(r.allowed_dept_prefixes or ["*"]),
+        "primaryDeptOnly": bool(r.primary_dept_only),
     }
 
 
@@ -286,7 +296,7 @@ async def upsert_position(
     existing = await db.get(Position, (user.tenant_id, code))
     old_level = int(existing.default_clearance_level) if existing else None
 
-    # 防间接自提权：禁止管理员上调自身所属职级的默认密级
+    # 防间接自提权：优先拦截管理员上调自身所属职级默认密级或上限
     if code == user.position_code.upper():
         baseline = old_level if old_level is not None else int(user.effective_clearance)
         if req.defaultClearanceLevel > baseline:
@@ -294,25 +304,61 @@ async def upsert_position(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"【防间接自提权拦截】禁止将自身所属职级 [{code}] 的默认密级从 L{baseline} 上调至 L{req.defaultClearanceLevel}",
             )
+        if existing is not None and req.maxAllowedClearance is not None and int(req.maxAllowedClearance) > int(existing.max_allowed_clearance):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"【防间接自提权拦截】禁止放宽自身所属职级 [{code}] 的最高允许密级上限",
+            )
+
+    if existing is None and (req.minAllowedClearance is None or req.maxAllowedClearance is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="新增职级必须明确指定 minAllowedClearance 与 maxAllowedClearance (1~4)",
+        )
+
+    min_allowed = (
+        int(req.minAllowedClearance)
+        if req.minAllowedClearance is not None
+        else int(existing.min_allowed_clearance)
+    )
+    max_allowed = (
+        int(req.maxAllowedClearance)
+        if req.maxAllowedClearance is not None
+        else int(existing.max_allowed_clearance)
+    )
+    if min_allowed > max_allowed or not (min_allowed <= req.defaultClearanceLevel <= max_allowed):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"【密级边界越界】职级 [{code}] 默认密级 L{req.defaultClearanceLevel} 必须落在允许区间 [L{min_allowed}, L{max_allowed}] 内",
+        )
 
     now_utc = datetime.now(timezone.utc)
     if existing:
         existing.position_name, existing.rank_order = name, req.rankOrder
-        existing.default_clearance_level, existing.description, existing.updated_at = (
-            req.defaultClearanceLevel, req.description, now_utc,
-        )
+        existing.default_clearance_level = req.defaultClearanceLevel
+        existing.min_allowed_clearance = min_allowed
+        existing.max_allowed_clearance = max_allowed
+        existing.description, existing.updated_at = req.description, now_utc
         pos = existing
     else:
         pos = Position(
             tenant_id=user.tenant_id, position_code=code, position_name=name,
             rank_order=req.rankOrder, default_clearance_level=req.defaultClearanceLevel,
+            min_allowed_clearance=min_allowed, max_allowed_clearance=max_allowed,
             description=req.description, updated_at=now_utc,
         )
         db.add(pos)
 
     await _commit_policy_change(
         db, user, "ADMIN_POSITION_UPSERT", code,
-        {"position_code": code, "previous_clearance": old_level, "new_clearance": req.defaultClearanceLevel, "reason": req.reason},
+        {
+            "position_code": code,
+            "previous_clearance": old_level,
+            "new_clearance": req.defaultClearanceLevel,
+            "min_allowed_clearance": min_allowed,
+            "max_allowed_clearance": max_allowed,
+            "reason": req.reason,
+        },
     )
     return _serialize_position(pos)
 
@@ -340,35 +386,135 @@ async def upsert_role(
 ):
     _require_any_perm(user, Permissions.SYSTEM_ADMIN)
     code, name, scope = req.roleCode.strip(), req.roleName.strip(), req.dataScope.strip().upper()
+    if code == "kb_admin":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="角色 [kb_admin] 已下线，禁止创建或恢复")
     if scope not in VALID_DATA_SCOPES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"无效的 dataScope: {scope}")
 
     clean_perms = sorted({str(p).strip() for p in (req.permissions or []) if str(p).strip()})
+    unknown_perms = [p for p in clean_perms if p not in KNOWN_PERMISSION_VALUES]
+    if unknown_perms:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"包含非白名单或已下线的权限点: {unknown_perms}",
+        )
     if Permissions.ALL.value not in (user.perms or []):
         missing = [p for p in clean_perms if p not in (user.perms or [])]
         if missing:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"【防越权授信拦截】禁止授予自身未持有的权限点: {missing}")
 
     existing = await db.get(Role, (user.tenant_id, code))
+
+    raw_positions = req.allowedPositions if req.allowedPositions is not None else (
+        list(existing.allowed_positions or ["*"]) if existing is not None else ["*"]
+    )
+    clean_allowed_positions: List[str] = []
+    for raw_pos in raw_positions:
+        pos_tok = str(raw_pos).strip()
+        if not pos_tok:
+            continue
+        norm_tok = "*" if pos_tok == "*" else pos_tok.upper()
+        if norm_tok not in clean_allowed_positions:
+            clean_allowed_positions.append(norm_tok)
+    if not clean_allowed_positions:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="allowedPositions 不能为空（可用 [\"*\"] 表示不限职级）")
+    if "*" not in clean_allowed_positions:
+        valid_pos_codes = set(
+            (await db.execute(select(Position.position_code).where(Position.tenant_id == user.tenant_id))).scalars().all()
+        )
+        invalid_pos = [p for p in clean_allowed_positions if p not in valid_pos_codes]
+        if invalid_pos:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"allowedPositions 包含未注册职级: {invalid_pos}")
+    else:
+        clean_allowed_positions = ["*"]
+
+    raw_prefixes = req.allowedDeptPrefixes if req.allowedDeptPrefixes is not None else (
+        list(existing.allowed_dept_prefixes or ["*"]) if existing is not None else ["*"]
+    )
+    clean_allowed_prefixes: List[str] = []
+    for raw_pref in raw_prefixes:
+        pref_tok = str(raw_pref).strip()
+        if not pref_tok:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="allowedDeptPrefixes 不能包含空字符串")
+        if pref_tok == "*":
+            if "*" not in clean_allowed_prefixes:
+                clean_allowed_prefixes.append("*")
+            continue
+        if not pref_tok.startswith("/"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"无效的部门前缀 [{pref_tok}]（必须为 * 或以 / 开头）")
+        norm_pref = normalize_dept_path(pref_tok)
+        if not norm_pref:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"无效的部门前缀 [{pref_tok}]")
+        if norm_pref not in clean_allowed_prefixes:
+            clean_allowed_prefixes.append(norm_pref)
+    if not clean_allowed_prefixes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="allowedDeptPrefixes 不能为空（可用 [\"*\"] 表示不限部门）")
+    if "*" in clean_allowed_prefixes:
+        clean_allowed_prefixes = ["*"]
+
+    primary_dept_only = bool(req.primaryDeptOnly) if req.primaryDeptOnly is not None else (
+        bool(existing.primary_dept_only) if existing is not None else False
+    )
+
     if code in (user.roles or []) and existing is not None:
         if DATA_SCOPE_WEIGHTS.get(scope, 0) > DATA_SCOPE_WEIGHTS.get(existing.data_scope, 0):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"【防间接自提权拦截】禁止扩大自身持有角色 [{code}] 的数据范围 ({existing.data_scope} -> {scope})",
             )
+        old_pos_set = {str(p).strip().upper() for p in (existing.allowed_positions or ["*"]) if str(p).strip()}
+        if "*" not in old_pos_set and (
+            "*" in clean_allowed_positions or any(p not in old_pos_set for p in clean_allowed_positions)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"【防间接自提权拦截】禁止放宽自身持有角色 [{code}] 的允许职级集合",
+            )
+        old_pref_list = [str(p).strip() for p in (existing.allowed_dept_prefixes or ["*"]) if str(p).strip()]
+        if "*" not in old_pref_list:
+            if "*" in clean_allowed_prefixes or any(
+                not any(is_path_under_prefix(np, normalize_dept_path(op)) for op in old_pref_list if normalize_dept_path(op))
+                for np in clean_allowed_prefixes
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"【防间接自提权拦截】禁止放宽自身持有角色 [{code}] 的允许部门前缀",
+                )
+        if bool(existing.primary_dept_only) and not primary_dept_only:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"【防间接自提权拦截】禁止解除自身持有角色 [{code}] 的 primaryDeptOnly 主部门限制",
+            )
 
     prev_scope = existing.data_scope if existing else None
     prev_perms = list(existing.permissions or []) if existing else []
     if existing:
         existing.role_name, existing.data_scope, existing.permissions = name, scope, clean_perms
+        existing.allowed_positions = clean_allowed_positions
+        existing.allowed_dept_prefixes = clean_allowed_prefixes
+        existing.primary_dept_only = primary_dept_only
         role = existing
     else:
-        role = Role(tenant_id=user.tenant_id, role_code=code, role_name=name, data_scope=scope, permissions=clean_perms)
+        role = Role(
+            tenant_id=user.tenant_id, role_code=code, role_name=name, data_scope=scope,
+            permissions=clean_perms, allowed_positions=clean_allowed_positions,
+            allowed_dept_prefixes=clean_allowed_prefixes, primary_dept_only=primary_dept_only,
+        )
         db.add(role)
 
     await _commit_policy_change(
         db, user, "ADMIN_ROLE_UPSERT", code,
-        {"role_code": code, "previous_scope": prev_scope, "new_scope": scope, "previous_perms": prev_perms, "new_perms": clean_perms, "reason": req.reason},
+        {
+            "role_code": code,
+            "previous_scope": prev_scope,
+            "new_scope": scope,
+            "previous_perms": prev_perms,
+            "new_perms": clean_perms,
+            "allowed_positions": clean_allowed_positions,
+            "allowed_dept_prefixes": clean_allowed_prefixes,
+            "primary_dept_only": primary_dept_only,
+            "reason": req.reason,
+        },
     )
     return _serialize_role(role)
 
@@ -391,7 +537,7 @@ async def list_synced_users(
     ).scalars().all()
     dept_rows = (
         await db.execute(
-            select(UserDepartment.user_id, Department.path)
+            select(UserDepartment.user_id, Department.path, UserDepartment.is_primary)
             .select_from(UserDepartment)
             .join(
                 Department,
@@ -403,16 +549,18 @@ async def list_synced_users(
             .where(
                 UserDepartment.tenant_id == user.tenant_id,
                 Department.status == "ACTIVE",
-                or_(UserDepartment.expires_at.is_(None), UserDepartment.expires_at > func.now()),
             )
             .order_by(UserDepartment.is_primary.desc(), Department.path.asc())
         )
     ).all()
     depts_by_user: Dict[uuid.UUID, List[str]] = {}
-    for uid, raw_path in dept_rows:
+    primary_by_user: Dict[uuid.UUID, str] = {}
+    for uid, raw_path, is_primary in dept_rows:
         norm = normalize_dept_path(raw_path)
         if not norm:
             continue
+        if is_primary and uid not in primary_by_user:
+            primary_by_user[uid] = norm
         bucket = depts_by_user.setdefault(uid, [])
         if norm not in bucket:
             bucket.append(norm)
@@ -424,7 +572,7 @@ async def list_synced_users(
             "positionName": pos_map[u.position_code].position_name if u.position_code in pos_map else u.position_code,
             "effectiveClearanceLevel": int(pos_map[u.position_code].default_clearance_level) if u.position_code in pos_map else 2,
             "authzVersion": int(u.authz_version),
-            "primaryDeptPath": (depts_by_user.get(u.id) or [""])[0],
+            "primaryDeptPath": primary_by_user.get(u.id, ""),
             "effectiveDeptPaths": depts_by_user.get(u.id, []),
             "lastLoginAt": _iso(u.last_login_at), "createdAt": _iso(u.created_at),
         }
@@ -583,25 +731,29 @@ def _is_org_wide_kb_operator(user: EffectiveAuthzContext) -> bool:
 
 
 def _is_dept_in_manage_scope(user: EffectiveAuthzContext, target_dept_path: Optional[str]) -> bool:
-    """校验目标部门路径是否落在操作者 MANAGE 组织范围内（严格按路径段前缀匹配）"""
+    """校验目标部门路径是否落在操作者 MANAGE 组织范围内（严格按路径段前缀与角色部门前缀交集匹配）"""
     if _is_org_wide_kb_operator(user):
         return True
     norm_target = normalize_dept_path(target_dept_path)
     if not norm_target:
         return False
     manage_scope = user.scope_for_action(KbAction.MANAGE.value)
-    user_depts = [normalize_dept_path(p) for p in (user.dept_paths or []) if normalize_dept_path(p)]
-    if not user_depts:
+    manage_depts = [
+        normalize_dept_path(p)
+        for p in ((user.dept_paths_by_action or {}).get(KbAction.MANAGE.value) or [])
+        if normalize_dept_path(p)
+    ]
+    if not manage_depts:
         return False
     if manage_scope == DataScope.DEPT_AND_SUB.value:
-        return any(is_path_under_prefix(norm_target, p) for p in user_depts)
+        return any(is_path_under_prefix(norm_target, p) for p in manage_depts)
     return False
 
 
 async def _load_user_effective_dept_paths(
     db: AsyncSession, tenant_id: str, target_user: SysUser
 ) -> List[str]:
-    """加载目标员工当前有效的全部归属部门路径（与正式鉴权严格一致：仅认 ACTIVE 部门的未过期归属，不做展示字段兜底）"""
+    """加载目标员工当前有效的全部归属部门路径（仅认 ACTIVE 部门归属，不做展示字段兜底）"""
     rows = (
         await db.execute(
             select(Department.path)
@@ -617,7 +769,6 @@ async def _load_user_effective_dept_paths(
                 UserDepartment.tenant_id == tenant_id,
                 UserDepartment.user_id == target_user.id,
                 Department.status == "ACTIVE",
-                or_(UserDepartment.expires_at.is_(None), UserDepartment.expires_at > func.now()),
             )
             .order_by(UserDepartment.is_primary.desc(), UserDepartment.created_at.asc())
         )

@@ -18,7 +18,6 @@
         { "name": "developer", "path": "/roles/developer" },
         { "name": "accountant", "path": "/roles/accountant" },
         { "name": "employee", "path": "/roles/employee" },
-        { "name": "kb_admin", "path": "/roles/kb_admin" },
         { "name": "security_admin", "path": "/roles/security_admin" },
         { "name": "dept_manager", "path": "/roles/dept_manager" },
         { "name": "executive", "path": "/roles/executive" }
@@ -198,7 +197,7 @@
       "firstName": "李",
       "lastName": "兼职",
       "email": "multi@corp.local",
-      "attributes": { "position_code": ["STAFF"] },
+      "attributes": { "dept_path": ["/总公司/研发中心/技术部"], "position_code": ["STAFF"] },
       "groups": [
         "/roles/developer",
         "/roles/employee",
